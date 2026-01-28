@@ -14,6 +14,10 @@ from .config import settings
 from .core import HttpFetcher
 from .domain_manager import DomainManager
 from .frontier import CrawlTask, Frontier
+from .output import StreamingOutputWriter
+
+# Precompiled regex pattern for link extraction
+_HREF_PATTERN = re.compile(r'href\s*=\s*["\']([^"\']+)["\']', re.IGNORECASE)
 
 
 def normalize_url(url: str) -> str:
@@ -41,10 +45,8 @@ def normalize_url(url: str) -> str:
 def extract_links(html: str, base_url: str) -> list[str]:
     """Extract links from HTML content."""
     links = []
-    # Improved regex: handles whitespace around =
-    pattern = re.compile(r'href\s*=\s*["\']([^"\']+)["\']', re.IGNORECASE)
 
-    for match in pattern.finditer(html):
+    for match in _HREF_PATTERN.finditer(html):
         href = match.group(1).strip()
 
         # Skip non-HTTP schemes and fragments
@@ -77,6 +79,7 @@ class CrawlerEngine:
         use_browser: bool = False,
         delay: float = 1.0,
         concurrency: int = 5,
+        output_writer: StreamingOutputWriter | None = None,
     ):
         self.start_url = start_url
         self.max_pages = max_pages
@@ -84,6 +87,7 @@ class CrawlerEngine:
         self.same_domain = same_domain
         self.use_browser = use_browser
         self.concurrency = concurrency
+        self.output_writer = output_writer
 
         self.start_domain = urlparse(start_url).netloc
         self.frontier = Frontier()
@@ -101,6 +105,18 @@ class CrawlerEngine:
         self.results: list[dict] = []
         self.pages_crawled = 0
         self._running = False
+
+    async def __aenter__(self) -> "CrawlerEngine":
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        await self.close()
+
+    async def close(self):
+        """Close all resources."""
+        if hasattr(self.fetcher, 'close'):
+            await self.fetcher.close()
+        await self.domain_manager.close()
 
     def _is_valid_url(self, url: str) -> bool:
         """Check if URL should be crawled."""
@@ -193,7 +209,10 @@ class CrawlerEngine:
 
             result = await self._process_url(task)
             if result:
-                self.results.append(result)
+                if self.output_writer:
+                    self.output_writer.write_one(result)
+                else:
+                    self.results.append(result)
                 self.pages_crawled += 1
 
                 if not result.get("error"):
@@ -308,35 +327,57 @@ async def run_crawl(
     max_pages: int = 100,
     max_depth: int = 3,
     same_domain: bool = True,
-    output_dir: str = "crawl_results",
+    output_dir: str | None = "crawl_results",
+    output_file: str | None = None,
     output_format: str = "jsonl",
     use_browser: bool = False,
     delay: float = 1.0,
     concurrency: int = 5,
+    include_content: bool = True,
 ):
     """Run a crawl and save results."""
     typer.echo(f"Starting crawl from {start_url}")
     typer.echo(f"Max pages: {max_pages}, Max depth: {max_depth}, Concurrency: {concurrency}")
 
-    engine = CrawlerEngine(
-        start_url=start_url,
-        max_pages=max_pages,
-        max_depth=max_depth,
-        same_domain=same_domain,
-        use_browser=use_browser,
-        delay=delay,
-        concurrency=concurrency,
-    )
-
     start_time = time.time()
-    results = await engine.crawl()
-    elapsed = time.time() - start_time
 
-    typer.echo(f"\nCrawl complete: {len(results)} pages in {elapsed:.1f}s")
+    # Use streaming output if output_file is specified
+    if output_file:
+        with StreamingOutputWriter(output_file, include_content=include_content) as writer:
+            async with CrawlerEngine(
+                start_url=start_url,
+                max_pages=max_pages,
+                max_depth=max_depth,
+                same_domain=same_domain,
+                use_browser=use_browser,
+                delay=delay,
+                concurrency=concurrency,
+                output_writer=writer,
+            ) as engine:
+                await engine.crawl()
+                elapsed = time.time() - start_time
+                typer.echo(f"\nCrawl complete: {writer.count} pages in {elapsed:.1f}s")
+                typer.echo(f"Results saved to {output_file}")
+                stats = engine.frontier.stats()
+                typer.echo(f"Queue stats: {stats}")
+    else:
+        # Legacy mode: accumulate results in memory
+        async with CrawlerEngine(
+            start_url=start_url,
+            max_pages=max_pages,
+            max_depth=max_depth,
+            same_domain=same_domain,
+            use_browser=use_browser,
+            delay=delay,
+            concurrency=concurrency,
+        ) as engine:
+            results = await engine.crawl()
+            elapsed = time.time() - start_time
+            typer.echo(f"\nCrawl complete: {len(results)} pages in {elapsed:.1f}s")
 
-    writer = OutputWriter(output_dir, output_format)
-    writer.write(results)
+            if output_dir:
+                writer = OutputWriter(output_dir, output_format)
+                writer.write(results)
 
-    # Show stats
-    stats = engine.frontier.stats()
-    typer.echo(f"Queue stats: {stats}")
+            stats = engine.frontier.stats()
+            typer.echo(f"Queue stats: {stats}")

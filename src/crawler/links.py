@@ -10,15 +10,18 @@ import typer
 from .config import settings
 from .core import HttpFetcher
 
+# Precompiled regex patterns
+_LINK_PATTERN = re.compile(r'<a[^>]+href=["\']([^"\']+)["\'][^>]*>(.*?)</a>', re.IGNORECASE | re.DOTALL)
+_TAG_PATTERN = re.compile(r'<[^>]+>')
+
 
 def extract_links_from_html(html: str, base_url: str) -> list[dict]:
     """Extract all links from HTML with context."""
     links = []
-    pattern = re.compile(r'<a[^>]+href=["\']([^"\']+)["\'][^>]*>(.*?)</a>', re.IGNORECASE | re.DOTALL)
 
-    for match in pattern.finditer(html):
+    for match in _LINK_PATTERN.finditer(html):
         href = match.group(1)
-        text = re.sub(r'<[^>]+>', '', match.group(2)).strip()
+        text = _TAG_PATTERN.sub('', match.group(2)).strip()
 
         if href.startswith(('#', 'javascript:', 'mailto:', 'tel:', 'data:')):
             continue

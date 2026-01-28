@@ -89,25 +89,33 @@ def crawl(
     max_pages: int = typer.Option(100, "--max-pages", "-n", help="Maximum pages to crawl"),
     max_depth: int = typer.Option(3, "--max-depth", "-d", help="Maximum link depth"),
     same_domain: bool = typer.Option(True, "--same-domain/--any-domain", help="Stay on same domain"),
-    output: str = typer.Option("crawl_results", "-o", "--output", help="Output directory"),
-    output_format: str = typer.Option("jsonl", "--format", "-f", help="Output format: jsonl, sqlite, warc"),
+    output: str = typer.Option(None, "-o", "--output", help="Output file path (JSONL, streams results)"),
+    output_dir: str = typer.Option(None, "--output-dir", help="Output directory (legacy batch mode)"),
+    output_format: str = typer.Option("jsonl", "--format", "-f", help="Output format for --output-dir: jsonl, sqlite, warc"),
     js: bool = typer.Option(False, "--js", help="Use browser for all pages"),
     delay: float = typer.Option(1.0, "--delay", help="Delay between requests (seconds)"),
     concurrency: int = typer.Option(5, "--concurrency", "-c", help="Concurrent requests"),
+    no_content: bool = typer.Option(False, "--no-content", help="Save metadata only, exclude page content"),
 ):
     """Crawl a website starting from a URL."""
     from .crawl import run_crawl
+
+    # Default to output_dir if neither is specified
+    if output is None and output_dir is None:
+        output_dir = "crawl_results"
 
     asyncio.run(run_crawl(
         start_url=start_url,
         max_pages=max_pages,
         max_depth=max_depth,
         same_domain=same_domain,
-        output_dir=output,
+        output_file=output,
+        output_dir=output_dir if output is None else None,
         output_format=output_format,
         use_browser=js,
         delay=delay,
         concurrency=concurrency,
+        include_content=not no_content,
     ))
 
 
