@@ -52,6 +52,43 @@ These correspond to interactive elements in the accessibility tree.
 Respond with ONLY a JSON object for your action. No other text."""
 
 
+def parse_action(response_text: str) -> dict:
+    """Extract action JSON from Claude's response."""
+    text = response_text.strip()
+
+    # Method 1: Entire response is JSON
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+
+    # Method 2: JSON inside code block
+    code_block = re.search(r'```(?:json)?\s*(\{[\s\S]*?\})\s*```', text)
+    if code_block:
+        try:
+            return json.loads(code_block.group(1))
+        except json.JSONDecodeError:
+            pass
+
+    # Method 3: Extract nested JSON by bracket matching
+    depth = 0
+    start = -1
+    for i, char in enumerate(text):
+        if char == '{':
+            if depth == 0:
+                start = i
+            depth += 1
+        elif char == '}':
+            depth -= 1
+            if depth == 0 and start != -1:
+                try:
+                    return json.loads(text[start:i+1])
+                except json.JSONDecodeError:
+                    start = -1
+
+    return {"action": "fail", "reason": "Could not parse action"}
+
+
 @dataclass
 class AgentState:
     """State of the AI agent."""
@@ -283,16 +320,8 @@ Step {self.state.steps + 1}/{self.max_steps}"""
                 if self.verbose:
                     typer.echo(f"Action: {action_text}")
 
-                # Parse action
-                try:
-                    # Extract JSON from response
-                    json_match = re.search(r'\{[^{}]*\}', action_text, re.DOTALL)
-                    if json_match:
-                        action = json.loads(json_match.group())
-                    else:
-                        action = {"action": "fail", "reason": "Could not parse action"}
-                except json.JSONDecodeError:
-                    action = {"action": "fail", "reason": "Invalid JSON in response"}
+                # Parse action using improved parser
+                action = parse_action(action_text)
 
                 # Execute action
                 last_result = await self._execute_action(page, action)

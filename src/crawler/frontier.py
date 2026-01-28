@@ -4,9 +4,31 @@ import sqlite3
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlunparse, parse_qsl, urlencode
 
 from pybloom_live import ScalableBloomFilter
+
+
+def normalize_url(url: str) -> str:
+    """Normalize URL for deduplication (remove fragment, sort query params)."""
+    parsed = urlparse(url)
+
+    # Sort query parameters
+    query_params = parse_qsl(parsed.query)
+    sorted_query = urlencode(sorted(query_params))
+
+    # Normalize path (remove trailing slash except for root)
+    path = parsed.path.rstrip('/') or '/'
+
+    normalized = urlunparse((
+        parsed.scheme.lower(),
+        parsed.netloc.lower(),
+        path,
+        parsed.params,
+        sorted_query,
+        ''  # Remove fragment
+    ))
+    return normalized
 
 
 @dataclass
@@ -53,11 +75,15 @@ class Frontier:
 
     def add(self, task: CrawlTask) -> bool:
         """Add a URL to the frontier. Returns False if already seen."""
-        if task.url in self.seen:
+        # Normalize URL for deduplication
+        normalized_url = normalize_url(task.url)
+        task.url = normalized_url
+
+        if normalized_url in self.seen:
             return False
 
-        self.seen.add(task.url)
-        domain = urlparse(task.url).netloc
+        self.seen.add(normalized_url)
+        domain = urlparse(normalized_url).netloc
 
         try:
             self.conn.execute(
@@ -169,7 +195,7 @@ class Frontier:
 
     def is_seen(self, url: str) -> bool:
         """Check if URL was already seen."""
-        return url in self.seen
+        return normalize_url(url) in self.seen
 
     def close(self):
         """Close database connection."""

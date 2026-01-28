@@ -87,16 +87,16 @@ class DomainManager:
 
         state.robots_fetched = True
 
-    def is_allowed(self, url: str) -> bool:
-        """Check if URL is allowed by robots.txt."""
+    async def is_allowed(self, url: str) -> bool:
+        """Check if URL is allowed by robots.txt (async version)."""
         if not self.respect_robots:
             return True
 
-        domain = self._get_domain(url)
-        state = self._domains.get(domain)
+        # Ensure robots.txt is fetched before checking
+        state = await self.get_state(url)
 
-        if not state or not state.robots_parser:
-            return True
+        if not state.robots_parser:
+            return True  # No robots.txt means everything is allowed
 
         return state.robots_parser.is_allowed(self.user_agent, url)
 

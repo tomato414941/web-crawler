@@ -5,8 +5,9 @@ import json
 import re
 import time
 from pathlib import Path
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urljoin, urlparse, urlunparse, parse_qsl, urlencode
 
+import httpx
 import typer
 
 from .config import settings
@@ -15,20 +16,51 @@ from .domain_manager import DomainManager
 from .frontier import CrawlTask, Frontier
 
 
+def normalize_url(url: str) -> str:
+    """Normalize URL for deduplication (remove fragment, sort query params)."""
+    parsed = urlparse(url)
+
+    # Sort query parameters
+    query_params = parse_qsl(parsed.query)
+    sorted_query = urlencode(sorted(query_params))
+
+    # Normalize path (remove trailing slash except for root)
+    path = parsed.path.rstrip('/') or '/'
+
+    normalized = urlunparse((
+        parsed.scheme.lower(),
+        parsed.netloc.lower(),
+        path,
+        parsed.params,
+        sorted_query,
+        ''  # Remove fragment
+    ))
+    return normalized
+
+
 def extract_links(html: str, base_url: str) -> list[str]:
     """Extract links from HTML content."""
     links = []
-    # Simple regex for href attributes
-    pattern = re.compile(r'href=["\']([^"\']+)["\']', re.IGNORECASE)
+    # Improved regex: handles whitespace around =
+    pattern = re.compile(r'href\s*=\s*["\']([^"\']+)["\']', re.IGNORECASE)
 
     for match in pattern.finditer(html):
-        href = match.group(1)
-        if href.startswith(('#', 'javascript:', 'mailto:', 'tel:')):
+        href = match.group(1).strip()
+
+        # Skip non-HTTP schemes and fragments
+        if href.startswith(('#', 'javascript:', 'mailto:', 'tel:', 'data:')):
             continue
+
+        # Handle protocol-relative URLs
+        if href.startswith('//'):
+            href = 'https:' + href
+
         absolute_url = urljoin(base_url, href)
+
         # Only keep http(s) URLs
         if absolute_url.startswith(('http://', 'https://')):
-            links.append(absolute_url)
+            normalized = normalize_url(absolute_url)
+            links.append(normalized)
 
     return list(set(links))
 
@@ -80,7 +112,7 @@ class CrawlerEngine:
         """Process a single URL."""
         url = task.url
 
-        if not self.domain_manager.is_allowed(url):
+        if not await self.domain_manager.is_allowed(url):
             self.frontier.mark_done(url)
             return None
 
@@ -115,13 +147,36 @@ class CrawlerEngine:
             self.frontier.mark_done(url)
             return result
 
+        except httpx.TimeoutException:
+            # Timeout: retryable
+            self.domain_manager.record_error(url)
+            self.frontier.mark_failed(url)
+            return {"url": url, "error": "timeout", "retryable": True, "depth": task.depth}
+
+        except httpx.ConnectError:
+            # Connection error: retryable
+            self.domain_manager.record_error(url)
+            self.frontier.mark_failed(url)
+            return {"url": url, "error": "connection_error", "retryable": True, "depth": task.depth}
+
+        except httpx.HTTPStatusError as e:
+            # HTTP error: 4xx is permanent, 5xx is retryable
+            status_code = e.response.status_code
+            if 400 <= status_code < 500:
+                self.frontier.mark_done(url)  # Permanent error
+            else:
+                self.domain_manager.record_error(url)
+                self.frontier.mark_failed(url)  # Server error, retryable
+            return {"url": url, "error": f"http_{status_code}", "retryable": status_code >= 500, "depth": task.depth}
+
         except Exception as e:
+            # Unknown error: use retry logic
             self.domain_manager.record_error(url)
             if self.domain_manager.should_retry(url):
                 self.frontier.mark_failed(url)
             else:
                 self.frontier.mark_done(url)
-            return {"url": url, "error": str(e), "depth": task.depth}
+            return {"url": url, "error": str(e), "retryable": False, "depth": task.depth}
 
     async def _worker(self, worker_id: int):
         """Worker coroutine that processes URLs from the frontier."""
