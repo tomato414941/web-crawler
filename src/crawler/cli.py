@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import os
 import sys
 
 import typer
@@ -209,6 +210,26 @@ def agent(
     typer.echo(f"Status: {result['status']}")
     if result.get('result'):
         typer.echo(f"Result: {result['result']}")
+
+
+@app.command()
+def serve(
+    host: str = typer.Option("0.0.0.0", "--host", help="Bind host"),
+    port: int = typer.Option(8080, "--port", "-p", help="Bind port"),
+    postgres: str = typer.Option(None, "--postgres", envvar="CRAWLER_POSTGRES_DSN", help="Postgres DSN"),
+):
+    """Start the API server to serve crawl results."""
+    import uvicorn
+
+    if postgres:
+        os.environ["CRAWLER_POSTGRES_DSN"] = postgres
+
+    if not os.environ.get("CRAWLER_POSTGRES_DSN"):
+        typer.echo("Error: --postgres or CRAWLER_POSTGRES_DSN is required", err=True)
+        raise typer.Exit(1)
+
+    typer.echo(f"Starting API server on {host}:{port}")
+    uvicorn.run("crawler.api:app", host=host, port=port)
 
 
 @app.command()
