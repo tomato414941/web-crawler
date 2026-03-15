@@ -96,12 +96,13 @@ def crawl(
     delay: float = typer.Option(1.0, "--delay", help="Delay between requests (seconds)"),
     concurrency: int = typer.Option(5, "--concurrency", "-c", help="Concurrent requests"),
     no_content: bool = typer.Option(False, "--no-content", help="Save metadata only, exclude page content"),
+    postgres: str = typer.Option(None, "--postgres", envvar="CRAWLER_POSTGRES_DSN", help="Postgres DSN for storing results"),
 ):
     """Crawl a website starting from a URL."""
     from .crawl import run_crawl
 
-    # Default to output_dir if neither is specified
-    if output is None and output_dir is None:
+    # Default to output_dir if neither is specified and no postgres
+    if output is None and output_dir is None and postgres is None:
         output_dir = "crawl_results"
 
     asyncio.run(run_crawl(
@@ -110,12 +111,13 @@ def crawl(
         max_depth=max_depth,
         same_domain=same_domain,
         output_file=output,
-        output_dir=output_dir if output is None else None,
+        output_dir=output_dir if output is None and postgres is None else None,
         output_format=output_format,
         use_browser=js,
         delay=delay,
         concurrency=concurrency,
         include_content=not no_content,
+        postgres_dsn=postgres,
     ))
 
 

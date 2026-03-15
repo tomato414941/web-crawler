@@ -16,7 +16,8 @@ dependencies = [
 dev = ["pytest", "pytest-asyncio", "ruff"]
 browser = ["playwright"]
 agent = ["playwright", "anthropic>=0.70"]
-all = ["playwright", "anthropic>=0.70"]
+postgres = ["psycopg2-binary>=2.9"]
+all = ["playwright", "anthropic>=0.70", "psycopg2-binary>=2.9"]
 
 [project.scripts]
 crawler = "crawler.cli:app"
