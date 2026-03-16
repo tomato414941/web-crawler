@@ -1,39 +1,37 @@
-"""URL Frontier with SQLite persistence and Bloom filter for deduplication."""
+"""URL Frontier with PostgreSQL persistence and Bloom filter for deduplication."""
 
-import sqlite3
+import logging
 import time
 from dataclasses import dataclass
-from pathlib import Path
-from urllib.parse import urlparse, urlunparse, parse_qsl, urlencode
+from urllib.parse import urlparse
 
 from pybloom_live import ScalableBloomFilter
 
+from .urls import normalize_url
 
-def normalize_url(url: str) -> str:
-    """Normalize URL for deduplication (remove fragment, sort query params)."""
-    parsed = urlparse(url)
+logger = logging.getLogger(__name__)
 
-    # Sort query parameters
-    query_params = parse_qsl(parsed.query)
-    sorted_query = urlencode(sorted(query_params))
+FRONTIER_SCHEMA_SQL = """
+CREATE TABLE IF NOT EXISTS frontier (
+    url TEXT PRIMARY KEY,
+    domain TEXT NOT NULL,
+    depth INTEGER NOT NULL,
+    priority REAL NOT NULL DEFAULT 1.0,
+    source_url TEXT,
+    added_at DOUBLE PRECISION NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending'
+);
 
-    # Normalize path (remove trailing slash except for root)
-    path = parsed.path.rstrip('/') or '/'
-
-    normalized = urlunparse((
-        parsed.scheme.lower(),
-        parsed.netloc.lower(),
-        path,
-        parsed.params,
-        sorted_query,
-        ''  # Remove fragment
-    ))
-    return normalized
+CREATE INDEX IF NOT EXISTS idx_frontier_status ON frontier(status);
+CREATE INDEX IF NOT EXISTS idx_frontier_domain ON frontier(domain);
+CREATE INDEX IF NOT EXISTS idx_frontier_priority ON frontier(priority DESC, added_at ASC);
+"""
 
 
 @dataclass
 class CrawlTask:
     """A URL to crawl with metadata."""
+
     url: str
     depth: int
     priority: float = 1.0
@@ -46,36 +44,33 @@ class CrawlTask:
 
 
 class Frontier:
-    """URL frontier with SQLite persistence and Bloom filter deduplication."""
+    """URL frontier with PostgreSQL persistence and Bloom filter deduplication."""
 
-    def __init__(self, db_path: str | Path = ":memory:", capacity: int = 100000):
-        self.db_path = str(db_path)
-        self.conn = sqlite3.connect(self.db_path)
+    def __init__(self, conn, capacity: int = 100000):
+        self._conn = conn
         self.seen = ScalableBloomFilter(initial_capacity=capacity, error_rate=0.001)
-        self._init_db()
+        self._init_schema()
+        self._load_seen()
 
-    def _init_db(self):
-        """Initialize SQLite tables."""
-        self.conn.execute("""
-            CREATE TABLE IF NOT EXISTS queue (
-                id INTEGER PRIMARY KEY,
-                url TEXT UNIQUE NOT NULL,
-                domain TEXT NOT NULL,
-                depth INTEGER NOT NULL,
-                priority REAL NOT NULL,
-                source_url TEXT,
-                added_at REAL NOT NULL,
-                status TEXT DEFAULT 'pending'
-            )
-        """)
-        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_status ON queue(status)")
-        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_domain ON queue(domain)")
-        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_priority ON queue(priority DESC)")
-        self.conn.commit()
+    def _init_schema(self):
+        with self._conn.cursor() as cur:
+            cur.execute(FRONTIER_SCHEMA_SQL)
+        self._conn.commit()
+        logger.info("Frontier schema initialized")
+
+    def _load_seen(self):
+        """Load existing URLs into Bloom filter on startup."""
+        with self._conn.cursor() as cur:
+            cur.execute("SELECT url FROM frontier")
+            count = 0
+            for (url,) in cur:
+                self.seen.add(url)
+                count += 1
+        if count:
+            logger.info("Loaded %d URLs into Bloom filter", count)
 
     def add(self, task: CrawlTask) -> bool:
         """Add a URL to the frontier. Returns False if already seen."""
-        # Normalize URL for deduplication
         normalized_url = normalize_url(task.url)
         task.url = normalized_url
 
@@ -86,14 +81,18 @@ class Frontier:
         domain = urlparse(normalized_url).netloc
 
         try:
-            self.conn.execute(
-                """INSERT INTO queue (url, domain, depth, priority, source_url, added_at)
-                   VALUES (?, ?, ?, ?, ?, ?)""",
-                (task.url, domain, task.depth, task.priority, task.source_url, task.added_at)
-            )
-            self.conn.commit()
+            with self._conn.cursor() as cur:
+                cur.execute(
+                    """INSERT INTO frontier (url, domain, depth, priority, source_url, added_at)
+                       VALUES (%s, %s, %s, %s, %s, %s)
+                       ON CONFLICT (url) DO NOTHING""",
+                    (task.url, domain, task.depth, task.priority, task.source_url, task.added_at),
+                )
+            self._conn.commit()
             return True
-        except sqlite3.IntegrityError:
+        except Exception:
+            self._conn.rollback()
+            logger.exception("Failed to add %s", task.url)
             return False
 
     def add_many(self, tasks: list[CrawlTask]) -> int:
@@ -106,97 +105,104 @@ class Frontier:
 
     def get_next(self, domain: str | None = None) -> CrawlTask | None:
         """Get next URL to crawl, optionally filtered by domain."""
-        query = "SELECT url, depth, priority, source_url, added_at FROM queue WHERE status = 'pending'"
-        params = []
+        where = "status = 'pending'"
+        params: list = []
 
         if domain:
-            query += " AND domain = ?"
+            where += " AND domain = %s"
             params.append(domain)
 
-        query += " ORDER BY priority DESC, added_at ASC LIMIT 1"
-
-        cursor = self.conn.execute(query, params)
-        row = cursor.fetchone()
+        with self._conn.cursor() as cur:
+            cur.execute(
+                f"""UPDATE frontier SET status = 'processing'
+                    WHERE url = (
+                        SELECT url FROM frontier
+                        WHERE {where}
+                        ORDER BY priority DESC, added_at ASC
+                        LIMIT 1
+                        FOR UPDATE SKIP LOCKED
+                    )
+                    RETURNING url, depth, priority, source_url, added_at""",
+                params,
+            )
+            row = cur.fetchone()
+        self._conn.commit()
 
         if row:
             url, depth, priority, source_url, added_at = row
-            self.conn.execute("UPDATE queue SET status = 'processing' WHERE url = ?", (url,))
-            self.conn.commit()
             return CrawlTask(
-                url=url,
-                depth=depth,
-                priority=priority,
-                source_url=source_url,
-                added_at=added_at,
+                url=url, depth=depth, priority=priority,
+                source_url=source_url, added_at=added_at,
             )
-
         return None
 
     def get_batch(self, count: int = 10, domain: str | None = None) -> list[CrawlTask]:
         """Get a batch of URLs to crawl."""
-        query = "SELECT url, depth, priority, source_url, added_at FROM queue WHERE status = 'pending'"
-        params = []
+        where = "status = 'pending'"
+        params: list = []
 
         if domain:
-            query += " AND domain = ?"
+            where += " AND domain = %s"
             params.append(domain)
 
-        query += " ORDER BY priority DESC, added_at ASC LIMIT ?"
         params.append(count)
 
-        cursor = self.conn.execute(query, params)
-        rows = cursor.fetchall()
+        with self._conn.cursor() as cur:
+            cur.execute(
+                f"""UPDATE frontier SET status = 'processing'
+                    WHERE url IN (
+                        SELECT url FROM frontier
+                        WHERE {where}
+                        ORDER BY priority DESC, added_at ASC
+                        LIMIT %s
+                        FOR UPDATE SKIP LOCKED
+                    )
+                    RETURNING url, depth, priority, source_url, added_at""",
+                params,
+            )
+            rows = cur.fetchall()
+        self._conn.commit()
 
-        tasks = []
-        for url, depth, priority, source_url, added_at in rows:
-            self.conn.execute("UPDATE queue SET status = 'processing' WHERE url = ?", (url,))
-            tasks.append(CrawlTask(
-                url=url,
-                depth=depth,
-                priority=priority,
-                source_url=source_url,
-                added_at=added_at,
-            ))
-
-        self.conn.commit()
-        return tasks
+        return [
+            CrawlTask(url=url, depth=depth, priority=priority,
+                       source_url=source_url, added_at=added_at)
+            for url, depth, priority, source_url, added_at in rows
+        ]
 
     def mark_done(self, url: str):
         """Mark a URL as successfully crawled."""
-        self.conn.execute("UPDATE queue SET status = 'done' WHERE url = ?", (url,))
-        self.conn.commit()
+        with self._conn.cursor() as cur:
+            cur.execute("UPDATE frontier SET status = 'done' WHERE url = %s", (url,))
+        self._conn.commit()
 
     def mark_failed(self, url: str):
         """Mark a URL as failed."""
-        self.conn.execute("UPDATE queue SET status = 'failed' WHERE url = ?", (url,))
-        self.conn.commit()
+        with self._conn.cursor() as cur:
+            cur.execute("UPDATE frontier SET status = 'failed' WHERE url = %s", (url,))
+        self._conn.commit()
 
     def requeue_failed(self) -> int:
         """Requeue failed URLs for retry."""
-        cursor = self.conn.execute(
-            "UPDATE queue SET status = 'pending' WHERE status = 'failed'"
-        )
-        self.conn.commit()
-        return cursor.rowcount
+        with self._conn.cursor() as cur:
+            cur.execute("UPDATE frontier SET status = 'pending' WHERE status = 'failed'")
+            count = cur.rowcount
+        self._conn.commit()
+        return count
 
     def stats(self) -> dict:
         """Get queue statistics."""
-        cursor = self.conn.execute(
-            "SELECT status, COUNT(*) FROM queue GROUP BY status"
-        )
-        stats = dict(cursor.fetchall())
-        stats['total'] = sum(stats.values())
+        with self._conn.cursor() as cur:
+            cur.execute("SELECT status, COUNT(*) FROM frontier GROUP BY status")
+            stats = dict(cur.fetchall())
+        stats["total"] = sum(stats.values())
         return stats
 
     def pending_count(self) -> int:
         """Get count of pending URLs."""
-        cursor = self.conn.execute("SELECT COUNT(*) FROM queue WHERE status = 'pending'")
-        return cursor.fetchone()[0]
+        with self._conn.cursor() as cur:
+            cur.execute("SELECT COUNT(*) FROM frontier WHERE status = 'pending'")
+            return cur.fetchone()[0]
 
     def is_seen(self, url: str) -> bool:
-        """Check if URL was already seen."""
+        """Check if URL was already seen (Bloom filter)."""
         return normalize_url(url) in self.seen
-
-    def close(self):
-        """Close database connection."""
-        self.conn.close()

@@ -1,11 +1,9 @@
 """Crawler engine with async concurrency."""
 
 import asyncio
-import json
 import re
 import time
-from pathlib import Path
-from urllib.parse import urljoin, urlparse, urlunparse, parse_qsl, urlencode
+from urllib.parse import urljoin, urlparse
 
 import httpx
 import typer
@@ -15,31 +13,7 @@ from .core import HttpFetcher
 from .domain_manager import DomainManager
 from .frontier import CrawlTask, Frontier
 from .output import StreamingOutputWriter
-
-# Precompiled regex pattern for link extraction
-_HREF_PATTERN = re.compile(r'href\s*=\s*["\']([^"\']+)["\']', re.IGNORECASE)
-
-
-def normalize_url(url: str) -> str:
-    """Normalize URL for deduplication (remove fragment, sort query params)."""
-    parsed = urlparse(url)
-
-    # Sort query parameters
-    query_params = parse_qsl(parsed.query)
-    sorted_query = urlencode(sorted(query_params))
-
-    # Normalize path (remove trailing slash except for root)
-    path = parsed.path.rstrip('/') or '/'
-
-    normalized = urlunparse((
-        parsed.scheme.lower(),
-        parsed.netloc.lower(),
-        path,
-        parsed.params,
-        sorted_query,
-        ''  # Remove fragment
-    ))
-    return normalized
+from .urls import normalize_url
 
 
 def extract_links(html: str, base_url: str) -> list[str]:
@@ -92,7 +66,10 @@ class CrawlerEngine:
         self.pg_storage = pg_storage
 
         self.start_domain = urlparse(start_url).netloc
-        self.frontier = Frontier()
+        if pg_storage:
+            self.frontier = Frontier(pg_storage._conn)
+        else:
+            raise ValueError("Postgres connection required for frontier")
         self.domain_manager = DomainManager(
             user_agent=settings.user_agent,
             default_delay=delay,
@@ -248,87 +225,6 @@ class CrawlerEngine:
         self._running = False
 
 
-class OutputWriter:
-    """Writes crawl results to various formats."""
-
-    def __init__(self, output_dir: str, output_format: str = "jsonl"):
-        self.output_dir = Path(output_dir)
-        self.output_dir.mkdir(parents=True, exist_ok=True)
-        self.format = output_format
-
-    def write(self, results: list[dict]):
-        """Write results to output."""
-        if self.format == "jsonl":
-            self._write_jsonl(results)
-        elif self.format == "sqlite":
-            self._write_sqlite(results)
-        elif self.format == "warc":
-            self._write_warc(results)
-        else:
-            self._write_jsonl(results)
-
-    def _write_jsonl(self, results: list[dict]):
-        """Write results as JSON Lines."""
-        output_file = self.output_dir / "results.jsonl"
-        with open(output_file, "w") as f:
-            for result in results:
-                f.write(json.dumps(result, ensure_ascii=False) + "\n")
-        typer.echo(f"Results saved to {output_file}")
-
-    def _write_sqlite(self, results: list[dict]):
-        """Write results to SQLite database."""
-        import sqlite3
-        output_file = self.output_dir / "results.db"
-        conn = sqlite3.connect(output_file)
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS pages (
-                id INTEGER PRIMARY KEY,
-                url TEXT NOT NULL,
-                status INTEGER,
-                content_length INTEGER,
-                depth INTEGER,
-                source_url TEXT,
-                timestamp REAL,
-                content TEXT,
-                error TEXT
-            )
-        """)
-
-        for result in results:
-            conn.execute(
-                """INSERT INTO pages (url, status, content_length, depth, source_url, timestamp, content, error)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-                (
-                    result.get("url"),
-                    result.get("status"),
-                    result.get("content_length"),
-                    result.get("depth"),
-                    result.get("source_url"),
-                    result.get("timestamp"),
-                    result.get("content"),
-                    result.get("error"),
-                )
-            )
-        conn.commit()
-        conn.close()
-        typer.echo(f"Results saved to {output_file}")
-
-    def _write_warc(self, results: list[dict]):
-        """Write results in simplified WARC-like format."""
-        output_file = self.output_dir / "results.warc"
-        with open(output_file, "w") as f:
-            for result in results:
-                f.write("WARC/1.0\n")
-                f.write("WARC-Type: response\n")
-                f.write(f"WARC-Target-URI: {result.get('url', '')}\n")
-                f.write(f"WARC-Date: {time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(result.get('timestamp', 0)))}\n")
-                f.write(f"Content-Length: {result.get('content_length', 0)}\n")
-                f.write("\n")
-                f.write(result.get("content", ""))
-                f.write("\n\n")
-        typer.echo(f"Results saved to {output_file}")
-
-
 async def run_crawl(
     start_url: str,
     max_pages: int = 100,
@@ -344,61 +240,43 @@ async def run_crawl(
     postgres_dsn: str | None = None,
 ):
     """Run a crawl and save results."""
+    if not postgres_dsn:
+        raise ValueError("--postgres is required")
+
     typer.echo(f"Starting crawl from {start_url}")
     typer.echo(f"Max pages: {max_pages}, Max depth: {max_depth}, Concurrency: {concurrency}")
 
     start_time = time.time()
-    pg_storage = None
-    if postgres_dsn:
-        from .storage import PgStorage
-        pg_storage = PgStorage(postgres_dsn)
+    from .storage import PgStorage
+
+    pg_storage = PgStorage(postgres_dsn)
 
     try:
+        writer = None
         if output_file:
-            with StreamingOutputWriter(output_file, include_content=include_content) as writer:
-                async with CrawlerEngine(
-                    start_url=start_url,
-                    max_pages=max_pages,
-                    max_depth=max_depth,
-                    same_domain=same_domain,
-                    use_browser=use_browser,
-                    delay=delay,
-                    concurrency=concurrency,
-                    output_writer=writer,
-                    pg_storage=pg_storage,
-                ) as engine:
-                    await engine.crawl()
-                    elapsed = time.time() - start_time
-                    typer.echo(f"\nCrawl complete: {writer.count} pages in {elapsed:.1f}s")
-                    if output_file:
-                        typer.echo(f"Results saved to {output_file}")
-                    if pg_storage:
-                        typer.echo(f"Postgres: {pg_storage.count} pages saved")
-                    stats = engine.frontier.stats()
-                    typer.echo(f"Queue stats: {stats}")
-        else:
-            async with CrawlerEngine(
-                start_url=start_url,
-                max_pages=max_pages,
-                max_depth=max_depth,
-                same_domain=same_domain,
-                use_browser=use_browser,
-                delay=delay,
-                concurrency=concurrency,
-                pg_storage=pg_storage,
-            ) as engine:
-                results = await engine.crawl()
-                elapsed = time.time() - start_time
-                typer.echo(f"\nCrawl complete: {len(results)} pages in {elapsed:.1f}s")
+            writer = StreamingOutputWriter(output_file, include_content=include_content)
+            writer.__enter__()
 
-                if pg_storage:
-                    typer.echo(f"Postgres: {pg_storage.count} pages saved")
-                elif output_dir:
-                    writer = OutputWriter(output_dir, output_format)
-                    writer.write(results)
-
-                stats = engine.frontier.stats()
-                typer.echo(f"Queue stats: {stats}")
+        async with CrawlerEngine(
+            start_url=start_url,
+            max_pages=max_pages,
+            max_depth=max_depth,
+            same_domain=same_domain,
+            use_browser=use_browser,
+            delay=delay,
+            concurrency=concurrency,
+            output_writer=writer,
+            pg_storage=pg_storage,
+        ) as engine:
+            await engine.crawl()
+            elapsed = time.time() - start_time
+            typer.echo(f"\nCrawl complete: {engine.pages_crawled} pages in {elapsed:.1f}s")
+            typer.echo(f"Postgres: {pg_storage.count} pages saved")
+            if output_file:
+                typer.echo(f"Results saved to {output_file}")
+            stats = engine.frontier.stats()
+            typer.echo(f"Queue stats: {stats}")
     finally:
-        if pg_storage:
-            pg_storage.close()
+        if writer:
+            writer.__exit__(None, None, None)
+        pg_storage.close()
