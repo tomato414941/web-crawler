@@ -6,12 +6,19 @@ import signal
 import time
 from urllib.parse import urlparse
 
+import psycopg2
+
+from .config import settings
 from .crawl import CrawlerEngine
+from .domain_manager import DomainManager
 from .frontier import Frontier
 from .storage import PgStorage
 from .urls import normalize_url
 
 logger = logging.getLogger(__name__)
+
+_MAX_RECONNECT_ATTEMPTS = 5
+_RECONNECT_DELAY = 5.0
 
 
 class CrawlDaemon:
@@ -40,6 +47,10 @@ class CrawlDaemon:
         self._idle_sleep = idle_sleep
         self._shutdown = False
         self._engine: CrawlerEngine | None = None
+        self._domain_manager = DomainManager(
+            user_agent=settings.user_agent,
+            default_delay=delay,
+        )
 
     async def run(self):
         """Main daemon loop."""
@@ -49,31 +60,79 @@ class CrawlDaemon:
             self._seeds, self._cycle_pages, self._recrawl_ttl,
         )
 
-        with PgStorage(self._postgres_dsn) as storage:
-            frontier = Frontier(storage.conn)
-            self._recover_processing(storage)
-            cycle = 0
+        storage = None
+        frontier = None
+        cycle = 0
 
+        try:
             while not self._shutdown:
-                self._ensure_seeds(frontier)
-                self._recrawl_stale(storage, frontier)
-                frontier.requeue_failed()
+                # Ensure DB connection
+                if storage is None:
+                    storage, frontier = self._connect()
+                    if storage is None:
+                        await self._interruptible_sleep(self._idle_sleep)
+                        continue
 
-                pending = frontier.pending_count()
-                if pending == 0:
-                    logger.info("No URLs to crawl, sleeping %ds", self._idle_sleep)
-                    await self._interruptible_sleep(self._idle_sleep)
-                    continue
+                try:
+                    self._ensure_seeds(frontier)
+                    self._recrawl_stale(storage, frontier)
+                    frontier.requeue_failed()
 
-                cycle += 1
-                logger.info("Cycle %d: %d pending URLs", cycle, pending)
-                pages = await self._run_cycle(storage, frontier)
-                logger.info("Cycle %d complete: %d pages crawled", cycle, pages)
+                    pending = frontier.pending_count()
+                    if pending == 0:
+                        logger.info("No URLs to crawl, sleeping %ds", self._idle_sleep)
+                        await self._interruptible_sleep(self._idle_sleep)
+                        continue
 
-                if not self._shutdown:
-                    await self._interruptible_sleep(self._cycle_pause)
+                    cycle += 1
+                    logger.info("Cycle %d: %d pending URLs", cycle, pending)
+                    start = time.time()
+                    pages = await self._run_cycle(storage, frontier)
+                    elapsed = time.time() - start
+                    rate = pages / elapsed if elapsed > 0 else 0
+                    logger.info(
+                        "Cycle %d complete: %d pages in %.1fs (%.1f pages/s) | %s",
+                        cycle, pages, elapsed, rate, frontier.stats(),
+                    )
+
+                    if not self._shutdown:
+                        await self._interruptible_sleep(self._cycle_pause)
+
+                except (psycopg2.OperationalError, psycopg2.InterfaceError) as e:
+                    logger.error("Database connection lost: %s", e)
+                    storage = self._close_storage(storage)
+                    frontier = None
+                    await self._interruptible_sleep(_RECONNECT_DELAY)
+
+        finally:
+            self._close_storage(storage)
+            await self._domain_manager.close()
 
         logger.info("Daemon shutdown complete")
+
+    def _connect(self) -> tuple[PgStorage | None, Frontier | None]:
+        """Connect to Postgres and initialize frontier."""
+        for attempt in range(1, _MAX_RECONNECT_ATTEMPTS + 1):
+            try:
+                storage = PgStorage(self._postgres_dsn)
+                frontier = Frontier(storage.conn)
+                self._recover_processing(storage)
+                logger.info("Database connected (attempt %d)", attempt)
+                return storage, frontier
+            except psycopg2.OperationalError as e:
+                logger.error("Connection attempt %d/%d failed: %s", attempt, _MAX_RECONNECT_ATTEMPTS, e)
+                if attempt < _MAX_RECONNECT_ATTEMPTS:
+                    time.sleep(_RECONNECT_DELAY)
+        logger.error("All %d connection attempts failed", _MAX_RECONNECT_ATTEMPTS)
+        return None, None
+
+    def _close_storage(self, storage: PgStorage | None) -> None:
+        if storage:
+            try:
+                storage.close()
+            except Exception:
+                pass
+        return None
 
     async def _run_cycle(self, storage: PgStorage, frontier: Frontier) -> int:
         """Run one crawl cycle."""
@@ -85,6 +144,7 @@ class CrawlDaemon:
             concurrency=self._concurrency,
             pg_storage=storage,
             frontier=frontier,
+            domain_manager=self._domain_manager,
         ) as engine:
             self._engine = engine
             await engine.crawl()
