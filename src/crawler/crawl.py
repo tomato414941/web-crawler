@@ -7,6 +7,8 @@ import time
 from typing import TYPE_CHECKING
 from urllib.parse import urlparse
 
+import logging
+
 import httpx
 import typer
 
@@ -16,6 +18,8 @@ from .domain_manager import DomainManager
 from .frontier import CrawlTask, Frontier
 from .output import StreamingOutputWriter
 from .urls import extract_anchors
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from .storage import PgStorage
@@ -182,6 +186,8 @@ class CrawlerEngine:
                 continue
 
             is_error = bool(result.get("error"))
+            if is_error:
+                logger.warning("Error crawling %s: %s", result["url"], result["error"])
             if not is_error:
                 if self.pg_storage:
                     self.pg_storage.save(result)
