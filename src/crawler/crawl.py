@@ -16,7 +16,7 @@ from .core import HttpFetcher
 from .domain_manager import DomainManager
 from .frontier import CrawlTask, Frontier
 from .output import StreamingOutputWriter
-from .urls import extract_anchors
+from .urls import extract_links
 
 logger = logging.getLogger(__name__)
 
@@ -25,11 +25,6 @@ if TYPE_CHECKING:
 
 # Workers wait this many idle ticks (× 0.1s) before giving up
 _WORKER_PATIENCE = 50
-
-
-def extract_links(html: str, base_url: str) -> list[str]:
-    """Extract unique normalized URLs from <a> tags in HTML."""
-    return list({url for url, _text in extract_anchors(html, base_url)})
 
 
 class CrawlerEngine:
