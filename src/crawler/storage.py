@@ -112,6 +112,74 @@ class PgStorage:
     def count(self) -> int:
         return self._count
 
+    @property
+    def conn(self):
+        """Expose connection for frontier (which shares the same Postgres)."""
+        return self._conn
+
+    def list_pages(
+        self,
+        since: float = 0,
+        limit: int = 100,
+        offset: int = 0,
+        domain: str | None = None,
+    ) -> list[dict]:
+        """List crawled pages with optional filters."""
+        conditions = ["crawled_at > %s"]
+        params: list = [since]
+
+        if domain:
+            conditions.append("domain = %s")
+            params.append(domain)
+
+        where = " AND ".join(conditions)
+        params.extend([limit, offset])
+
+        with self._conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                f"""SELECT url_hash, url, domain, title, status, content_length,
+                           outlinks, crawled_at
+                    FROM pages WHERE {where}
+                    ORDER BY crawled_at ASC
+                    LIMIT %s OFFSET %s""",
+                params,
+            )
+            return [dict(row) for row in cur.fetchall()]
+
+    def get_page(self, url_hash: str) -> dict | None:
+        """Get a single page with full content."""
+        with self._conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                """SELECT url_hash, url, domain, title, content, status,
+                          content_length, depth, source_url, outlinks, crawled_at
+                   FROM pages WHERE url_hash = %s""",
+                (url_hash,),
+            )
+            row = cur.fetchone()
+            return dict(row) if row else None
+
+    def get_stats(self) -> dict:
+        """Get crawl statistics."""
+        with self._conn.cursor() as cur:
+            cur.execute(
+                """SELECT
+                     count(*) as total_pages,
+                     count(DISTINCT domain) as domains,
+                     min(crawled_at) as oldest,
+                     max(crawled_at) as newest,
+                     sum(content_length) as total_bytes
+                   FROM pages"""
+            )
+            row = cur.fetchone()
+
+        return {
+            "total_pages": row[0],
+            "domains": row[1],
+            "oldest_crawl": row[2],
+            "newest_crawl": row[3],
+            "total_bytes": row[4],
+        }
+
     def close(self):
         self._conn.close()
 
