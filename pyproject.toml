@@ -13,7 +13,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest", "pytest-asyncio", "ruff"]
+dev = ["pytest", "pytest-asyncio", "pytest-httpx", "ruff"]
 browser = ["playwright"]
 agent = ["playwright", "anthropic>=0.70"]
 postgres = ["psycopg2-binary>=2.9"]

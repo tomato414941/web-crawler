@@ -11,8 +11,14 @@ def fetcher():
 
 
 class TestHttpFetcher:
-    async def test_fetch_example_com(self, fetcher):
-        """Fetch example.com and verify response."""
+    async def test_fetch_returns_response(self, fetcher, httpx_mock):
+        """Fetch returns a Response with correct fields."""
+        httpx_mock.add_response(
+            url="https://example.com",
+            status_code=200,
+            html='<html><head><title>Example Domain</title></head><body></body></html>',
+            headers={"content-type": "text/html; charset=utf-8"},
+        )
         response = await fetcher.fetch("https://example.com")
 
         assert isinstance(response, Response)
@@ -21,8 +27,14 @@ class TestHttpFetcher:
         assert "Example Domain" in response.text
         assert "text/html" in response.headers.get("content-type", "")
 
-    async def test_fetch_returns_response_fields(self, fetcher):
+    async def test_fetch_returns_response_fields(self, fetcher, httpx_mock):
         """Verify all response fields are populated."""
+        httpx_mock.add_response(
+            url="https://example.com",
+            status_code=200,
+            html="<html></html>",
+            headers={"content-type": "text/html"},
+        )
         response = await fetcher.fetch("https://example.com")
 
         assert response.url is not None
@@ -30,11 +42,21 @@ class TestHttpFetcher:
         assert response.content is not None
         assert isinstance(response.headers, dict)
 
-    async def test_fetch_follows_redirects(self, fetcher):
+    async def test_fetch_follows_redirects(self, fetcher, httpx_mock):
         """Verify redirects are followed."""
-        response = await fetcher.fetch("http://httpbin.org/redirect-to?url=https://example.com")
+        httpx_mock.add_response(
+            url="http://example.com/old",
+            status_code=301,
+            headers={"location": "https://example.com/new"},
+        )
+        httpx_mock.add_response(
+            url="https://example.com/new",
+            status_code=200,
+            html="<html>redirected</html>",
+        )
+        response = await fetcher.fetch("http://example.com/old")
 
-        assert "example.com" in response.url
+        assert "example.com/new" in response.url
         assert response.status == 200
 
 
@@ -57,5 +79,4 @@ class TestResponse:
             content=b"\xff\xfe",
             headers={},
         )
-        # Should not raise, uses replacement character
         assert isinstance(response.text, str)
