@@ -3,11 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 from typing import TYPE_CHECKING
 from urllib.parse import urlparse
-
-import logging
 
 import httpx
 import typer
@@ -23,6 +22,9 @@ logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from .storage import PgStorage
+
+# Workers wait this many idle ticks (× 0.1s) before giving up
+_WORKER_PATIENCE = 50
 
 
 def extract_links(html: str, base_url: str) -> list[str]:
@@ -45,6 +47,7 @@ class CrawlerEngine:
         output_writer: StreamingOutputWriter | None = None,
         pg_storage: "PgStorage | None" = None,
         frontier: Frontier | None = None,
+        domain_manager: DomainManager | None = None,
     ):
         self.start_url = start_url
         self.max_pages = max_pages
@@ -62,10 +65,16 @@ class CrawlerEngine:
             self.frontier = Frontier(pg_storage.conn)
         else:
             raise ValueError("Postgres connection required for frontier")
-        self.domain_manager = DomainManager(
-            user_agent=settings.user_agent,
-            default_delay=delay,
-        )
+
+        if domain_manager:
+            self.domain_manager = domain_manager
+            self._owns_domain_manager = False
+        else:
+            self.domain_manager = DomainManager(
+                user_agent=settings.user_agent,
+                default_delay=delay,
+            )
+            self._owns_domain_manager = True
 
         if use_browser:
             from .core import get_browser_fetcher
@@ -87,7 +96,8 @@ class CrawlerEngine:
         """Close all resources."""
         if hasattr(self.fetcher, 'close'):
             await self.fetcher.close()
-        await self.domain_manager.close()
+        if self._owns_domain_manager:
+            await self.domain_manager.close()
 
     def _is_valid_url(self, url: str) -> bool:
         """Check if URL should be crawled."""
@@ -118,19 +128,16 @@ class CrawlerEngine:
                 "content": response.text,
             }
 
-            # Extract and queue new links
+            # Extract and queue new links (dedup handled by frontier ON CONFLICT)
             outlinks = []
             if task.depth < self.max_depth:
                 links = extract_links(response.text, response.url)
                 outlinks = links
-                new_tasks = []
-                for link in links:
-                    if self._is_valid_url(link) and not self.frontier.is_seen(link):
-                        new_tasks.append(CrawlTask(
-                            url=link,
-                            depth=task.depth + 1,
-                            source_url=url,
-                        ))
+                new_tasks = [
+                    CrawlTask(url=link, depth=task.depth + 1, source_url=url)
+                    for link in links
+                    if self._is_valid_url(link)
+                ]
                 self.frontier.add_many(new_tasks)
 
             result["outlinks"] = outlinks
@@ -138,29 +145,25 @@ class CrawlerEngine:
             return result
 
         except httpx.TimeoutException:
-            # Timeout: retryable
             self.domain_manager.record_error(url)
             self.frontier.mark_failed(url)
             return {"url": url, "error": "timeout", "retryable": True, "depth": task.depth}
 
         except httpx.ConnectError:
-            # Connection error: retryable
             self.domain_manager.record_error(url)
             self.frontier.mark_failed(url)
             return {"url": url, "error": "connection_error", "retryable": True, "depth": task.depth}
 
         except httpx.HTTPStatusError as e:
-            # HTTP error: 4xx is permanent, 5xx is retryable
             status_code = e.response.status_code
             if 400 <= status_code < 500:
-                self.frontier.mark_done(url)  # Permanent error
+                self.frontier.mark_done(url)
             else:
                 self.domain_manager.record_error(url)
-                self.frontier.mark_failed(url)  # Server error, retryable
+                self.frontier.mark_failed(url)
             return {"url": url, "error": f"http_{status_code}", "retryable": status_code >= 500, "depth": task.depth}
 
         except Exception as e:
-            # Unknown error: use retry logic
             self.domain_manager.record_error(url)
             if self.domain_manager.should_retry(url):
                 self.frontier.mark_failed(url)
@@ -170,25 +173,28 @@ class CrawlerEngine:
 
     async def _worker(self, worker_id: int):
         """Worker coroutine that processes URLs from the frontier."""
+        idle_ticks = 0
+
         while self._running:
             if self.pages_crawled >= self.max_pages:
                 break
 
             task = self.frontier.get_next()
             if not task:
-                await asyncio.sleep(0.1)
-                if self.frontier.pending_count() == 0:
+                idle_ticks += 1
+                if idle_ticks >= _WORKER_PATIENCE:
                     break
+                await asyncio.sleep(0.1)
                 continue
 
+            idle_ticks = 0
             result = await self._process_url(task)
             if not result:
                 continue
 
-            is_error = bool(result.get("error"))
-            if is_error:
-                logger.warning("Error crawling %s: %s", result["url"], result["error"])
-            if not is_error:
+            if result.get("error"):
+                logger.warning("Failed %s: %s", result["url"], result["error"])
+            else:
                 if self.pg_storage:
                     self.pg_storage.save(result)
                 if self.output_writer:
@@ -196,7 +202,7 @@ class CrawlerEngine:
                 elif not self.pg_storage:
                     self.results.append(result)
                 self.pages_crawled += 1
-                typer.echo(f"[{self.pages_crawled}/{self.max_pages}] {result['url']}")
+                logger.info("[%d/%d] %s", self.pages_crawled, self.max_pages, result["url"])
 
     async def crawl(self) -> list[dict]:
         """Run the crawler and return results."""
