@@ -96,12 +96,37 @@ class Frontier:
             return False
 
     def add_many(self, tasks: list[CrawlTask]) -> int:
-        """Add multiple URLs. Returns count of new URLs added."""
-        added = 0
+        """Add multiple URLs in a single transaction. Returns count of new URLs added."""
+        new_tasks = []
         for task in tasks:
-            if self.add(task):
-                added += 1
-        return added
+            normalized_url = normalize_url(task.url)
+            if normalized_url in self.seen:
+                continue
+            task.url = normalized_url
+            self.seen.add(normalized_url)
+            new_tasks.append(task)
+
+        if not new_tasks:
+            return 0
+
+        rows = [
+            (t.url, urlparse(t.url).netloc, t.depth, t.priority, t.source_url, t.added_at)
+            for t in new_tasks
+        ]
+        try:
+            with self._conn.cursor() as cur:
+                cur.executemany(
+                    """INSERT INTO frontier (url, domain, depth, priority, source_url, added_at)
+                       VALUES (%s, %s, %s, %s, %s, %s)
+                       ON CONFLICT (url) DO NOTHING""",
+                    rows,
+                )
+            self._conn.commit()
+            return len(new_tasks)
+        except Exception:
+            self._conn.rollback()
+            logger.exception("Failed to add batch of %d URLs", len(new_tasks))
+            return 0
 
     def get_next(self, domain: str | None = None) -> CrawlTask | None:
         """Get next URL to crawl, optionally filtered by domain."""

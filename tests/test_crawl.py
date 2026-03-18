@@ -1,6 +1,7 @@
 """Tests for crawler engine module."""
 
-from crawler.crawl import extract_links, normalize_url
+from crawler.crawl import extract_links
+from crawler.urls import normalize_url
 
 
 class TestNormalizeUrl:

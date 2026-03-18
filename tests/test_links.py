@@ -101,9 +101,9 @@ class TestExtractLinksFromHtml:
         '''
         links = extract_links_from_html(html, "http://example.com")
         urls = [link["url"] for link in links]
-        assert "http://example.com" in urls
-        assert "https://example.com" in urls
-        assert "ftp://example.com" not in urls
+        assert "http://example.com/" in urls
+        assert "https://example.com/" in urls
+        assert not any(u.startswith("ftp://") for u in urls)
 
 
 class TestCheckUrl:

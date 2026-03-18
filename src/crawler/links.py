@@ -1,40 +1,22 @@
 """Link checking functionality."""
 
 import asyncio
-import re
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urlparse
 
 import httpx
 import typer
 
 from .config import settings
 from .core import HttpFetcher
-
-# Precompiled regex patterns
-_LINK_PATTERN = re.compile(r'<a[^>]+href=["\']([^"\']+)["\'][^>]*>(.*?)</a>', re.IGNORECASE | re.DOTALL)
-_TAG_PATTERN = re.compile(r'<[^>]+>')
+from .urls import extract_anchors
 
 
 def extract_links_from_html(html: str, base_url: str) -> list[dict]:
     """Extract all links from HTML with context."""
-    links = []
-
-    for match in _LINK_PATTERN.finditer(html):
-        href = match.group(1)
-        text = _TAG_PATTERN.sub('', match.group(2)).strip()
-
-        if href.startswith(('#', 'javascript:', 'mailto:', 'tel:', 'data:')):
-            continue
-
-        absolute_url = urljoin(base_url, href)
-        if absolute_url.startswith(('http://', 'https://')):
-            links.append({
-                "url": absolute_url,
-                "text": text[:100],  # Truncate long text
-                "source": base_url,
-            })
-
-    return links
+    return [
+        {"url": url, "text": text[:100], "source": base_url}
+        for url, text in extract_anchors(html, base_url)
+    ]
 
 
 async def check_url(client: httpx.AsyncClient, url: str) -> dict:
