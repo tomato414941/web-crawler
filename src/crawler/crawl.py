@@ -75,7 +75,7 @@ class CrawlerEngine:
 
         self.start_domain = urlparse(start_url).netloc
         if pg_storage:
-            self.frontier = Frontier(pg_storage._conn)
+            self.frontier = Frontier(pg_storage.conn)
         else:
             raise ValueError("Postgres connection required for frontier")
         self.domain_manager = DomainManager(
@@ -257,34 +257,29 @@ async def run_crawl(
     start_time = time.time()
     from .storage import PgStorage
 
-    pg_storage = PgStorage(postgres_dsn)
-
-    try:
-        writer = None
-        if output_file:
-            writer = StreamingOutputWriter(output_file, include_content=include_content)
-            writer.__enter__()
-
-        async with CrawlerEngine(
-            start_url=start_url,
-            max_pages=max_pages,
-            max_depth=max_depth,
-            same_domain=same_domain,
-            use_browser=use_browser,
-            delay=delay,
-            concurrency=concurrency,
-            output_writer=writer,
-            pg_storage=pg_storage,
-        ) as engine:
-            await engine.crawl()
-            elapsed = time.time() - start_time
-            typer.echo(f"\nCrawl complete: {engine.pages_crawled} pages in {elapsed:.1f}s")
-            typer.echo(f"Postgres: {pg_storage.count} pages saved")
-            if output_file:
-                typer.echo(f"Results saved to {output_file}")
-            stats = engine.frontier.stats()
-            typer.echo(f"Queue stats: {stats}")
-    finally:
-        if writer:
-            writer.__exit__(None, None, None)
-        pg_storage.close()
+    with PgStorage(postgres_dsn) as pg_storage:
+        writer = StreamingOutputWriter(output_file, include_content=include_content) if output_file else None
+        try:
+            if writer:
+                writer.__enter__()
+            async with CrawlerEngine(
+                start_url=start_url,
+                max_pages=max_pages,
+                max_depth=max_depth,
+                same_domain=same_domain,
+                use_browser=use_browser,
+                delay=delay,
+                concurrency=concurrency,
+                output_writer=writer,
+                pg_storage=pg_storage,
+            ) as engine:
+                await engine.crawl()
+                elapsed = time.time() - start_time
+                typer.echo(f"\nCrawl complete: {engine.pages_crawled} pages in {elapsed:.1f}s")
+                typer.echo(f"Postgres: {pg_storage.count} pages saved")
+                if output_file:
+                    typer.echo(f"Results saved to {output_file}")
+                typer.echo(f"Queue stats: {engine.frontier.stats()}")
+        finally:
+            if writer:
+                writer.__exit__(None, None, None)
