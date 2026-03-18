@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import logging
 import os
 import sys
 
@@ -222,6 +223,45 @@ def serve(
 
     typer.echo(f"Starting API server on {host}:{port}")
     uvicorn.run("crawler.api:app", host=host, port=port)
+
+
+@app.command()
+def daemon(
+    seeds: list[str] = typer.Argument(..., help="Seed URLs to crawl"),
+    cycle_pages: int = typer.Option(500, "--cycle-pages", help="Pages per cycle"),
+    recrawl_ttl: int = typer.Option(86400, "--recrawl-ttl", help="Re-crawl pages older than N seconds"),
+    max_depth: int = typer.Option(3, "--max-depth", "-d", help="Maximum link depth"),
+    concurrency: int = typer.Option(5, "--concurrency", "-c", help="Concurrent requests"),
+    delay: float = typer.Option(1.0, "--delay", help="Delay between requests (seconds)"),
+    cycle_pause: float = typer.Option(5.0, "--cycle-pause", help="Pause between cycles (seconds)"),
+    idle_sleep: float = typer.Option(60.0, "--idle-sleep", help="Sleep when no URLs to crawl (seconds)"),
+    postgres: str = typer.Option(None, "--postgres", envvar="CRAWLER_POSTGRES_DSN", help="Postgres DSN"),
+):
+    """Run crawler as a continuous daemon."""
+    if not postgres:
+        typer.echo("Error: --postgres or CRAWLER_POSTGRES_DSN is required", err=True)
+        raise typer.Exit(1)
+
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(name)s] %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+
+    from .daemon import CrawlDaemon
+
+    d = CrawlDaemon(
+        seeds=seeds,
+        postgres_dsn=postgres,
+        cycle_pages=cycle_pages,
+        recrawl_ttl=recrawl_ttl,
+        max_depth=max_depth,
+        concurrency=concurrency,
+        delay=delay,
+        cycle_pause=cycle_pause,
+        idle_sleep=idle_sleep,
+    )
+    asyncio.run(d.run())
 
 
 @app.command()

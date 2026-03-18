@@ -31,7 +31,7 @@ class CrawlerEngine:
 
     def __init__(
         self,
-        start_url: str,
+        start_url: str = "",
         max_pages: int = 100,
         max_depth: int = 3,
         same_domain: bool = True,
@@ -40,6 +40,7 @@ class CrawlerEngine:
         concurrency: int = 5,
         output_writer: StreamingOutputWriter | None = None,
         pg_storage: "PgStorage | None" = None,
+        frontier: Frontier | None = None,
     ):
         self.start_url = start_url
         self.max_pages = max_pages
@@ -50,8 +51,10 @@ class CrawlerEngine:
         self.output_writer = output_writer
         self.pg_storage = pg_storage
 
-        self.start_domain = urlparse(start_url).netloc
-        if pg_storage:
+        self.start_domain = urlparse(start_url).netloc if start_url else ""
+        if frontier:
+            self.frontier = frontier
+        elif pg_storage:
             self.frontier = Frontier(pg_storage.conn)
         else:
             raise ValueError("Postgres connection required for frontier")
@@ -192,9 +195,10 @@ class CrawlerEngine:
     async def crawl(self) -> list[dict]:
         """Run the crawler and return results."""
         self._running = True
+        self.pages_crawled = 0
 
-        # Seed the frontier
-        self.frontier.add(CrawlTask(url=self.start_url, depth=0))
+        if self.start_url and self.frontier.pending_count() == 0:
+            self.frontier.add(CrawlTask(url=self.start_url, depth=0))
 
         # Start workers
         workers = [

@@ -27,16 +27,19 @@ services:
   crawler:
     build: .
     command: >
-      crawler crawl ${CRAWL_SEED_URL:-https://example.com}
-        --max-pages ${CRAWL_MAX_PAGES:-100}
+      crawler daemon
+        ${CRAWL_SEED_URLS:-https://example.com}
+        --cycle-pages ${CRAWL_CYCLE_PAGES:-500}
+        --recrawl-ttl ${CRAWL_RECRAWL_TTL:-86400}
         --max-depth ${CRAWL_MAX_DEPTH:-3}
         --concurrency ${CRAWL_CONCURRENCY:-5}
         --delay ${CRAWL_DELAY:-1.0}
-        --any-domain
         --postgres postgresql://crawler:crawler@postgres/crawldb
     depends_on:
       postgres:
         condition: service_healthy
+    restart: unless-stopped
+    stop_grace_period: 30s
 
 volumes:
   pgdata:
