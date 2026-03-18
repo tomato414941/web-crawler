@@ -3,10 +3,9 @@
 from __future__ import annotations
 
 import asyncio
-import re
 import time
 from typing import TYPE_CHECKING
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urlparse
 
 import httpx
 import typer
@@ -16,37 +15,15 @@ from .core import HttpFetcher
 from .domain_manager import DomainManager
 from .frontier import CrawlTask, Frontier
 from .output import StreamingOutputWriter
-from .urls import normalize_url
+from .urls import extract_anchors
 
 if TYPE_CHECKING:
     from .storage import PgStorage
 
-_HREF_PATTERN = re.compile(r'<a\s[^>]*href=["\']([^"\']+)["\']', re.IGNORECASE)
-
 
 def extract_links(html: str, base_url: str) -> list[str]:
-    """Extract links from HTML content."""
-    links = []
-
-    for match in _HREF_PATTERN.finditer(html):
-        href = match.group(1).strip()
-
-        # Skip non-HTTP schemes and fragments
-        if href.startswith(('#', 'javascript:', 'mailto:', 'tel:', 'data:')):
-            continue
-
-        # Handle protocol-relative URLs
-        if href.startswith('//'):
-            href = 'https:' + href
-
-        absolute_url = urljoin(base_url, href)
-
-        # Only keep http(s) URLs
-        if absolute_url.startswith(('http://', 'https://')):
-            normalized = normalize_url(absolute_url)
-            links.append(normalized)
-
-    return list(set(links))
+    """Extract unique normalized URLs from <a> tags in HTML."""
+    return list({url for url, _text in extract_anchors(html, base_url)})
 
 
 class CrawlerEngine:
