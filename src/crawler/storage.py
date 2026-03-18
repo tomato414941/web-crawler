@@ -2,7 +2,10 @@
 
 import hashlib
 import logging
+import re
 import time
+from urllib.parse import urlparse
+
 import psycopg2
 import psycopg2.extras
 
@@ -27,6 +30,9 @@ CREATE TABLE IF NOT EXISTS pages (
 CREATE INDEX IF NOT EXISTS idx_pages_domain ON pages(domain);
 CREATE INDEX IF NOT EXISTS idx_pages_crawled_at ON pages(crawled_at);
 """
+
+
+_TITLE_PATTERN = re.compile(r"<title[^>]*>(.*?)</title>", re.IGNORECASE | re.DOTALL)
 
 
 def _url_hash(url: str) -> str:
@@ -56,18 +62,12 @@ class PgStorage:
 
         url = result["url"]
         url_hash = _url_hash(url)
-
-        from urllib.parse import urlparse
-
         domain = urlparse(url).netloc
 
-        # Extract title from content
         title = None
         content = result.get("content", "")
         if content:
-            import re
-
-            m = re.search(r"<title[^>]*>(.*?)</title>", content, re.IGNORECASE | re.DOTALL)
+            m = _TITLE_PATTERN.search(content)
             if m:
                 title = m.group(1).strip()[:500]
 

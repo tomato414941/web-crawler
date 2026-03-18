@@ -198,7 +198,11 @@ class CrawlerEngine:
                 continue
 
             result = await self._process_url(task)
-            if result:
+            if not result:
+                continue
+
+            is_error = bool(result.get("error"))
+            if not is_error:
                 if self.pg_storage:
                     self.pg_storage.save(result)
                 if self.output_writer:
@@ -206,9 +210,7 @@ class CrawlerEngine:
                 elif not self.pg_storage:
                     self.results.append(result)
                 self.pages_crawled += 1
-
-                if not result.get("error"):
-                    typer.echo(f"[{self.pages_crawled}/{self.max_pages}] {result['url']}")
+                typer.echo(f"[{self.pages_crawled}/{self.max_pages}] {result['url']}")
 
     async def crawl(self) -> list[dict]:
         """Run the crawler and return results."""
@@ -238,9 +240,7 @@ async def run_crawl(
     max_pages: int = 100,
     max_depth: int = 3,
     same_domain: bool = True,
-    output_dir: str | None = "crawl_results",
     output_file: str | None = None,
-    output_format: str = "jsonl",
     use_browser: bool = False,
     delay: float = 1.0,
     concurrency: int = 5,
