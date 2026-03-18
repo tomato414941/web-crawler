@@ -12,7 +12,8 @@ COPY src/ src/
 
 RUN pip install --no-cache-dir ".[api]"
 
-ENV SSL_CERT_FILE=/usr/local/lib/python3.12/site-packages/certifi/cacert.pem
+ENV SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
+ENV SSL_CERT_DIR=/etc/ssl/certs
 
 EXPOSE 8080
 
