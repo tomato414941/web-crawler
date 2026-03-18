@@ -1,8 +1,11 @@
 """Crawler engine with async concurrency."""
 
+from __future__ import annotations
+
 import asyncio
 import re
 import time
+from typing import TYPE_CHECKING
 from urllib.parse import urljoin, urlparse
 
 import httpx
@@ -14,6 +17,11 @@ from .domain_manager import DomainManager
 from .frontier import CrawlTask, Frontier
 from .output import StreamingOutputWriter
 from .urls import normalize_url
+
+if TYPE_CHECKING:
+    from .storage import PgStorage
+
+_HREF_PATTERN = re.compile(r'<a\s[^>]*href=["\']([^"\']+)["\']', re.IGNORECASE)
 
 
 def extract_links(html: str, base_url: str) -> list[str]:

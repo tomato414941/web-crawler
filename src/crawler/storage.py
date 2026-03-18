@@ -3,8 +3,6 @@
 import hashlib
 import logging
 import time
-from contextlib import contextmanager
-
 import psycopg2
 import psycopg2.extras
 
