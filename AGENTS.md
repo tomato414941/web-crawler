@@ -9,7 +9,7 @@ Single Python package with CLI entry point:
   - `cli.py` — Typer CLI (fetch, crawl, serve, agent, extract, check-links)
   - `api.py` — FastAPI REST server
   - `crawl.py` — crawler engine (worker pool, link extraction)
-  - `frontier.py` — URL queue (SQLite + Bloom filter)
+  - `frontier.py` — URL queue (Postgres + Bloom filter)
   - `domain_manager.py` — robots.txt, per-domain rate limiting
   - `storage.py` — PostgreSQL storage
   - `output.py` — JSONL streaming output
@@ -57,7 +57,7 @@ docker compose up -d
 `type: description` format (e.g., `feat:`, `fix:`, `refactor:`, `docs:`, `test:`)
 
 ## Key Design Decisions
-- **Frontier uses SQLite + Bloom filter** — SQLite for persistence, Bloom for fast dedup
+- **Frontier uses Postgres + Bloom filter** — Postgres for persistence, Bloom for fast dedup
 - **Adaptive fetcher** — HTTP first, falls back to Playwright if JS rendering detected
 - **Single-run crawl** — `crawler crawl` exits after max-pages (daemon mode planned)
 - **PostgreSQL for results** — crawled pages stored in `pages` table, served via API
@@ -67,7 +67,8 @@ docker compose up -d
 - Server: `web-crawler` (Hetzner cx23, Nuremberg, 46.225.221.84)
 - Tailscale: 100.92.121.94
 - Docker Compose: postgres + api + crawler
-- Repo is deployed to `/opt/web-crawler` on the server
+- Repo is deployed to `~/projects/web-crawler` on the server
+- SSH: `ssh dev@100.92.121.94`
 
 ## Security
 - Never commit credentials
