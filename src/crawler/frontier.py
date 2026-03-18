@@ -1,11 +1,11 @@
-"""URL Frontier with PostgreSQL persistence and Bloom filter for deduplication."""
+"""URL Frontier with PostgreSQL persistence."""
 
 import logging
 import time
 from dataclasses import dataclass
 from urllib.parse import urlparse
 
-from pybloom_live import ScalableBloomFilter
+import psycopg2.extras
 
 from .urls import normalize_url
 
@@ -24,7 +24,8 @@ CREATE TABLE IF NOT EXISTS frontier (
 
 CREATE INDEX IF NOT EXISTS idx_frontier_status ON frontier(status);
 CREATE INDEX IF NOT EXISTS idx_frontier_domain ON frontier(domain);
-CREATE INDEX IF NOT EXISTS idx_frontier_priority ON frontier(priority DESC, added_at ASC);
+CREATE INDEX IF NOT EXISTS idx_frontier_pending
+    ON frontier(priority DESC, added_at ASC) WHERE status = 'pending';
 """
 
 
@@ -44,13 +45,11 @@ class CrawlTask:
 
 
 class Frontier:
-    """URL frontier with PostgreSQL persistence and Bloom filter deduplication."""
+    """URL frontier with PostgreSQL persistence. Dedup via ON CONFLICT."""
 
-    def __init__(self, conn, capacity: int = 100000):
+    def __init__(self, conn):
         self._conn = conn
-        self.seen = ScalableBloomFilter(initial_capacity=capacity, error_rate=0.001)
         self._init_schema()
-        self._load_seen()
 
     def _init_schema(self):
         with self._conn.cursor() as cur:
@@ -58,26 +57,10 @@ class Frontier:
         self._conn.commit()
         logger.info("Frontier schema initialized")
 
-    def _load_seen(self):
-        """Load existing URLs into Bloom filter on startup."""
-        with self._conn.cursor() as cur:
-            cur.execute("SELECT url FROM frontier")
-            count = 0
-            for (url,) in cur:
-                self.seen.add(url)
-                count += 1
-        if count:
-            logger.info("Loaded %d URLs into Bloom filter", count)
-
     def add(self, task: CrawlTask) -> bool:
-        """Add a URL to the frontier. Returns False if already seen."""
+        """Add a URL to the frontier. Returns False if already exists."""
         normalized_url = normalize_url(task.url)
         task.url = normalized_url
-
-        if normalized_url in self.seen:
-            return False
-
-        self.seen.add(normalized_url)
         domain = urlparse(normalized_url).netloc
 
         try:
@@ -88,8 +71,9 @@ class Frontier:
                        ON CONFLICT (url) DO NOTHING""",
                     (task.url, domain, task.depth, task.priority, task.source_url, task.added_at),
                 )
+                inserted = cur.rowcount > 0
             self._conn.commit()
-            return True
+            return inserted
         except Exception:
             self._conn.rollback()
             logger.exception("Failed to add %s", task.url)
@@ -97,35 +81,32 @@ class Frontier:
 
     def add_many(self, tasks: list[CrawlTask]) -> int:
         """Add multiple URLs in a single transaction. Returns count of new URLs added."""
-        new_tasks = []
-        for task in tasks:
-            normalized_url = normalize_url(task.url)
-            if normalized_url in self.seen:
-                continue
-            task.url = normalized_url
-            self.seen.add(normalized_url)
-            new_tasks.append(task)
-
-        if not new_tasks:
+        if not tasks:
             return 0
 
-        rows = [
-            (t.url, urlparse(t.url).netloc, t.depth, t.priority, t.source_url, t.added_at)
-            for t in new_tasks
-        ]
+        rows = []
+        for task in tasks:
+            normalized_url = normalize_url(task.url)
+            task.url = normalized_url
+            domain = urlparse(normalized_url).netloc
+            rows.append((task.url, domain, task.depth, task.priority, task.source_url, task.added_at))
+
         try:
             with self._conn.cursor() as cur:
-                cur.executemany(
+                psycopg2.extras.execute_values(
+                    cur,
                     """INSERT INTO frontier (url, domain, depth, priority, source_url, added_at)
-                       VALUES (%s, %s, %s, %s, %s, %s)
+                       VALUES %s
                        ON CONFLICT (url) DO NOTHING""",
                     rows,
+                    page_size=200,
                 )
+                inserted = cur.rowcount
             self._conn.commit()
-            return len(new_tasks)
+            return inserted
         except Exception:
             self._conn.rollback()
-            logger.exception("Failed to add batch of %d URLs", len(new_tasks))
+            logger.exception("Failed to add batch of %d URLs", len(tasks))
             return 0
 
     def get_next(self, domain: str | None = None) -> CrawlTask | None:
@@ -229,5 +210,8 @@ class Frontier:
             return cur.fetchone()[0]
 
     def is_seen(self, url: str) -> bool:
-        """Check if URL was already seen (Bloom filter)."""
-        return normalize_url(url) in self.seen
+        """Check if URL exists in frontier."""
+        normalized = normalize_url(url)
+        with self._conn.cursor() as cur:
+            cur.execute("SELECT 1 FROM frontier WHERE url = %s LIMIT 1", (normalized,))
+            return cur.fetchone() is not None
