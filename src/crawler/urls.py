@@ -31,6 +31,11 @@ def normalize_url(url: str) -> str:
     return normalized
 
 
+def extract_links(html: str, base_url: str) -> list[str]:
+    """Extract unique normalized URLs from <a> tags in HTML."""
+    return list({url for url, _text in extract_anchors(html, base_url)})
+
+
 def extract_anchors(html: str, base_url: str) -> list[tuple[str, str]]:
     """Extract (absolute_url, link_text) pairs from <a> tags in HTML.
 
