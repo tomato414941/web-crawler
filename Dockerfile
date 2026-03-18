@@ -11,6 +11,8 @@ COPY src/ src/
 
 RUN pip install --no-cache-dir ".[api]"
 
+ENV SSL_CERT_FILE=/usr/local/lib/python3.12/site-packages/certifi/cacert.pem
+
 EXPOSE 8080
 
 CMD ["crawler", "serve", "--port", "8080"]
