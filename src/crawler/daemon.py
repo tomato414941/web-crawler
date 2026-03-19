@@ -151,6 +151,7 @@ class CrawlDaemon:
             frontier=frontier,
             domain_manager=self._domain_manager,
             domain_store=self._domain_store,
+            seed_urls=self._seeds,
         ) as engine:
             self._engine = engine
             await engine.crawl()

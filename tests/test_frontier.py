@@ -7,6 +7,7 @@ import psycopg2
 import pytest
 
 from crawler.domain_store import DomainStore
+from crawler.discovery import DISCOVERY_SEED_HOST
 from crawler.frontier import CrawlTask, Frontier, LEASED_STATUS
 from crawler.urls import normalize_url
 
@@ -125,6 +126,24 @@ class TestFrontier:
         ]
         assert frontier.add_many(tasks) == 2
 
+    def test_add_persists_discovery_kind(self, frontier):
+        frontier.add(
+            CrawlTask(
+                url="http://example.com",
+                depth=0,
+                discovery_kind=DISCOVERY_SEED_HOST,
+            )
+        )
+
+        with frontier._conn.cursor() as cur:
+            cur.execute(
+                "SELECT discovery_kind FROM frontier WHERE url = %s",
+                ("http://example.com/",),
+            )
+            (discovery_kind,) = cur.fetchone()
+
+        assert discovery_kind == DISCOVERY_SEED_HOST
+
     def test_lease_next_returns_task(self, frontier):
         frontier.add(CrawlTask(url="http://example.com", depth=0))
         result = frontier.lease_next()
@@ -199,6 +218,15 @@ class TestFrontier:
         frontier.upsert_seeds(["http://example.com"])
 
         assert frontier.pending_count() == 1
+
+        with frontier._conn.cursor() as cur:
+            cur.execute(
+                "SELECT discovery_kind FROM frontier WHERE url = %s",
+                ("http://example.com/",),
+            )
+            (discovery_kind,) = cur.fetchone()
+
+        assert discovery_kind == "seed"
 
     def test_stats(self, frontier):
         frontier.add(CrawlTask(url="http://example.com/1", depth=0))
