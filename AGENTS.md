@@ -9,10 +9,13 @@ Single Python package with CLI entry point:
   - `cli.py` — Typer CLI (fetch, crawl, serve, agent, extract, check-links)
   - `api.py` — FastAPI REST server
   - `crawl.py` — crawler engine (worker pool, link extraction)
-  - `frontier.py` — URL queue (Postgres + Bloom filter)
-  - `domain_manager.py` — robots.txt, per-domain rate limiting
+  - `frontier.py` — URL scheduler with Postgres leasing and retry timing
+  - `domain_manager.py` — robots.txt and runtime host scheduling state
+  - `domain_store.py` — durable host scheduling state in Postgres
+  - `domain_state.py` — runtime / persisted host state models
   - `storage.py` — PostgreSQL storage
   - `output.py` — JSONL streaming output
+  - `result.py` — typed result models
   - `extract.py` — CSS/XPath data extraction
   - `links.py` — broken link checker
   - `agent.py` — Claude AI web agent
@@ -57,18 +60,24 @@ docker compose up -d
 `type: description` format (e.g., `feat:`, `fix:`, `refactor:`, `docs:`, `test:`)
 
 ## Key Design Decisions
-- **Frontier uses Postgres + Bloom filter** — Postgres for persistence, Bloom for fast dedup
+- **Frontier uses Postgres** — Postgres stores URL state, lease timing, and retry metadata
+- **Host scheduler uses Postgres** — per-host crawl delay and cooldown survive restarts
 - **Adaptive fetcher** — HTTP first, falls back to Playwright if JS rendering detected
-- **Single-run crawl** — `crawler crawl` exits after max-pages (daemon mode planned)
+- **Two crawl modes** — `crawler crawl` is one-shot, `crawler daemon` is continuous
 - **PostgreSQL for results** — crawled pages stored in `pages` table, served via API
 - **No consumer knowledge** — this service does not know about web-search or any consumer
 
 ## Deployment
 - Server: `web-crawler` (Hetzner cx23, Nuremberg, 46.225.221.84)
 - Tailscale: 100.92.121.94
-- Docker Compose: postgres + api + crawler
+- Docker Compose: `postgres` + `api` + `crawler`
 - Repo is deployed to `~/projects/web-crawler` on the server
 - SSH: `ssh dev@100.92.121.94`
+
+## Release Notes
+- This repo currently deploys from `main`
+- Check `git status --short --branch` before commit / push
+- Prefer small commits and push only after `pytest -q` and `ruff check src tests`
 
 ## Security
 - Never commit credentials
