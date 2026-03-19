@@ -4,6 +4,7 @@ from selectolax.parser import HTMLParser
 
 from .config import settings
 from .core import HttpFetcher
+from .result import ExtractResult
 
 
 class Extractor:
@@ -131,7 +132,7 @@ async def extract_data(
     xpath: str | None = None,
     attribute: str | None = None,
     use_browser: bool = False,
-) -> dict:
+) -> ExtractResult:
     """Fetch URL and extract data."""
     if use_browser:
         from .core import get_browser_fetcher
@@ -139,22 +140,24 @@ async def extract_data(
     else:
         fetcher = HttpFetcher(timeout=settings.timeout)
 
-    response = await fetcher.fetch(url)
-    extractor = Extractor(response.text)
+    try:
+        response = await fetcher.fetch(url)
+        extractor = Extractor(response.text)
 
-    items = []
-    if css_selector:
-        items = extractor.css(css_selector, attribute)
-    elif xpath:
-        items = extractor.xpath(xpath, attribute)
-    else:
-        # Default: extract links
-        links = extractor.get_links()
-        items = [f"{link['text']} -> {link['href']}" for link in links if link['href']]
+        items = []
+        if css_selector:
+            items = extractor.css(css_selector, attribute)
+        elif xpath:
+            items = extractor.xpath(xpath, attribute)
+        else:
+            links = extractor.get_links()
+            items = [f"{link['text']} -> {link['href']}" for link in links if link['href']]
 
-    return {
-        "url": response.url,
-        "selector": css_selector or xpath,
-        "items": items,
-        "count": len(items),
-    }
+        return ExtractResult(
+            url=response.url,
+            selector=css_selector or xpath,
+            items=items,
+        )
+    finally:
+        if hasattr(fetcher, "close"):
+            await fetcher.close()
