@@ -11,6 +11,7 @@ from urllib.parse import urlparse
 
 import psycopg2.extras
 
+from .discovery import DISCOVERY_SEED
 from .urls import normalize_url
 
 if TYPE_CHECKING:
@@ -33,6 +34,7 @@ CREATE TABLE IF NOT EXISTS frontier (
     domain TEXT NOT NULL,
     depth INTEGER NOT NULL,
     priority REAL NOT NULL DEFAULT 1.0,
+    discovery_kind TEXT NOT NULL DEFAULT 'seed',
     source_url TEXT,
     added_at DOUBLE PRECISION NOT NULL,
     status TEXT NOT NULL DEFAULT 'pending',
@@ -50,6 +52,7 @@ ALTER TABLE frontier ADD COLUMN IF NOT EXISTS fail_streak INTEGER NOT NULL DEFAU
 ALTER TABLE frontier ADD COLUMN IF NOT EXISTS lease_token TEXT;
 ALTER TABLE frontier ADD COLUMN IF NOT EXISTS lease_expires_at DOUBLE PRECISION;
 ALTER TABLE frontier ADD COLUMN IF NOT EXISTS last_error TEXT;
+ALTER TABLE frontier ADD COLUMN IF NOT EXISTS discovery_kind TEXT NOT NULL DEFAULT 'seed';
 
 CREATE INDEX IF NOT EXISTS idx_frontier_status ON frontier(status);
 CREATE INDEX IF NOT EXISTS idx_frontier_domain ON frontier(domain);
@@ -67,6 +70,7 @@ class CrawlTask:
     url: str
     depth: int
     priority: float = 1.0
+    discovery_kind: str = DISCOVERY_SEED
     source_url: str | None = None
     added_at: float = 0.0
     next_fetch_at: float = 0.0
@@ -197,15 +201,16 @@ class Frontier:
             with self._conn.cursor() as cur:
                 cur.execute(
                     """INSERT INTO frontier (
-                           url, domain, depth, priority, source_url, added_at, next_fetch_at
+                           url, domain, depth, priority, discovery_kind, source_url, added_at, next_fetch_at
                        )
-                       VALUES (%s, %s, %s, %s, %s, %s, %s)
+                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                        ON CONFLICT (url) DO NOTHING""",
                     (
                         task.url,
                         domain,
                         task.depth,
                         task.priority,
+                        task.discovery_kind,
                         task.source_url,
                         task.added_at,
                         next_fetch_at,
@@ -236,6 +241,7 @@ class Frontier:
                     domain,
                     task.depth,
                     task.priority,
+                    task.discovery_kind,
                     task.source_url,
                     task.added_at,
                     next_fetch_at,
@@ -247,7 +253,7 @@ class Frontier:
                 psycopg2.extras.execute_values(
                     cur,
                     """INSERT INTO frontier (
-                           url, domain, depth, priority, source_url, added_at, next_fetch_at
+                           url, domain, depth, priority, discovery_kind, source_url, added_at, next_fetch_at
                        )
                        VALUES %s
                        ON CONFLICT (url) DO NOTHING""",
@@ -298,6 +304,7 @@ class Frontier:
                             url,
                             depth,
                             priority,
+                            discovery_kind,
                             source_url,
                             added_at,
                             next_fetch_at,
@@ -313,9 +320,20 @@ class Frontier:
             return None
 
         if row:
-            url, depth, priority, source_url, added_at, next_fetch_at, lease_token, lease_expires_at = row
+            (
+                url,
+                depth,
+                priority,
+                discovery_kind,
+                source_url,
+                added_at,
+                next_fetch_at,
+                lease_token,
+                lease_expires_at,
+            ) = row
             return CrawlTask(
                 url=url, depth=depth, priority=priority,
+                discovery_kind=discovery_kind,
                 source_url=source_url, added_at=added_at,
                 next_fetch_at=next_fetch_at,
                 lease_token=lease_token, lease_expires_at=lease_expires_at,
@@ -359,6 +377,7 @@ class Frontier:
                             url,
                             depth,
                             priority,
+                            discovery_kind,
                             source_url,
                             added_at,
                             next_fetch_at,
@@ -378,6 +397,7 @@ class Frontier:
                 url=url,
                 depth=depth,
                 priority=priority,
+                discovery_kind=discovery_kind,
                 source_url=source_url,
                 added_at=added_at,
                 next_fetch_at=next_fetch_at,
@@ -388,6 +408,7 @@ class Frontier:
                 url,
                 depth,
                 priority,
+                discovery_kind,
                 source_url,
                 added_at,
                 next_fetch_at,
@@ -504,13 +525,13 @@ class Frontier:
         for url in urls:
             normalized = normalize_url(url)
             domain = urlparse(normalized).netloc
-            rows.append((normalized, domain, 0, priority, now, now))
+            rows.append((normalized, domain, 0, priority, DISCOVERY_SEED, now, now))
 
         with self._conn.cursor() as cur:
             psycopg2.extras.execute_values(
                 cur,
                 """INSERT INTO frontier (
-                       url, domain, depth, priority, source_url, added_at, next_fetch_at, status
+                       url, domain, depth, priority, discovery_kind, source_url, added_at, next_fetch_at, status
                    )
                    VALUES %s
                    ON CONFLICT (url) DO UPDATE SET
@@ -523,7 +544,7 @@ class Frontier:
                        lease_token = NULL,
                        lease_expires_at = NULL""",
                 rows,
-                template="(%s, %s, %s, %s, NULL, %s, %s, 'pending')",
+                template="(%s, %s, %s, %s, %s, NULL, %s, %s, 'pending')",
                 page_size=200,
             )
             affected = cur.rowcount
