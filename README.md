@@ -201,6 +201,20 @@ Current deployment shape:
 - Runtime: Docker Compose
 - Exposed API: port `8080`
 
+Recommended production `.env`:
+
+```bash
+CRAWL_SEED_URLS="https://www.iana.org/ https://datatracker.ietf.org/ https://www.rfc-editor.org/ https://www.icann.org/"
+CRAWL_CYCLE_PAGES=200
+CRAWL_RECRAWL_TTL=604800
+CRAWL_MAX_DEPTH=2
+CRAWL_CONCURRENCY=3
+CRAWL_DELAY=2.0
+```
+
+These defaults target public standards / registry hosts and keep crawl pacing conservative.
+Store them in a local `.env` on the server; do not commit runtime-specific values.
+
 Before pushing:
 - Run `pytest -q`
 - Run `ruff check src tests`
