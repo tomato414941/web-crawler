@@ -12,39 +12,39 @@ class TestExtractLinksFromHtml:
         html = '<a href="http://example.com/page">Link</a>'
         links = extract_links_from_html(html, "http://base.com")
         assert len(links) == 1
-        assert links[0]["url"] == "http://example.com/page"
+        assert links[0].url == "http://example.com/page"
 
     def test_converts_relative_urls(self):
         """Should convert relative URLs to absolute."""
         html = '<a href="/page">Link</a>'
         links = extract_links_from_html(html, "http://example.com/current/")
         assert len(links) == 1
-        assert links[0]["url"] == "http://example.com/page"
+        assert links[0].url == "http://example.com/page"
 
     def test_extracts_link_text(self):
         """Should extract link text."""
         html = '<a href="/page">Click Here</a>'
         links = extract_links_from_html(html, "http://example.com")
-        assert links[0]["text"] == "Click Here"
+        assert links[0].text == "Click Here"
 
     def test_strips_html_from_text(self):
         """Should strip HTML tags from link text."""
         html = '<a href="/page"><strong>Bold</strong> Text</a>'
         links = extract_links_from_html(html, "http://example.com")
-        assert links[0]["text"] == "Bold Text"
+        assert links[0].text == "Bold Text"
 
     def test_truncates_long_text(self):
         """Should truncate text longer than 100 characters."""
         long_text = "A" * 150
         html = f'<a href="/page">{long_text}</a>'
         links = extract_links_from_html(html, "http://example.com")
-        assert len(links[0]["text"]) == 100
+        assert len(links[0].text) == 100
 
     def test_includes_source_url(self):
         """Should include source URL in result."""
         html = '<a href="/page">Link</a>'
         links = extract_links_from_html(html, "http://example.com/base")
-        assert links[0]["source"] == "http://example.com/base"
+        assert links[0].source == "http://example.com/base"
 
     def test_skips_javascript_urls(self):
         """Should skip javascript: URLs."""
@@ -90,7 +90,14 @@ class TestExtractLinksFromHtml:
         html = '<a href="/page"><span><img src="icon.png">Text</span></a>'
         links = extract_links_from_html(html, "http://example.com")
         assert len(links) == 1
-        assert "Text" in links[0]["text"]
+        assert "Text" in links[0].text
+
+    def test_handles_unquoted_href(self):
+        """Should handle unquoted href attributes."""
+        html = '<a href=/page>Text</a>'
+        links = extract_links_from_html(html, "http://example.com")
+        assert len(links) == 1
+        assert links[0].url == "http://example.com/page"
 
     def test_only_http_https_urls(self):
         """Should only return http/https URLs."""
@@ -100,7 +107,7 @@ class TestExtractLinksFromHtml:
         <a href="ftp://example.com">FTP</a>
         '''
         links = extract_links_from_html(html, "http://example.com")
-        urls = [link["url"] for link in links]
+        urls = [link.url for link in links]
         assert "http://example.com/" in urls
         assert "https://example.com/" in urls
         assert not any(u.startswith("ftp://") for u in urls)
@@ -119,9 +126,9 @@ class TestCheckUrl:
         async with httpx.AsyncClient() as client:
             result = await check_url(client, "http://example.com/page")
 
-        assert result["ok"] is True
-        assert result["status"] == 200
-        assert result["redirect"] is False
+        assert result.ok is True
+        assert result.status == 200
+        assert result.redirect is False
 
     async def test_check_url_404(self, httpx_mock):
         """Should return ok=False for 404 response."""
@@ -130,8 +137,8 @@ class TestCheckUrl:
         async with httpx.AsyncClient() as client:
             result = await check_url(client, "http://example.com/notfound")
 
-        assert result["ok"] is False
-        assert result["status"] == 404
+        assert result.ok is False
+        assert result.status == 404
 
     async def test_check_url_redirect_detected(self, httpx_mock):
         """Should detect redirects when final_url differs from original."""
@@ -151,9 +158,9 @@ class TestCheckUrl:
         async with httpx.AsyncClient(follow_redirects=True) as client:
             result = await check_url(client, "http://example.com/old")
 
-        assert result["ok"] is True
-        assert result["redirect"] is True
-        assert result["final_url"] == "http://example.com/new"
+        assert result.ok is True
+        assert result.redirect is True
+        assert result.final_url == "http://example.com/new"
 
     async def test_check_url_timeout(self, httpx_mock):
         """Should handle timeout."""
@@ -166,9 +173,9 @@ class TestCheckUrl:
         async with httpx.AsyncClient() as client:
             result = await check_url(client, "http://example.com/slow")
 
-        assert result["ok"] is False
-        assert result["status"] == 0
-        assert result["error"] == "timeout"
+        assert result.ok is False
+        assert result.status == 0
+        assert result.error == "timeout"
 
     async def test_check_url_connection_error(self, httpx_mock):
         """Should handle connection error."""
@@ -181,9 +188,9 @@ class TestCheckUrl:
         async with httpx.AsyncClient() as client:
             result = await check_url(client, "http://example.com/down")
 
-        assert result["ok"] is False
-        assert result["status"] == 0
-        assert "error" in result
+        assert result.ok is False
+        assert result.status == 0
+        assert result.error is not None
 
     async def test_check_url_3xx_is_ok(self, httpx_mock):
         """3xx responses should be ok after redirect."""
@@ -193,7 +200,7 @@ class TestCheckUrl:
             result = await check_url(client, "http://example.com/redirect")
 
         # 301 < 400, so should be ok
-        assert result["ok"] is True
+        assert result.ok is True
 
     async def test_check_url_includes_final_url(self, httpx_mock):
         """Should include final URL after redirects."""
@@ -202,4 +209,4 @@ class TestCheckUrl:
         async with httpx.AsyncClient() as client:
             result = await check_url(client, "http://example.com/page")
 
-        assert "final_url" in result
+        assert result.final_url == "http://example.com/page"

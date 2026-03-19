@@ -1,5 +1,6 @@
 """Postgres storage for crawl results."""
 
+from collections.abc import Mapping
 import hashlib
 import logging
 import re
@@ -8,6 +9,8 @@ from urllib.parse import urlparse
 
 import psycopg2
 import psycopg2.extras
+
+from .result import CrawlResult, result_to_dict
 
 logger = logging.getLogger(__name__)
 
@@ -55,23 +58,24 @@ class PgStorage:
         self._conn.commit()
         logger.info("Postgres storage initialized")
 
-    def save(self, result: dict) -> bool:
+    def save(self, result: CrawlResult | Mapping[str, object]) -> bool:
         """Save a single crawl result. Returns True if inserted."""
-        if result.get("error"):
+        data = result_to_dict(result)
+        if data.get("error"):
             return False
 
-        url = result["url"]
+        url = data["url"]
         url_hash = _url_hash(url)
         domain = urlparse(url).netloc
 
         title = None
-        content = result.get("content", "")
+        content = data.get("content", "")
         if content:
             m = _TITLE_PATTERN.search(content)
             if m:
                 title = m.group(1).strip()[:500]
 
-        outlinks = result.get("outlinks", [])
+        outlinks = data.get("outlinks", [])
 
         try:
             with self._conn.cursor() as cur:
@@ -92,12 +96,12 @@ class PgStorage:
                         domain,
                         title,
                         content,
-                        result.get("status"),
-                        result.get("content_length"),
-                        result.get("depth"),
-                        result.get("source_url"),
+                        data.get("status"),
+                        data.get("content_length"),
+                        data.get("depth"),
+                        data.get("source_url"),
                         outlinks,
-                        result.get("timestamp", time.time()),
+                        data.get("timestamp", time.time()),
                     ),
                 )
             self._conn.commit()

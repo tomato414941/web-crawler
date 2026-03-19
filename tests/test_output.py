@@ -5,6 +5,7 @@ import json
 import pytest
 
 from crawler.output import StreamingOutputWriter
+from crawler.result import CrawlResult
 
 
 class TestStreamingOutputWriter:
@@ -111,3 +112,24 @@ class TestStreamingOutputWriter:
             # File should be readable immediately
             content = output_file.read_text()
             assert "example.com/1" in content
+
+    def test_accepts_crawl_result(self, tmp_path):
+        """Should serialize structured CrawlResult objects."""
+        output_file = tmp_path / "output.jsonl"
+        result = CrawlResult(
+            url="http://example.com",
+            status=200,
+            content_length=5,
+            depth=0,
+            source_url=None,
+            timestamp=123.0,
+            content="Hello",
+            outlinks=[],
+        )
+
+        with StreamingOutputWriter(output_file, include_content=False) as writer:
+            writer.write_one(result)
+
+        content = json.loads(output_file.read_text().strip())
+        assert content["url"] == "http://example.com"
+        assert "content" not in content
