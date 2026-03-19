@@ -13,6 +13,7 @@ import typer
 
 from .config import settings
 from .core import HttpFetcher
+from .discovery import rank_discovered_url, rank_seed_url, seed_hosts_from_urls
 from .domain_manager import DomainManager
 from .domain_store import DomainStore
 from .frontier import CrawlTask, Frontier
@@ -46,6 +47,7 @@ class CrawlerEngine:
         frontier: Frontier | None = None,
         domain_manager: DomainManager | None = None,
         domain_store: DomainStore | None = None,
+        seed_urls: list[str] | None = None,
     ):
         self.start_url = start_url
         self.max_pages = max_pages
@@ -57,6 +59,9 @@ class CrawlerEngine:
         self.pg_storage = pg_storage
 
         self.start_domain = urlparse(start_url).netloc if start_url else ""
+        self.seed_hosts = seed_hosts_from_urls(seed_urls or [])
+        if self.start_domain:
+            self.seed_hosts.add(self.start_domain.lower())
         if frontier:
             self.frontier = frontier
         elif pg_storage:
@@ -114,6 +119,38 @@ class CrawlerEngine:
             return urlparse(url).netloc == self.start_domain
         return True
 
+    def _build_seed_task(self, url: str) -> CrawlTask:
+        """Build the initial frontier task for an explicit seed URL."""
+        decision = rank_seed_url(url)
+        return CrawlTask(
+            url=url,
+            depth=0,
+            priority=decision.priority,
+            discovery_kind=decision.discovery_kind,
+        )
+
+    def _build_discovered_tasks(self, parent_url: str, links: list[str], depth: int) -> list[CrawlTask]:
+        """Assign ranking metadata to discovered outlinks before enqueueing."""
+        tasks: list[CrawlTask] = []
+        for link in links:
+            if not self._is_valid_url(link):
+                continue
+            decision = rank_discovered_url(
+                parent_url=parent_url,
+                url=link,
+                seed_hosts=self.seed_hosts,
+            )
+            tasks.append(
+                CrawlTask(
+                    url=link,
+                    depth=depth,
+                    priority=decision.priority,
+                    discovery_kind=decision.discovery_kind,
+                    source_url=parent_url,
+                )
+            )
+        return tasks
+
     async def _process_url(self, task: CrawlTask) -> CrawlResult | CrawlFailure | None:
         """Process a single URL."""
         url = task.url
@@ -161,11 +198,7 @@ class CrawlerEngine:
             if task.depth < self.max_depth:
                 links = extract_links(response.text, response.url)
                 result.outlinks = links
-                new_tasks = [
-                    CrawlTask(url=link, depth=task.depth + 1, source_url=url)
-                    for link in links
-                    if self._is_valid_url(link)
-                ]
+                new_tasks = self._build_discovered_tasks(url, links, task.depth + 1)
                 self.frontier.add_many(new_tasks)
 
             self.domain_manager.record_success(url)
@@ -268,7 +301,7 @@ class CrawlerEngine:
         self._claimed_pages = 0
 
         if self.start_url and self.frontier.pending_count() == 0:
-            self.frontier.add(CrawlTask(url=self.start_url, depth=0))
+            self.frontier.add(self._build_seed_task(self.start_url))
 
         # Start workers
         workers = [
@@ -323,6 +356,7 @@ async def run_crawl(
                 concurrency=concurrency,
                 output_writer=writer,
                 pg_storage=pg_storage,
+                seed_urls=[start_url],
             ) as engine:
                 await engine.crawl()
                 elapsed = time.time() - start_time
