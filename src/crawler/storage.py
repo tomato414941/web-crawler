@@ -176,12 +176,58 @@ class PgStorage:
             )
             row = cur.fetchone()
 
+            cur.execute("SELECT to_regclass('public.frontier')")
+            frontier_exists = cur.fetchone()[0] is not None
+
+            frontier_status: dict[str, int] = {}
+            discovery_kinds: dict[str, int] = {}
+            top_pending_domains: list[dict[str, object]] = []
+            if frontier_exists:
+                cur.execute("SELECT status, COUNT(*) FROM frontier GROUP BY status")
+                frontier_status = {status: count for status, count in cur.fetchall()}
+
+                cur.execute(
+                    """SELECT discovery_kind, COUNT(*)
+                       FROM frontier
+                       GROUP BY discovery_kind"""
+                )
+                discovery_kinds = {kind: count for kind, count in cur.fetchall()}
+
+                cur.execute(
+                    """SELECT domain, COUNT(*)
+                       FROM frontier
+                       WHERE status = 'pending'
+                       GROUP BY domain
+                       ORDER BY COUNT(*) DESC, domain ASC
+                       LIMIT 10"""
+                )
+                top_pending_domains = [
+                    {"domain": domain, "count": count}
+                    for domain, count in cur.fetchall()
+                ]
+
+            cur.execute(
+                """SELECT domain, COUNT(*)
+                   FROM pages
+                   GROUP BY domain
+                   ORDER BY COUNT(*) DESC, domain ASC
+                   LIMIT 10"""
+            )
+            top_page_domains = [
+                {"domain": domain, "count": count}
+                for domain, count in cur.fetchall()
+            ]
+
         return {
             "total_pages": row[0],
             "domains": row[1],
             "oldest_crawl": row[2],
             "newest_crawl": row[3],
             "total_bytes": row[4],
+            "frontier_status": frontier_status,
+            "discovery_kinds": discovery_kinds,
+            "top_page_domains": top_page_domains,
+            "top_pending_domains": top_pending_domains,
         }
 
     def close(self):
