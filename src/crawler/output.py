@@ -1,8 +1,11 @@
 """Streaming output writer for crawl results."""
 
+from collections.abc import Mapping
 import json
 from pathlib import Path
 from typing import TextIO
+
+from .result import CrawlResult, result_to_dict
 
 
 class StreamingOutputWriter:
@@ -28,15 +31,12 @@ class StreamingOutputWriter:
             self._file.close()
             self._file = None
 
-    def write_one(self, result: dict):
+    def write_one(self, result: CrawlResult | Mapping[str, object]):
         """Write a single result to the output file."""
         if self._file is None:
             raise RuntimeError("StreamingOutputWriter must be used as context manager")
 
-        output = result.copy()
-        if not self.include_content and "content" in output:
-            del output["content"]
-
+        output = result_to_dict(result, include_content=self.include_content)
         self._file.write(json.dumps(output, ensure_ascii=False) + "\n")
         self._file.flush()
         self._count += 1

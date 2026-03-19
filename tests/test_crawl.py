@@ -107,6 +107,12 @@ class TestExtractLinks:
         links = extract_links(html, "http://example.com")
         assert "http://example.com/page1" in links
 
+    def test_handles_unquoted_href_attributes(self):
+        """Should handle unquoted href attributes."""
+        html = "<a href=/page1>Link</a>"
+        links = extract_links(html, "http://example.com")
+        assert "http://example.com/page1" in links
+
     def test_handles_mixed_quotes(self):
         """Should handle mixed quote styles."""
         html = '''
@@ -139,3 +145,9 @@ class TestExtractLinks:
         html = "<p>No links here</p>"
         links = extract_links(html, "http://example.com")
         assert links == []
+
+    def test_extracts_nested_link_text(self):
+        """Parser should still extract links from nested content."""
+        html = '<a href="/page"><strong>Bold</strong> Text</a>'
+        links = extract_links(html, "http://example.com")
+        assert links == ["http://example.com/page"]

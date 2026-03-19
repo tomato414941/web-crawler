@@ -5,11 +5,14 @@ import json
 import logging
 import os
 import sys
+from pathlib import Path
+from typing import Any, Mapping
 
 import typer
 
 from .config import settings
 from .core import HttpFetcher
+from .result import ExtractResult, FetchResult, LinkCheckResult, result_to_dict
 
 app = typer.Typer(
     name="crawler",
@@ -18,8 +21,8 @@ app = typer.Typer(
 )
 
 
-async def _fetch(url: str, use_browser: bool = False, auto: bool = False) -> dict:
-    """Fetch a URL and return result as dict."""
+async def _fetch(url: str, use_browser: bool = False, auto: bool = False) -> FetchResult:
+    """Fetch a URL and return structured result."""
     used_browser = False
 
     if auto:
@@ -44,16 +47,60 @@ async def _fetch(url: str, use_browser: bool = False, auto: bool = False) -> dic
             max_connections=settings.max_connections,
             max_keepalive_connections=settings.max_keepalive_connections,
         )
+    try:
         response = await fetcher.fetch(url)
+        return FetchResult(
+            url=response.url,
+            status=response.status,
+            content_length=len(response.content),
+            headers=response.headers,
+            content=response.text,
+            used_browser=used_browser,
+        )
+    finally:
+        if hasattr(fetcher, "close"):
+            await fetcher.close()
 
-    return {
-        "url": response.url,
-        "status": response.status,
-        "content_length": len(response.content),
-        "headers": response.headers,
-        "content": response.text,
-        "used_browser": used_browser,
-    }
+
+def _write_json_output(output_path: str, result: object | Mapping[str, Any]):
+    """Write structured output as JSON."""
+    path = Path(output_path)
+    with path.open("w", encoding="utf-8") as f:
+        json.dump(result_to_dict(result), f, indent=2, ensure_ascii=False)
+    typer.echo(f"Saved to {output_path}")
+
+
+def _echo_fetch_result(result: FetchResult):
+    """Render fetch results for terminal output."""
+    typer.echo(f"URL: {result.url}")
+    typer.echo(f"Status: {result.status}")
+    typer.echo(f"Content-Length: {result.content_length}")
+    if result.used_browser:
+        typer.echo("Renderer: Browser (Playwright)")
+    typer.echo("---")
+    typer.echo(result.content[:2000])
+    if len(result.content) > 2000:
+        typer.echo(f"\n... (truncated, {len(result.content)} chars total)")
+
+
+def _echo_link_check_result(result: LinkCheckResult):
+    """Render link-check summary for terminal output."""
+    typer.echo(f"Checked {result.total_links} links")
+    typer.echo(f"  OK: {result.ok}")
+    typer.echo(f"  Broken: {result.broken}")
+    typer.echo(f"  Redirects: {result.redirects}")
+    if result.broken_links:
+        typer.echo("\nBroken links:")
+        for link in result.broken_links:
+            typer.echo(f"  {link.status} {link.url}")
+            if link.source:
+                typer.echo(f"    Found on: {link.source}")
+
+
+def _echo_extract_result(result: ExtractResult):
+    """Render extraction results for terminal output."""
+    for i, item in enumerate(result.items, 1):
+        typer.echo(f"{i}. {item}")
 
 
 @app.command()
@@ -68,21 +115,11 @@ def fetch(
     result = asyncio.run(_fetch(url, use_browser=js, auto=auto))
 
     if output:
-        with open(output, "w") as f:
-            json.dump(result, f, indent=2, ensure_ascii=False)
-        typer.echo(f"Saved to {output}")
+        _write_json_output(output, result)
     elif quiet:
-        sys.stdout.write(result["content"])
+        sys.stdout.write(result.content)
     else:
-        typer.echo(f"URL: {result['url']}")
-        typer.echo(f"Status: {result['status']}")
-        typer.echo(f"Content-Length: {result['content_length']}")
-        if result.get("used_browser"):
-            typer.echo("Renderer: Browser (Playwright)")
-        typer.echo("---")
-        typer.echo(result["content"][:2000])
-        if len(result["content"]) > 2000:
-            typer.echo(f"\n... (truncated, {len(result['content'])} chars total)")
+        _echo_fetch_result(result)
 
 
 @app.command()
@@ -131,22 +168,13 @@ def check_links(
         recursive=recursive,
         max_depth=max_depth,
         check_external=external,
+        progress=typer.echo,
     ))
 
     if output:
-        with open(output, "w") as f:
-            json.dump(result, f, indent=2, ensure_ascii=False)
-        typer.echo(f"Saved to {output}")
+        _write_json_output(output, result)
     else:
-        typer.echo(f"Checked {result['total_links']} links")
-        typer.echo(f"  OK: {result['ok']}")
-        typer.echo(f"  Broken: {result['broken']}")
-        typer.echo(f"  Redirects: {result['redirects']}")
-        if result['broken_links']:
-            typer.echo("\nBroken links:")
-            for link in result['broken_links']:
-                typer.echo(f"  {link['status']} {link['url']}")
-                typer.echo(f"    Found on: {link['source']}")
+        _echo_link_check_result(result)
 
 
 @app.command()
@@ -170,12 +198,9 @@ def extract(
     ))
 
     if output:
-        with open(output, "w") as f:
-            json.dump(result, f, indent=2, ensure_ascii=False)
-        typer.echo(f"Saved to {output}")
+        _write_json_output(output, result)
     else:
-        for i, item in enumerate(result['items'], 1):
-            typer.echo(f"{i}. {item}")
+        _echo_extract_result(result)
 
 
 @app.command()

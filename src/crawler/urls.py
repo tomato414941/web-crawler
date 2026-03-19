@@ -1,12 +1,8 @@
 """URL normalization and extraction utilities."""
 
-import re
 from urllib.parse import parse_qsl, urlencode, urljoin, urlparse, urlunparse
 
-_ANCHOR_PATTERN = re.compile(
-    r'<a\s[^>]*href=["\']([^"\']+)["\'][^>]*>(.*?)</a>', re.IGNORECASE | re.DOTALL
-)
-_TAG_PATTERN = re.compile(r'<[^>]+>')
+from selectolax.parser import HTMLParser
 
 _SKIP_SCHEMES = ('#', 'javascript:', 'mailto:', 'tel:', 'data:')
 
@@ -33,7 +29,14 @@ def normalize_url(url: str) -> str:
 
 def extract_links(html: str, base_url: str) -> list[str]:
     """Extract unique normalized URLs from <a> tags in HTML."""
-    return list({url for url, _text in extract_anchors(html, base_url)})
+    seen: set[str] = set()
+    results: list[str] = []
+    for url, _text in extract_anchors(html, base_url):
+        if url in seen:
+            continue
+        seen.add(url)
+        results.append(url)
+    return results
 
 
 def extract_anchors(html: str, base_url: str) -> list[tuple[str, str]]:
@@ -42,8 +45,9 @@ def extract_anchors(html: str, base_url: str) -> list[tuple[str, str]]:
     Resolves relative URLs, skips non-HTTP schemes, normalizes URLs.
     """
     results = []
-    for match in _ANCHOR_PATTERN.finditer(html):
-        href = match.group(1).strip()
+    tree = HTMLParser(html)
+    for node in tree.css("a[href]"):
+        href = node.attributes.get("href", "").strip()
 
         if href.startswith(_SKIP_SCHEMES):
             continue
@@ -54,7 +58,7 @@ def extract_anchors(html: str, base_url: str) -> list[tuple[str, str]]:
         absolute_url = urljoin(base_url, href)
 
         if absolute_url.startswith(('http://', 'https://')):
-            text = _TAG_PATTERN.sub('', match.group(2)).strip()
+            text = node.text(separator=" ", strip=True)
             results.append((normalize_url(absolute_url), text))
 
     return results
