@@ -6,22 +6,36 @@ Async web crawler with adaptive rendering, AI agent, and REST API.
 
 - **Adaptive Fetching** — HTTP first, auto-switches to browser rendering for JS-heavy sites
 - **AI Agent** — Claude-powered autonomous browsing for complex tasks
-- **Bloom Filter** — Memory-efficient URL deduplication
+- **Postgres-backed Frontier** — Persistent crawl scheduler with URL leasing and retry backoff
+- **Host Scheduling State** — Durable per-host crawl delay and cooldown tracking in PostgreSQL
 - **REST API** — Serve crawled pages via `/pages`, `/stats` endpoints
-- **Multiple Output** — JSONL, SQLite, WARC, PostgreSQL
+- **JSONL Export** — Optional streaming output alongside Postgres storage
 - **robots.txt** — Per-domain rate limiting and access control
 - **Link Checker** — Detect broken links on any page
 - **Data Extraction** — CSS selectors and XPath
+- **Daemon Mode** — Continuous crawl loop with stale-page requeueing
 
 ## Install
 
 ```bash
 pip install -e .
 
+# Development / tests
+pip install -e ".[dev]"
+
 # Browser support (optional)
 pip install -e ".[browser]"
 
+# API support (optional)
+pip install -e ".[api]"
+
+# Postgres storage support (required for crawl / serve / daemon)
+pip install -e ".[postgres]"
+
 # AI agent (optional)
+pip install -e ".[agent]"
+
+# Everything
 pip install -e ".[all]"
 ```
 
@@ -31,14 +45,20 @@ pip install -e ".[all]"
 # Fetch a single page
 crawler fetch https://example.com
 
-# Crawl a site (100 pages max)
-crawler crawl https://example.com -n 100
+# Start PostgreSQL locally with Docker
+docker compose up -d postgres
 
-# Output to JSONL
-crawler crawl https://example.com -o results.jsonl
+# Crawl a site (Postgres is required)
+crawler crawl https://example.com -n 100 \
+  --postgres postgresql://crawler:crawler@localhost:5433/crawldb
 
-# Store in PostgreSQL
-crawler crawl https://example.com --postgres postgresql://user:pass@localhost/db
+# Also stream results to JSONL
+crawler crawl https://example.com -o results.jsonl \
+  --postgres postgresql://crawler:crawler@localhost:5433/crawldb
+
+# Serve crawled pages over REST API
+crawler serve --port 8080 \
+  --postgres postgresql://crawler:crawler@localhost:5433/crawldb
 ```
 
 ## CLI Commands
@@ -66,8 +86,7 @@ Options:
   --any-domain        Follow links to other domains
   --js                Use browser rendering for all pages
   -o, --output        Stream results to JSONL file
-  --format            Output format: jsonl, sqlite, warc
-  --postgres DSN      Store results in PostgreSQL
+  --postgres DSN      Required: store frontier and pages in PostgreSQL
   --no-content        Exclude page content from output
 ```
 
@@ -113,11 +132,19 @@ crawler serve --port 8080 --postgres postgresql://user:pass@localhost/db
 
 ```bash
 # Start Postgres + API
-docker compose up -d
+docker compose up -d postgres api
 
-# Run a crawl
+# Run continuous crawler daemon
+docker compose up -d crawler
+
+# Run a one-shot crawl manually
 docker compose run --rm crawler crawler crawl https://example.com -n 100
 ```
+
+Default compose services:
+- `postgres` — persistent crawl data, frontier state, and host scheduling state
+- `api` — FastAPI server on port `8080`
+- `crawler` — continuous daemon worker
 
 ## Architecture
 
@@ -126,10 +153,13 @@ crawler/
 ├── cli.py              # Typer CLI
 ├── api.py              # FastAPI REST server
 ├── crawl.py            # Crawler engine (worker pool)
-├── frontier.py         # URL queue + Bloom filter
-├── domain_manager.py   # robots.txt, rate limiting
+├── frontier.py         # URL scheduler + PostgreSQL leasing
+├── domain_manager.py   # robots.txt, runtime host state
+├── domain_store.py     # Persistent host scheduling state
+├── domain_state.py     # Runtime / persisted host state models
 ├── storage.py          # PostgreSQL storage
 ├── output.py           # JSONL streaming output
+├── result.py           # Typed crawl success/failure results
 ├── extract.py          # CSS/XPath extraction
 ├── links.py            # Link checker
 ├── agent.py            # Claude AI agent
@@ -152,10 +182,29 @@ URL → AdaptiveFetcher
 
 ### Deduplication
 
-Three layers:
-1. **Bloom filter** — fast in-memory check (0.1% false positive)
-2. **SQLite frontier** — persistent unique constraint
-3. **URL normalization** — scheme/host lowering, query sort, fragment removal
+Two layers:
+1. **URL normalization** — scheme/host lowering, query sort, fragment removal
+2. **PostgreSQL frontier** — unique URL primary key with `pending` / `leased` / `done` / `failed` state
+
+### Scheduling
+
+Two persistent schedulers work together:
+1. **URL frontier** — controls retry timing, leasing, and recrawl eligibility
+2. **Host state** — controls per-host crawl delay and cooldown via `domain_state`
+
+## Deployment
+
+Current deployment shape:
+- Server: Hetzner `cx23`
+- Path: `~/projects/web-crawler`
+- Network: Tailscale preferred
+- Runtime: Docker Compose
+- Exposed API: port `8080`
+
+Before pushing:
+- Run `pytest -q`
+- Run `ruff check src tests`
+- Review `docker-compose.yml` env defaults for seeds and crawl pacing
 
 ## License
 
