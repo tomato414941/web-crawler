@@ -4,16 +4,15 @@ import asyncio
 import logging
 import signal
 import time
-from urllib.parse import urlparse
 
 import psycopg2
 
 from .config import settings
 from .crawl import CrawlerEngine
 from .domain_manager import DomainManager
+from .domain_store import DomainStore
 from .frontier import Frontier
 from .storage import PgStorage
-from .urls import normalize_url
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +46,7 @@ class CrawlDaemon:
         self._idle_sleep = idle_sleep
         self._shutdown = False
         self._engine: CrawlerEngine | None = None
+        self._domain_store: DomainStore | None = None
         self._domain_manager = DomainManager(
             user_agent=settings.user_agent,
             default_delay=delay,
@@ -68,7 +68,7 @@ class CrawlDaemon:
             while not self._shutdown:
                 # Ensure DB connection
                 if storage is None:
-                    storage, frontier = self._connect()
+                    storage, frontier = await self._connect()
                     if storage is None:
                         await self._interruptible_sleep(self._idle_sleep)
                         continue
@@ -110,19 +110,24 @@ class CrawlDaemon:
 
         logger.info("Daemon shutdown complete")
 
-    def _connect(self) -> tuple[PgStorage | None, Frontier | None]:
+    async def _connect(self) -> tuple[PgStorage | None, Frontier | None]:
         """Connect to Postgres and initialize frontier."""
         for attempt in range(1, _MAX_RECONNECT_ATTEMPTS + 1):
             try:
                 storage = PgStorage(self._postgres_dsn)
                 frontier = Frontier(storage.conn)
-                self._recover_processing(storage)
+                self._domain_store = DomainStore(storage.conn, default_delay=self._delay)
+                frontier.attach_domain_store(self._domain_store)
+                self._domain_manager.attach_store(self._domain_store)
+                count = frontier.recover_leased(expired_only=False)
+                if count:
+                    logger.info("Recovered %d leased URLs", count)
                 logger.info("Database connected (attempt %d)", attempt)
                 return storage, frontier
             except psycopg2.OperationalError as e:
                 logger.error("Connection attempt %d/%d failed: %s", attempt, _MAX_RECONNECT_ATTEMPTS, e)
                 if attempt < _MAX_RECONNECT_ATTEMPTS:
-                    time.sleep(_RECONNECT_DELAY)
+                    await self._interruptible_sleep(_RECONNECT_DELAY)
         logger.error("All %d connection attempts failed", _MAX_RECONNECT_ATTEMPTS)
         return None, None
 
@@ -145,6 +150,7 @@ class CrawlDaemon:
             pg_storage=storage,
             frontier=frontier,
             domain_manager=self._domain_manager,
+            domain_store=self._domain_store,
         ) as engine:
             self._engine = engine
             await engine.crawl()
@@ -156,45 +162,30 @@ class CrawlDaemon:
         if frontier.pending_count() > 0:
             return
 
-        conn = frontier._conn
-        for url in self._seeds:
-            normalized = normalize_url(url)
-            domain = urlparse(normalized).netloc
-            with conn.cursor() as cur:
-                cur.execute(
-                    """INSERT INTO frontier (url, domain, depth, priority, source_url, added_at, status)
-                       VALUES (%s, %s, 0, 2.0, NULL, %s, 'pending')
-                       ON CONFLICT (url) DO UPDATE SET status = 'pending', added_at = EXCLUDED.added_at""",
-                    (normalized, domain, time.time()),
-                )
-        conn.commit()
-        logger.info("Re-seeded %d URLs", len(self._seeds))
+        count = frontier.upsert_seeds(self._seeds, priority=2.0)
+        logger.info("Re-seeded %d URLs", count)
 
     def _recrawl_stale(self, storage: PgStorage, frontier: Frontier):
         """Re-queue pages older than recrawl_ttl."""
         cutoff = time.time() - self._recrawl_ttl
+        now = time.time()
         with storage.conn.cursor() as cur:
             cur.execute(
-                """UPDATE frontier SET status = 'pending'
+                """UPDATE frontier
+                   SET status = 'pending',
+                       next_fetch_at = %s,
+                       lease_token = NULL,
+                       lease_expires_at = NULL
                    FROM pages
                    WHERE frontier.url = pages.url
                      AND pages.crawled_at < %s
                      AND frontier.status = 'done'""",
-                (cutoff,),
+                (now, cutoff),
             )
             count = cur.rowcount
         storage.conn.commit()
         if count:
             logger.info("Re-queued %d stale pages (TTL=%ds)", count, self._recrawl_ttl)
-
-    def _recover_processing(self, storage: PgStorage):
-        """Reset URLs stuck in processing state from a previous crash."""
-        with storage.conn.cursor() as cur:
-            cur.execute("UPDATE frontier SET status = 'pending' WHERE status = 'processing'")
-            count = cur.rowcount
-        storage.conn.commit()
-        if count:
-            logger.info("Recovered %d URLs from processing state", count)
 
     def _install_signals(self):
         """Register signal handlers for graceful shutdown."""

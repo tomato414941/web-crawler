@@ -14,8 +14,10 @@ import typer
 from .config import settings
 from .core import HttpFetcher
 from .domain_manager import DomainManager
+from .domain_store import DomainStore
 from .frontier import CrawlTask, Frontier
 from .output import StreamingOutputWriter
+from .result import CrawlFailure, CrawlResult
 from .urls import extract_links
 
 logger = logging.getLogger(__name__)
@@ -43,6 +45,7 @@ class CrawlerEngine:
         pg_storage: "PgStorage | None" = None,
         frontier: Frontier | None = None,
         domain_manager: DomainManager | None = None,
+        domain_store: DomainStore | None = None,
     ):
         self.start_url = start_url
         self.max_pages = max_pages
@@ -61,13 +64,22 @@ class CrawlerEngine:
         else:
             raise ValueError("Postgres connection required for frontier")
 
+        if domain_store is None and pg_storage is not None:
+            domain_store = DomainStore(pg_storage.conn, default_delay=delay)
+        self.domain_store = domain_store
+        if self.domain_store is not None:
+            self.frontier.attach_domain_store(self.domain_store)
+
         if domain_manager:
             self.domain_manager = domain_manager
             self._owns_domain_manager = False
+            if hasattr(self.domain_manager, "attach_store"):
+                self.domain_manager.attach_store(self.domain_store)
         else:
             self.domain_manager = DomainManager(
                 user_agent=settings.user_agent,
                 default_delay=delay,
+                domain_store=self.domain_store,
             )
             self._owns_domain_manager = True
 
@@ -80,6 +92,8 @@ class CrawlerEngine:
         self.results: list[dict] = []
         self.pages_crawled = 0
         self._running = False
+        self._claimed_pages = 0
+        self._page_lock = asyncio.Lock()
 
     async def __aenter__(self) -> "CrawlerEngine":
         return self
@@ -100,12 +114,12 @@ class CrawlerEngine:
             return urlparse(url).netloc == self.start_domain
         return True
 
-    async def _process_url(self, task: CrawlTask) -> dict | None:
+    async def _process_url(self, task: CrawlTask) -> CrawlResult | CrawlFailure | None:
         """Process a single URL."""
         url = task.url
 
         if not await self.domain_manager.is_allowed(url):
-            self.frontier.mark_done(url)
+            self.frontier.mark_done(url, lease_token=task.lease_token)
             return None
 
         await self.domain_manager.wait_for_rate_limit(url)
@@ -113,21 +127,40 @@ class CrawlerEngine:
         try:
             response = await self.fetcher.fetch(url)
 
-            result = {
-                "url": response.url,
-                "status": response.status,
-                "content_length": len(response.content),
-                "depth": task.depth,
-                "source_url": task.source_url,
-                "timestamp": time.time(),
-                "content": response.text,
-            }
+            if response.status >= 400:
+                if 400 <= response.status < 500:
+                    self.domain_manager.record_success(url)
+                    self.frontier.mark_done(url, lease_token=task.lease_token)
+                else:
+                    self.domain_manager.record_error(url)
+                    self.frontier.mark_failed(
+                        url,
+                        retryable=True,
+                        error=f"http_{response.status}",
+                        lease_token=task.lease_token,
+                    )
+                return CrawlFailure(
+                    url=response.url,
+                    error=f"http_{response.status}",
+                    retryable=response.status >= 500,
+                    depth=task.depth,
+                )
+
+            result = CrawlResult(
+                url=response.url,
+                status=response.status,
+                content_length=len(response.content),
+                depth=task.depth,
+                source_url=task.source_url,
+                timestamp=time.time(),
+                content=response.text,
+                outlinks=[],
+            )
 
             # Extract and queue new links (dedup handled by frontier ON CONFLICT)
-            outlinks = []
             if task.depth < self.max_depth:
                 links = extract_links(response.text, response.url)
-                outlinks = links
+                result.outlinks = links
                 new_tasks = [
                     CrawlTask(url=link, depth=task.depth + 1, source_url=url)
                     for link in links
@@ -135,47 +168,74 @@ class CrawlerEngine:
                 ]
                 self.frontier.add_many(new_tasks)
 
-            result["outlinks"] = outlinks
-            self.frontier.mark_done(url)
+            self.domain_manager.record_success(url)
+            self.frontier.mark_done(url, lease_token=task.lease_token)
             return result
 
         except httpx.TimeoutException:
             self.domain_manager.record_error(url)
-            self.frontier.mark_failed(url)
-            return {"url": url, "error": "timeout", "retryable": True, "depth": task.depth}
+            self.frontier.mark_failed(
+                url,
+                retryable=True,
+                error="timeout",
+                lease_token=task.lease_token,
+            )
+            return CrawlFailure(url=url, error="timeout", retryable=True, depth=task.depth)
 
         except httpx.ConnectError:
             self.domain_manager.record_error(url)
-            self.frontier.mark_failed(url)
-            return {"url": url, "error": "connection_error", "retryable": True, "depth": task.depth}
-
-        except httpx.HTTPStatusError as e:
-            status_code = e.response.status_code
-            if 400 <= status_code < 500:
-                self.frontier.mark_done(url)
-            else:
-                self.domain_manager.record_error(url)
-                self.frontier.mark_failed(url)
-            return {"url": url, "error": f"http_{status_code}", "retryable": status_code >= 500, "depth": task.depth}
+            self.frontier.mark_failed(
+                url,
+                retryable=True,
+                error="connection_error",
+                lease_token=task.lease_token,
+            )
+            return CrawlFailure(url=url, error="connection_error", retryable=True, depth=task.depth)
 
         except Exception as e:
             self.domain_manager.record_error(url)
             if self.domain_manager.should_retry(url):
-                self.frontier.mark_failed(url)
+                self.frontier.mark_failed(
+                    url,
+                    retryable=True,
+                    error=str(e),
+                    lease_token=task.lease_token,
+                )
             else:
-                self.frontier.mark_done(url)
-            return {"url": url, "error": str(e), "retryable": False, "depth": task.depth}
+                self.frontier.mark_failed(
+                    url,
+                    retryable=False,
+                    error=str(e),
+                    lease_token=task.lease_token,
+                )
+            return CrawlFailure(url=url, error=str(e), retryable=False, depth=task.depth)
+
+    async def _claim_page_slot(self) -> bool:
+        """Reserve capacity so concurrent workers do not exceed max_pages."""
+        async with self._page_lock:
+            if self.pages_crawled + self._claimed_pages >= self.max_pages:
+                return False
+            self._claimed_pages += 1
+            return True
+
+    async def _release_page_slot(self, success: bool):
+        """Release a reserved page slot and commit successful crawls."""
+        async with self._page_lock:
+            self._claimed_pages -= 1
+            if success:
+                self.pages_crawled += 1
 
     async def _worker(self, worker_id: int):
         """Worker coroutine that processes URLs from the frontier."""
         idle_ticks = 0
 
         while self._running:
-            if self.pages_crawled >= self.max_pages:
+            if not await self._claim_page_slot():
                 break
 
-            task = self.frontier.get_next()
+            task = self.frontier.lease_next()
             if not task:
+                await self._release_page_slot(success=False)
                 idle_ticks += 1
                 if idle_ticks >= _WORKER_PATIENCE:
                     break
@@ -185,24 +245,27 @@ class CrawlerEngine:
             idle_ticks = 0
             result = await self._process_url(task)
             if not result:
+                await self._release_page_slot(success=False)
                 continue
 
-            if result.get("error"):
-                logger.warning("Failed %s: %s", result["url"], result["error"])
+            if isinstance(result, CrawlFailure):
+                await self._release_page_slot(success=False)
+                logger.warning("Failed %s: %s", result.url, result.error)
             else:
+                await self._release_page_slot(success=True)
                 if self.pg_storage:
                     self.pg_storage.save(result)
                 if self.output_writer:
                     self.output_writer.write_one(result)
                 elif not self.pg_storage:
-                    self.results.append(result)
-                self.pages_crawled += 1
-                logger.info("[%d/%d] %s", self.pages_crawled, self.max_pages, result["url"])
+                    self.results.append(result.to_dict())
+                logger.info("[%d/%d] %s", self.pages_crawled, self.max_pages, result.url)
 
     async def crawl(self) -> list[dict]:
         """Run the crawler and return results."""
         self._running = True
         self.pages_crawled = 0
+        self._claimed_pages = 0
 
         if self.start_url and self.frontier.pending_count() == 0:
             self.frontier.add(CrawlTask(url=self.start_url, depth=0))

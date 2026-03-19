@@ -6,7 +6,8 @@ import time
 import psycopg2
 import pytest
 
-from crawler.frontier import CrawlTask, Frontier
+from crawler.domain_store import DomainStore
+from crawler.frontier import CrawlTask, Frontier, LEASED_STATUS
 from crawler.urls import normalize_url
 
 PG_DSN = os.environ.get("TEST_POSTGRES_DSN", "postgresql://crawler:crawler@localhost/crawldb_test")
@@ -70,10 +71,12 @@ class TestCrawlTask:
             priority=0.5,
             source_url="http://example.com",
             added_at=1000.0,
+            next_fetch_at=1200.0,
         )
         assert task.depth == 2
         assert task.priority == 0.5
         assert task.added_at == 1000.0
+        assert task.next_fetch_at == 1200.0
 
     def test_added_at_auto_set(self):
         before = time.time()
@@ -90,8 +93,11 @@ class TestFrontier:
         conn.autocommit = False
         with conn.cursor() as cur:
             cur.execute("DROP TABLE IF EXISTS frontier")
+            cur.execute("DROP TABLE IF EXISTS domain_state")
         conn.commit()
         f = Frontier(conn)
+        self.domain_store = DomainStore(conn)
+        f.attach_domain_store(self.domain_store)
         yield f
         conn.close()
 
@@ -119,55 +125,79 @@ class TestFrontier:
         ]
         assert frontier.add_many(tasks) == 2
 
-    def test_get_next_returns_task(self, frontier):
+    def test_lease_next_returns_task(self, frontier):
         frontier.add(CrawlTask(url="http://example.com", depth=0))
-        result = frontier.get_next()
+        result = frontier.lease_next()
         assert result is not None
         assert "example.com" in result.url
+        assert result.lease_token is not None
+        assert result.lease_expires_at is not None
+        assert result.next_fetch_at > 0
 
-    def test_get_next_returns_none_when_empty(self, frontier):
-        assert frontier.get_next() is None
+    def test_lease_next_returns_none_when_empty(self, frontier):
+        assert frontier.lease_next() is None
 
-    def test_get_next_priority_order(self, frontier):
+    def test_lease_next_priority_order(self, frontier):
         frontier.add(CrawlTask(url="http://example.com/low", depth=0, priority=0.5))
         frontier.add(CrawlTask(url="http://example.com/high", depth=0, priority=1.5))
-        result = frontier.get_next()
+        result = frontier.lease_next()
         assert "high" in result.url
 
-    def test_get_next_fifo_same_priority(self, frontier):
+    def test_lease_next_fifo_same_priority(self, frontier):
         frontier.add(CrawlTask(url="http://example.com/first", depth=0, added_at=1000))
         frontier.add(CrawlTask(url="http://example.com/second", depth=0, added_at=2000))
-        result = frontier.get_next()
+        result = frontier.lease_next()
         assert "first" in result.url
 
-    def test_get_next_marks_processing(self, frontier):
+    def test_lease_next_marks_leased(self, frontier):
         frontier.add(CrawlTask(url="http://example.com", depth=0))
-        frontier.get_next()
-        assert frontier.get_next() is None
+        frontier.lease_next()
+        assert frontier.lease_next() is None
 
-    def test_get_batch(self, frontier):
+        with frontier._conn.cursor() as cur:
+            cur.execute("SELECT status FROM frontier WHERE url = %s", ("http://example.com/",))
+            (status,) = cur.fetchone()
+
+        assert status == LEASED_STATUS
+
+    def test_lease_batch(self, frontier):
         for i in range(5):
             frontier.add(CrawlTask(url=f"http://example.com/{i}", depth=0))
-        batch = frontier.get_batch(count=3)
+        batch = frontier.lease_batch(count=3)
         assert len(batch) == 3
 
     def test_mark_done(self, frontier):
         frontier.add(CrawlTask(url="http://example.com", depth=0))
-        result = frontier.get_next()
-        frontier.mark_done(result.url)
+        result = frontier.lease_next()
+        frontier.mark_done(result.url, lease_token=result.lease_token)
         assert frontier.stats().get("done", 0) == 1
 
     def test_mark_failed(self, frontier):
         frontier.add(CrawlTask(url="http://example.com", depth=0))
-        result = frontier.get_next()
-        frontier.mark_failed(result.url)
+        result = frontier.lease_next()
+        frontier.mark_failed(result.url, lease_token=result.lease_token)
         assert frontier.stats().get("failed", 0) == 1
 
     def test_requeue_failed(self, frontier):
         frontier.add(CrawlTask(url="http://example.com", depth=0))
-        result = frontier.get_next()
-        frontier.mark_failed(result.url)
+        result = frontier.lease_next()
+        frontier.mark_failed(result.url, lease_token=result.lease_token)
         assert frontier.requeue_failed() == 1
+        assert frontier.pending_count() == 1
+
+    def test_recover_leased(self, frontier):
+        frontier.add(CrawlTask(url="http://example.com", depth=0))
+        frontier.lease_next()
+        assert frontier.recover_leased(expired_only=False) == 1
+        assert frontier.pending_count() == 1
+
+    def test_upsert_seeds_requeues_done_url(self, frontier):
+        frontier.add(CrawlTask(url="http://example.com", depth=0))
+        result = frontier.lease_next()
+        frontier.mark_done(result.url, lease_token=result.lease_token)
+
+        frontier.upsert_seeds(["http://example.com"])
+
         assert frontier.pending_count() == 1
 
     def test_stats(self, frontier):
@@ -187,12 +217,91 @@ class TestFrontier:
         frontier.add(CrawlTask(url="http://example.com/1", depth=0))
         frontier.add(CrawlTask(url="http://example.com/2", depth=0))
         assert frontier.pending_count() == 2
-        frontier.get_next()
+        frontier.lease_next()
         assert frontier.pending_count() == 1
 
     def test_domain_filter(self, frontier):
         frontier.add(CrawlTask(url="http://a.com/page", depth=0))
         frontier.add(CrawlTask(url="http://b.com/page", depth=0))
-        result = frontier.get_next(domain="a.com")
+        result = frontier.lease_next(domain="a.com")
         assert result is not None
         assert "a.com" in result.url
+
+    def test_lease_next_skips_host_under_backoff(self, frontier):
+        self.domain_store.record_failure("a.com", backoff_seconds=60.0, now=time.time())
+        frontier.add(CrawlTask(url="http://a.com/page", depth=0, priority=2.0))
+        frontier.add(CrawlTask(url="http://b.com/page", depth=0, priority=1.0))
+
+        result = frontier.lease_next()
+
+        assert result is not None
+        assert "b.com" in result.url
+
+    def test_lease_next_recovers_expired_lease(self, frontier):
+        frontier.add(CrawlTask(url="http://example.com", depth=0))
+        first = frontier.lease_next(lease_seconds=0.01)
+        assert first is not None
+
+        time.sleep(0.02)
+
+        second = frontier.lease_next()
+        assert second is not None
+        assert second.url == first.url
+        assert second.lease_token != first.lease_token
+
+    def test_retryable_failure_delays_next_fetch(self, frontier):
+        frontier.add(CrawlTask(url="http://example.com", depth=0))
+        result = frontier.lease_next()
+        assert result is not None
+
+        frontier.mark_failed(
+            result.url,
+            retryable=True,
+            error="timeout",
+            backoff_seconds=60,
+            lease_token=result.lease_token,
+        )
+
+        assert frontier.lease_next() is None
+
+        with frontier._conn.cursor() as cur:
+            cur.execute(
+                "SELECT status, fail_streak, last_error, next_fetch_at FROM frontier WHERE url = %s",
+                (result.url,),
+            )
+            status, fail_streak, last_error, next_fetch_at = cur.fetchone()
+
+        assert status == "pending"
+        assert fail_streak == 1
+        assert last_error == "timeout"
+        assert next_fetch_at > time.time()
+
+    def test_mark_done_resets_fail_streak(self, frontier):
+        frontier.add(CrawlTask(url="http://example.com", depth=0))
+        first = frontier.lease_next()
+        assert first is not None
+
+        frontier.mark_failed(
+            first.url,
+            retryable=True,
+            error="timeout",
+            backoff_seconds=0,
+            lease_token=first.lease_token,
+        )
+
+        second = frontier.lease_next()
+        assert second is not None
+
+        frontier.mark_done(second.url, lease_token=second.lease_token)
+
+        with frontier._conn.cursor() as cur:
+            cur.execute(
+                "SELECT status, fail_streak, last_success_at, last_error FROM frontier WHERE url = %s",
+                (second.url,),
+            )
+            status, fail_streak, last_success_at, last_error = cur.fetchone()
+
+        assert status == "done"
+        assert fail_streak == 0
+        assert last_success_at is not None
+        assert last_error is None
