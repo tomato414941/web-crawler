@@ -66,3 +66,72 @@ def test_upsert_on_conflict(pg_storage):
     with pg_storage._conn.cursor() as cur:
         cur.execute("SELECT title FROM pages WHERE url = %s", ("https://example.com/page1",))
         assert cur.fetchone()[0] == "V2"
+
+
+def test_get_stats_includes_frontier_breakdown(pg_storage):
+    page_results = [
+        {
+            "url": "https://example.com/page1",
+            "status": 200,
+            "content_length": 100,
+            "depth": 0,
+            "timestamp": 1710000000.0,
+            "content": "<html><title>Example</title></html>",
+            "outlinks": [],
+        },
+        {
+            "url": "https://other.com/page1",
+            "status": 200,
+            "content_length": 50,
+            "depth": 0,
+            "timestamp": 1710000001.0,
+            "content": "<html><title>Other</title></html>",
+            "outlinks": [],
+        },
+    ]
+    for result in page_results:
+        pg_storage.save(result)
+
+    with pg_storage._conn.cursor() as cur:
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS frontier (
+                url TEXT PRIMARY KEY,
+                domain TEXT NOT NULL,
+                depth INTEGER NOT NULL,
+                priority REAL NOT NULL DEFAULT 1.0,
+                discovery_kind TEXT NOT NULL DEFAULT 'seed',
+                source_url TEXT,
+                added_at DOUBLE PRECISION NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                next_fetch_at DOUBLE PRECISION NOT NULL DEFAULT 0,
+                last_success_at DOUBLE PRECISION,
+                fail_streak INTEGER NOT NULL DEFAULT 0,
+                lease_token TEXT,
+                lease_expires_at DOUBLE PRECISION,
+                last_error TEXT
+            )
+            """
+        )
+        cur.execute(
+            """
+            INSERT INTO frontier (url, domain, depth, priority, discovery_kind, source_url, added_at, status, next_fetch_at)
+            VALUES
+                ('https://example.com/page1', 'example.com', 0, 2.0, 'seed', NULL, 1710000000.0, 'done', 1710000000.0),
+                ('https://example.com/page2', 'example.com', 1, 1.25, 'same_host', 'https://example.com/page1', 1710000002.0, 'pending', 1710000002.0),
+                ('https://other.com/page1', 'other.com', 1, 0.8, 'external', 'https://example.com/page1', 1710000003.0, 'pending', 1710000003.0)
+            """
+        )
+    pg_storage._conn.commit()
+
+    stats = pg_storage.get_stats()
+
+    assert stats["total_pages"] == 2
+    assert stats["domains"] == 2
+    assert stats["frontier_status"] == {"done": 1, "pending": 2}
+    assert stats["discovery_kinds"] == {"external": 1, "same_host": 1, "seed": 1}
+    assert stats["top_page_domains"][0] == {"domain": "example.com", "count": 1}
+    assert stats["top_pending_domains"] == [
+        {"domain": "example.com", "count": 1},
+        {"domain": "other.com", "count": 1},
+    ]
