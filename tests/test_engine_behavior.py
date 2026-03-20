@@ -6,7 +6,14 @@ import pytest
 
 from crawler.core import Response
 from crawler.crawl import CrawlerEngine
-from crawler.discovery import DISCOVERY_EXTERNAL, DISCOVERY_SAME_HOST, DISCOVERY_SEED_HOST
+from crawler.discovery import (
+    ARCHETYPE_DOCUMENT_PAGE,
+    ARCHETYPE_GENERIC_PAGE,
+    ARCHETYPE_REDIRECT_HUB,
+    DISCOVERY_EXTERNAL,
+    DISCOVERY_SAME_HOST,
+    DISCOVERY_SEED_HOST,
+)
 from crawler.frontier import CrawlTask
 
 
@@ -219,14 +226,56 @@ async def test_crawler_assigns_discovery_metadata_to_outlinks():
     by_url = {task.url: task for task in added}
 
     assert by_url["https://www.iana.org/domains"].discovery_kind == DISCOVERY_SAME_HOST
+    assert by_url["https://www.iana.org/domains"].archetype == ARCHETYPE_GENERIC_PAGE
     assert by_url["https://www.iana.org/domains"].priority > by_url[
         "https://datatracker.ietf.org/wg"
     ].priority
     assert by_url["https://datatracker.ietf.org/wg"].discovery_kind == DISCOVERY_SEED_HOST
+    assert by_url["https://datatracker.ietf.org/wg"].archetype == ARCHETYPE_GENERIC_PAGE
     assert by_url["https://datatracker.ietf.org/wg"].priority > by_url[
         "https://github.com/ietf-tools/datatracker"
     ].priority
     assert by_url["https://github.com/ietf-tools/datatracker"].discovery_kind == DISCOVERY_EXTERNAL
+    assert by_url["https://github.com/ietf-tools/datatracker"].archetype == ARCHETYPE_GENERIC_PAGE
+
+
+@pytest.mark.asyncio
+async def test_crawler_assigns_page_archetypes_to_outlinks():
+    frontier = FakeFrontier([CrawlTask(url="https://www.iana.org/", depth=0)])
+    domain_manager = FakeDomainManager()
+    fetcher = FakeFetcher(
+        [
+            Response(
+                url="https://www.iana.org/",
+                status=200,
+                content=(
+                    b'<a href="https://www.iana.org/go/rfc9142">redirect hub</a>'
+                    b'<a href="https://datatracker.ietf.org/doc/html/rfc9142">document</a>'
+                ),
+                headers={"content-type": "text/html; charset=utf-8"},
+            )
+        ]
+    )
+
+    async with CrawlerEngine(
+        max_pages=1,
+        max_depth=1,
+        same_domain=False,
+        frontier=frontier,
+        domain_manager=domain_manager,
+        seed_urls=["https://www.iana.org/", "https://datatracker.ietf.org/"],
+    ) as engine:
+        engine.fetcher = fetcher
+        await engine.crawl()
+
+    added = frontier.added_batches[0]
+    by_url = {task.url: task for task in added}
+
+    assert by_url["https://www.iana.org/go/rfc9142"].archetype == ARCHETYPE_REDIRECT_HUB
+    assert by_url["https://datatracker.ietf.org/doc/html/rfc9142"].archetype == ARCHETYPE_DOCUMENT_PAGE
+    assert by_url["https://datatracker.ietf.org/doc/html/rfc9142"].priority > by_url[
+        "https://www.iana.org/go/rfc9142"
+    ].priority
 
 
 @pytest.mark.asyncio
