@@ -15,6 +15,13 @@ SAME_HOST_PRIORITY = 1.25
 SEED_HOST_PRIORITY = 1.1
 EXTERNAL_PRIORITY = 0.8
 
+_DISCOVERY_RANKS = {
+    DISCOVERY_EXTERNAL: 1,
+    DISCOVERY_SEED_HOST: 2,
+    DISCOVERY_SAME_HOST: 3,
+    DISCOVERY_SEED: 4,
+}
+
 
 @dataclass(frozen=True)
 class EnqueueDecision:
@@ -32,6 +39,11 @@ def host_key(url: str) -> str:
 def seed_hosts_from_urls(urls: list[str]) -> set[str]:
     """Extract normalized host keys from seed URLs."""
     return {host for host in (host_key(url) for url in urls) if host}
+
+
+def discovery_rank(discovery_kind: str) -> int:
+    """Return an ordering score for discovery provenance."""
+    return _DISCOVERY_RANKS.get(discovery_kind, 0)
 
 
 def rank_seed_url(url: str) -> EnqueueDecision:

@@ -122,6 +122,9 @@ class CrawlDaemon:
                 count = frontier.recover_leased(expired_only=False)
                 if count:
                     logger.info("Recovered %d leased URLs", count)
+                reranked = frontier.rerank_discovered(self._seeds)
+                if reranked:
+                    logger.info("Re-ranked %d frontier URLs", reranked)
                 logger.info("Database connected (attempt %d)", attempt)
                 return storage, frontier
             except psycopg2.OperationalError as e:
