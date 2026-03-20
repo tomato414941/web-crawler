@@ -21,6 +21,7 @@ _RECONNECT_DELAY = 5.0
 _BACKLOG_READY_PER_HOST = 128
 _BACKLOG_LOW_PRIORITY = 0.75
 _BACKLOG_DEFER_SECONDS = 1800.0
+_MIN_READY_SLEEP = 0.5
 
 
 class CrawlDaemon:
@@ -94,8 +95,25 @@ class CrawlDaemon:
                         await self._interruptible_sleep(self._idle_sleep)
                         continue
 
+                    ready = frontier.ready_count()
+                    if ready == 0:
+                        next_ready_delay = frontier.next_ready_delay()
+                        sleep_seconds = self._idle_sleep
+                        if next_ready_delay is not None:
+                            sleep_seconds = min(
+                                self._idle_sleep,
+                                max(_MIN_READY_SLEEP, next_ready_delay),
+                            )
+                        logger.info(
+                            "No ready URLs (pending=%d), sleeping %.1fs",
+                            pending,
+                            sleep_seconds,
+                        )
+                        await self._interruptible_sleep(sleep_seconds)
+                        continue
+
                     cycle += 1
-                    logger.info("Cycle %d: %d pending URLs", cycle, pending)
+                    logger.info("Cycle %d: %d ready / %d pending URLs", cycle, ready, pending)
                     start = time.time()
                     pages = await self._run_cycle(storage, frontier)
                     elapsed = time.time() - start
