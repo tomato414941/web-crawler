@@ -158,6 +158,30 @@ class Frontier:
 
         return " AND ".join(conditions), params
 
+    def _ready_at_sql(self, alias: str) -> str:
+        """Return SQL that computes when a pending URL becomes leaseable."""
+        parts = [f"{alias}.next_fetch_at"]
+        if self._domain_store is not None:
+            parts.extend(
+                [
+                    (
+                        "COALESCE(("
+                        "SELECT ds.next_request_at "
+                        "FROM domain_state AS ds "
+                        f"WHERE ds.host_key = {alias}.domain"
+                        "), 0)"
+                    ),
+                    (
+                        "COALESCE(("
+                        "SELECT ds.backoff_until "
+                        "FROM domain_state AS ds "
+                        f"WHERE ds.host_key = {alias}.domain"
+                        "), 0)"
+                    ),
+                ]
+            )
+        return f"GREATEST({', '.join(parts)})"
+
     def _recover_leased_locked(self, now: float, expired_only: bool) -> int:
         """Reset leased URLs back to pending inside an open transaction."""
         if expired_only:
@@ -724,6 +748,32 @@ class Frontier:
                 (PENDING_STATUS,),
             )
             return cur.fetchone()[0]
+
+    def ready_count(self, now: float | None = None) -> int:
+        """Get count of pending URLs that are leaseable right now."""
+        now = time.time() if now is None else now
+        where, params = self._build_ready_where(alias="frontier", now=now)
+        with self._conn.cursor() as cur:
+            cur.execute(f"SELECT COUNT(*) FROM frontier WHERE {where}", params)
+            return cur.fetchone()[0]
+
+    def next_ready_delay(self, now: float | None = None) -> float | None:
+        """Return seconds until the next pending URL becomes leaseable."""
+        now = time.time() if now is None else now
+        ready_at_sql = self._ready_at_sql("frontier")
+        with self._conn.cursor() as cur:
+            cur.execute(
+                f"""SELECT MIN({ready_at_sql})
+                    FROM frontier
+                    WHERE status = %s""",
+                (PENDING_STATUS,),
+            )
+            row = cur.fetchone()
+
+        next_ready_at = row[0] if row else None
+        if next_ready_at is None:
+            return None
+        return max(0.0, next_ready_at - now)
 
     def is_seen(self, url: str) -> bool:
         """Check if URL exists in frontier."""

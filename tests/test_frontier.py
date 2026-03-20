@@ -301,6 +301,30 @@ class TestFrontier:
         frontier.lease_next()
         assert frontier.pending_count() == 1
 
+    def test_ready_count_ignores_future_next_fetch(self, frontier):
+        now = time.time()
+        frontier.add(
+            CrawlTask(
+                url="http://example.com/future",
+                depth=0,
+                next_fetch_at=now + 60,
+            )
+        )
+        frontier.add(CrawlTask(url="http://example.com/ready", depth=0, next_fetch_at=now))
+
+        assert frontier.pending_count() == 2
+        assert frontier.ready_count(now=now) == 1
+        assert frontier.next_ready_delay(now=now) == pytest.approx(0.0, abs=1e-6)
+
+    def test_ready_count_respects_domain_backoff(self, frontier):
+        now = time.time()
+        frontier.add(CrawlTask(url="http://a.com/1", depth=0, next_fetch_at=now))
+        self.domain_store.record_failure("a.com", backoff_seconds=30.0, now=now)
+
+        assert frontier.pending_count() == 1
+        assert frontier.ready_count(now=now) == 0
+        assert frontier.next_ready_delay(now=now) == pytest.approx(30.0, abs=1e-3)
+
     def test_domain_filter(self, frontier):
         frontier.add(CrawlTask(url="http://a.com/page", depth=0))
         frontier.add(CrawlTask(url="http://b.com/page", depth=0))
