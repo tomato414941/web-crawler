@@ -7,7 +7,7 @@ import psycopg2
 import pytest
 
 from crawler.domain_store import DomainStore
-from crawler.discovery import DISCOVERY_SEED_HOST
+from crawler.discovery import DISCOVERY_EXTERNAL, DISCOVERY_SAME_HOST, DISCOVERY_SEED_HOST
 from crawler.frontier import CrawlTask, Frontier, LEASED_STATUS
 from crawler.urls import normalize_url
 
@@ -126,6 +126,38 @@ class TestFrontier:
         ]
         assert frontier.add_many(tasks) == 2
 
+    def test_add_upgrades_existing_metadata_when_better_discovery_arrives(self, frontier):
+        assert frontier.add(
+            CrawlTask(
+                url="http://example.com/page",
+                depth=1,
+                priority=0.8,
+                discovery_kind=DISCOVERY_EXTERNAL,
+                source_url="http://other.com",
+            )
+        )
+
+        assert frontier.add(
+            CrawlTask(
+                url="http://example.com/page",
+                depth=1,
+                priority=1.25,
+                discovery_kind=DISCOVERY_SAME_HOST,
+                source_url="http://example.com/",
+            )
+        )
+
+        with frontier._conn.cursor() as cur:
+            cur.execute(
+                "SELECT priority, discovery_kind, source_url FROM frontier WHERE url = %s",
+                ("http://example.com/page",),
+            )
+            priority, discovery_kind, source_url = cur.fetchone()
+
+        assert priority == 1.25
+        assert discovery_kind == DISCOVERY_SAME_HOST
+        assert source_url == "http://other.com"
+
     def test_add_persists_discovery_kind(self, frontier):
         frontier.add(
             CrawlTask(
@@ -167,6 +199,17 @@ class TestFrontier:
         frontier.add(CrawlTask(url="http://example.com/second", depth=0, added_at=2000))
         result = frontier.lease_next()
         assert "first" in result.url
+
+    def test_lease_next_prefers_less_congested_host_when_priority_matches(self, frontier):
+        frontier.add(CrawlTask(url="http://a.com/1", depth=0, priority=1.0, added_at=1000))
+        frontier.add(CrawlTask(url="http://a.com/2", depth=0, priority=1.0, added_at=1001))
+        frontier.add(CrawlTask(url="http://a.com/3", depth=0, priority=1.0, added_at=1002))
+        frontier.add(CrawlTask(url="http://b.com/1", depth=0, priority=1.0, added_at=2000))
+
+        result = frontier.lease_next()
+
+        assert result is not None
+        assert result.url == "http://b.com/1"
 
     def test_lease_next_marks_leased(self, frontier):
         frontier.add(CrawlTask(url="http://example.com", depth=0))
@@ -333,3 +376,38 @@ class TestFrontier:
         assert fail_streak == 0
         assert last_success_at is not None
         assert last_error is None
+
+    def test_rerank_discovered_updates_legacy_backlog(self, frontier):
+        frontier.add(
+            CrawlTask(
+                url="http://example.com/page",
+                depth=1,
+                priority=1.0,
+                discovery_kind="seed",
+                source_url="http://example.com/",
+            )
+        )
+        frontier.add(
+            CrawlTask(
+                url="http://external.com/page",
+                depth=1,
+                priority=1.0,
+                discovery_kind="seed",
+                source_url="http://example.com/",
+            )
+        )
+
+        updated = frontier.rerank_discovered(["http://example.com/"])
+
+        assert updated == 2
+
+        with frontier._conn.cursor() as cur:
+            cur.execute(
+                "SELECT url, priority, discovery_kind FROM frontier ORDER BY url ASC"
+            )
+            rows = cur.fetchall()
+
+        assert rows == [
+            ("http://example.com/page", 1.25, DISCOVERY_SAME_HOST),
+            ("http://external.com/page", 0.8, DISCOVERY_EXTERNAL),
+        ]

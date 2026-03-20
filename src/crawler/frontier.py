@@ -11,7 +11,7 @@ from urllib.parse import urlparse
 
 import psycopg2.extras
 
-from .discovery import DISCOVERY_SEED
+from .discovery import DISCOVERY_SEED, discovery_rank, rank_discovered_url, rank_seed_url, seed_hosts_from_urls
 from .urls import normalize_url
 
 if TYPE_CHECKING:
@@ -58,6 +58,8 @@ CREATE INDEX IF NOT EXISTS idx_frontier_status ON frontier(status);
 CREATE INDEX IF NOT EXISTS idx_frontier_domain ON frontier(domain);
 CREATE INDEX IF NOT EXISTS idx_frontier_pending
     ON frontier(priority DESC, next_fetch_at ASC, added_at ASC) WHERE status = 'pending';
+CREATE INDEX IF NOT EXISTS idx_frontier_pending_domain
+    ON frontier(domain) WHERE status = 'pending';
 CREATE INDEX IF NOT EXISTS idx_frontier_leased_expiry
     ON frontier(lease_expires_at) WHERE status = 'leased';
 """
@@ -190,50 +192,76 @@ class Frontier:
         self._conn.commit()
         logger.info("Frontier schema initialized")
 
-    def add(self, task: CrawlTask) -> bool:
-        """Add a URL to the frontier. Returns False if already exists."""
-        normalized_url = normalize_url(task.url)
-        task.url = normalized_url
-        domain = urlparse(normalized_url).netloc
-        next_fetch_at = task.next_fetch_at or task.added_at or time.time()
+    def _is_better_task(self, candidate: CrawlTask, current: CrawlTask) -> bool:
+        """Return True when candidate should replace current task metadata."""
+        if candidate.priority != current.priority:
+            return candidate.priority > current.priority
+        return discovery_rank(candidate.discovery_kind) > discovery_rank(current.discovery_kind)
 
-        try:
-            with self._conn.cursor() as cur:
-                cur.execute(
-                    """INSERT INTO frontier (
-                           url, domain, depth, priority, discovery_kind, source_url, added_at, next_fetch_at
-                       )
-                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-                       ON CONFLICT (url) DO NOTHING""",
-                    (
-                        task.url,
-                        domain,
-                        task.depth,
-                        task.priority,
-                        task.discovery_kind,
-                        task.source_url,
-                        task.added_at,
-                        next_fetch_at,
-                    ),
-                )
-                inserted = cur.rowcount > 0
-            self._conn.commit()
-            return inserted
-        except Exception:
-            self._conn.rollback()
-            logger.exception("Failed to add %s", task.url)
-            return False
+    def _merge_task(self, current: CrawlTask, candidate: CrawlTask) -> CrawlTask:
+        """Merge duplicate task metadata before bulk upsert."""
+        preferred = candidate if self._is_better_task(candidate, current) else current
+        return CrawlTask(
+            url=preferred.url,
+            depth=min(current.depth, candidate.depth),
+            priority=preferred.priority,
+            discovery_kind=preferred.discovery_kind,
+            source_url=preferred.source_url or current.source_url or candidate.source_url,
+            added_at=min(current.added_at, candidate.added_at),
+            next_fetch_at=min(current.next_fetch_at, candidate.next_fetch_at),
+        )
 
-    def add_many(self, tasks: list[CrawlTask]) -> int:
-        """Add multiple URLs in a single transaction. Returns count of new URLs added."""
+    def _prepare_tasks(self, tasks: list[CrawlTask]) -> list[CrawlTask]:
+        """Normalize and deduplicate tasks before writing to Postgres."""
+        merged: dict[str, CrawlTask] = {}
+        for task in tasks:
+            normalized_url = normalize_url(task.url)
+            normalized = CrawlTask(
+                url=normalized_url,
+                depth=task.depth,
+                priority=task.priority,
+                discovery_kind=task.discovery_kind,
+                source_url=task.source_url,
+                added_at=task.added_at,
+                next_fetch_at=task.next_fetch_at,
+            )
+            existing = merged.get(normalized.url)
+            if existing is None:
+                merged[normalized.url] = normalized
+            else:
+                merged[normalized.url] = self._merge_task(existing, normalized)
+        return list(merged.values())
+
+    def _discovery_rank_sql(self, column: str) -> str:
+        """Return SQL that maps discovery kind to a comparable rank."""
+        return (
+            f"CASE {column} "
+            f"WHEN 'external' THEN 1 "
+            f"WHEN 'seed_host' THEN 2 "
+            f"WHEN 'same_host' THEN 3 "
+            f"WHEN 'seed' THEN 4 "
+            f"ELSE 0 END"
+        )
+
+    def _host_pressure_sql(self, alias: str) -> str:
+        """Return SQL that estimates how congested a host is in the pending queue."""
+        return (
+            "COALESCE(("
+            "SELECT COUNT(*) "
+            "FROM frontier AS pressure "
+            f"WHERE pressure.status = '{PENDING_STATUS}' "
+            f"AND pressure.domain = {alias}.domain"
+            "), 0)"
+        )
+
+    def _upsert_tasks(self, tasks: list[CrawlTask]) -> int:
+        """Insert new tasks and promote existing metadata when a better discovery wins."""
         if not tasks:
             return 0
 
         rows = []
-        for task in tasks:
-            normalized_url = normalize_url(task.url)
-            task.url = normalized_url
-            domain = urlparse(normalized_url).netloc
+        for task in self._prepare_tasks(tasks):
+            domain = urlparse(task.url).netloc
             next_fetch_at = task.next_fetch_at or task.added_at or time.time()
             rows.append(
                 (
@@ -248,25 +276,86 @@ class Frontier:
                 )
             )
 
+        existing_rank = self._discovery_rank_sql("frontier.discovery_kind")
+        new_rank = self._discovery_rank_sql("EXCLUDED.discovery_kind")
         try:
             with self._conn.cursor() as cur:
                 psycopg2.extras.execute_values(
                     cur,
-                    """INSERT INTO frontier (
+                    f"""INSERT INTO frontier (
                            url, domain, depth, priority, discovery_kind, source_url, added_at, next_fetch_at
                        )
                        VALUES %s
-                       ON CONFLICT (url) DO NOTHING""",
+                       ON CONFLICT (url) DO UPDATE SET
+                           priority = GREATEST(frontier.priority, EXCLUDED.priority),
+                           discovery_kind = CASE
+                               WHEN {new_rank} > {existing_rank}
+                                   THEN EXCLUDED.discovery_kind
+                               ELSE frontier.discovery_kind
+                           END,
+                           source_url = COALESCE(frontier.source_url, EXCLUDED.source_url),
+                           depth = LEAST(frontier.depth, EXCLUDED.depth),
+                           added_at = LEAST(frontier.added_at, EXCLUDED.added_at),
+                           next_fetch_at = LEAST(frontier.next_fetch_at, EXCLUDED.next_fetch_at)
+                       WHERE
+                           EXCLUDED.priority > frontier.priority
+                           OR {new_rank} > {existing_rank}
+                           OR EXCLUDED.depth < frontier.depth
+                           OR frontier.source_url IS NULL
+                           OR EXCLUDED.next_fetch_at < frontier.next_fetch_at""",
                     rows,
                     page_size=200,
                 )
-                inserted = cur.rowcount
-            self._conn.commit()
-            return inserted
+                return cur.rowcount
         except Exception:
             self._conn.rollback()
-            logger.exception("Failed to add batch of %d URLs", len(tasks))
+            logger.exception("Failed to upsert batch of %d URLs", len(tasks))
             return 0
+
+    def rerank_discovered(self, seed_urls: list[str]) -> int:
+        """Recompute backlog priority and discovery metadata using current ranking rules."""
+        seed_hosts = seed_hosts_from_urls(seed_urls)
+        updates: list[tuple[float, str, str]] = []
+        with self._conn.cursor() as cur:
+            cur.execute("SELECT url, source_url, priority, discovery_kind FROM frontier")
+            rows = cur.fetchall()
+
+        for url, source_url, priority, discovery_kind in rows:
+            if source_url:
+                decision = rank_discovered_url(
+                    parent_url=source_url,
+                    url=url,
+                    seed_hosts=seed_hosts,
+                )
+            else:
+                decision = rank_seed_url(url)
+
+            if priority != decision.priority or discovery_kind != decision.discovery_kind:
+                updates.append((decision.priority, decision.discovery_kind, url))
+
+        if not updates:
+            return 0
+
+        with self._conn.cursor() as cur:
+            psycopg2.extras.execute_batch(
+                cur,
+                """UPDATE frontier
+                   SET priority = %s,
+                       discovery_kind = %s
+                   WHERE url = %s""",
+                updates,
+                page_size=200,
+            )
+        self._conn.commit()
+        return len(updates)
+
+    def add(self, task: CrawlTask) -> bool:
+        """Add a URL to the frontier. Returns True if inserted or metadata improved."""
+        return self._upsert_tasks([task]) > 0
+
+    def add_many(self, tasks: list[CrawlTask]) -> int:
+        """Add multiple URLs. Existing rows are promoted when a better discovery wins."""
+        return self._upsert_tasks(tasks)
 
     def lease_next(
         self,
@@ -279,6 +368,7 @@ class Frontier:
         duration = self._lease_seconds if lease_seconds is None else lease_seconds
         lease_expires_at = now + duration
         where, where_params = self._build_ready_where(alias="candidate", now=now, domain=domain)
+        host_pressure = self._host_pressure_sql("candidate")
         params: list[object] = [lease_token, lease_expires_at, *where_params]
 
         try:
@@ -295,6 +385,7 @@ class Frontier:
                             WHERE {where}
                             ORDER BY
                                 candidate.priority DESC,
+                                {host_pressure} ASC,
                                 candidate.next_fetch_at ASC,
                                 candidate.added_at ASC
                             LIMIT 1
@@ -352,6 +443,7 @@ class Frontier:
         duration = self._lease_seconds if lease_seconds is None else lease_seconds
         lease_expires_at = now + duration
         where, where_params = self._build_ready_where(alias="candidate", now=now, domain=domain)
+        host_pressure = self._host_pressure_sql("candidate")
         params: list[object] = [lease_token, lease_expires_at, *where_params, count]
 
         try:
@@ -368,6 +460,7 @@ class Frontier:
                             WHERE {where}
                             ORDER BY
                                 candidate.priority DESC,
+                                {host_pressure} ASC,
                                 candidate.next_fetch_at ASC,
                                 candidate.added_at ASC
                             LIMIT %s
