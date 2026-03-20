@@ -102,6 +102,7 @@ def test_get_stats_includes_frontier_breakdown(pg_storage):
                 depth INTEGER NOT NULL,
                 priority REAL NOT NULL DEFAULT 1.0,
                 discovery_kind TEXT NOT NULL DEFAULT 'seed',
+                archetype TEXT NOT NULL DEFAULT 'generic_page',
                 source_url TEXT,
                 added_at DOUBLE PRECISION NOT NULL,
                 status TEXT NOT NULL DEFAULT 'pending',
@@ -116,11 +117,11 @@ def test_get_stats_includes_frontier_breakdown(pg_storage):
         )
         cur.execute(
             """
-            INSERT INTO frontier (url, domain, depth, priority, discovery_kind, source_url, added_at, status, next_fetch_at)
+            INSERT INTO frontier (url, domain, depth, priority, discovery_kind, archetype, source_url, added_at, status, next_fetch_at)
             VALUES
-                ('https://example.com/page1', 'example.com', 0, 2.0, 'seed', NULL, 1710000000.0, 'done', 1710000000.0),
-                ('https://example.com/page2', 'example.com', 1, 1.25, 'same_host', 'https://example.com/page1', 1710000002.0, 'pending', 1710000002.0),
-                ('https://other.com/page1', 'other.com', 1, 0.8, 'external', 'https://example.com/page1', 1710000003.0, 'pending', 1710000003.0)
+                ('https://example.com/page1', 'example.com', 0, 2.0, 'seed', 'generic_page', NULL, 1710000000.0, 'done', 1710000000.0),
+                ('https://example.com/page2', 'example.com', 1, 1.25, 'same_host', 'document_page', 'https://example.com/page1', 1710000002.0, 'pending', 1710000002.0),
+                ('https://other.com/page1', 'other.com', 1, 0.8, 'external', 'redirect_hub', 'https://example.com/page1', 1710000003.0, 'pending', 1710000003.0)
             """
         )
     pg_storage._conn.commit()
@@ -131,6 +132,7 @@ def test_get_stats_includes_frontier_breakdown(pg_storage):
     assert stats["domains"] == 2
     assert stats["frontier_status"] == {"done": 1, "pending": 2}
     assert stats["discovery_kinds"] == {"external": 1, "same_host": 1, "seed": 1}
+    assert stats["archetypes"] == {"document_page": 1, "generic_page": 1, "redirect_hub": 1}
     assert stats["top_page_domains"][0] == {"domain": "example.com", "count": 1}
     assert stats["top_pending_domains"] == [
         {"domain": "example.com", "count": 1},

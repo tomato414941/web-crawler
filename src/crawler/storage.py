@@ -197,6 +197,7 @@ class PgStorage:
 
                 frontier_status: dict[str, int] = {}
                 discovery_kinds: dict[str, int] = {}
+                archetypes: dict[str, int] = {}
                 top_pending_domains: list[dict[str, object]] = []
                 if frontier_exists:
                     cur.execute("SELECT status, COUNT(*) FROM frontier GROUP BY status")
@@ -208,6 +209,13 @@ class PgStorage:
                            GROUP BY discovery_kind"""
                     )
                     discovery_kinds = {kind: count for kind, count in cur.fetchall()}
+
+                    cur.execute(
+                        """SELECT archetype, COUNT(*)
+                           FROM frontier
+                           GROUP BY archetype"""
+                    )
+                    archetypes = {archetype: count for archetype, count in cur.fetchall()}
 
                     cur.execute(
                         """SELECT domain, COUNT(*)
@@ -246,6 +254,7 @@ class PgStorage:
             "total_bytes": row[4],
             "frontier_status": frontier_status,
             "discovery_kinds": discovery_kinds,
+            "archetypes": archetypes,
             "top_page_domains": top_page_domains,
             "top_pending_domains": top_pending_domains,
         }
