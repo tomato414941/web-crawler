@@ -11,6 +11,11 @@ DISCOVERY_SAME_HOST = "same_host"
 DISCOVERY_SEED_HOST = "seed_host"
 DISCOVERY_EXTERNAL = "external"
 
+ARCHETYPE_GENERIC_PAGE = "generic_page"
+ARCHETYPE_DOCUMENT_PAGE = "document_page"
+ARCHETYPE_REDIRECT_HUB = "redirect_hub"
+ARCHETYPE_REGISTRY_LISTING = "registry_listing"
+
 SEED_PRIORITY = 2.0
 SAME_HOST_PRIORITY = 1.25
 SEED_HOST_PRIORITY = 1.1
@@ -21,6 +26,12 @@ _DISCOVERY_RANKS = {
     DISCOVERY_SEED_HOST: 2,
     DISCOVERY_SAME_HOST: 3,
     DISCOVERY_SEED: 4,
+}
+_ARCHETYPE_ADJUSTMENTS = {
+    ARCHETYPE_GENERIC_PAGE: 0.0,
+    ARCHETYPE_DOCUMENT_PAGE: 0.15,
+    ARCHETYPE_REDIRECT_HUB: -0.3,
+    ARCHETYPE_REGISTRY_LISTING: -0.35,
 }
 
 _MIN_PRIORITY = 0.25
@@ -79,6 +90,7 @@ class EnqueueDecision:
 
     priority: float
     discovery_kind: str
+    archetype: str
 
 
 def host_key(url: str) -> str:
@@ -101,49 +113,78 @@ def _normalized_path(url: str) -> str:
     return urlparse(url).path.lower()
 
 
-def _bulk_path_penalty(url: str) -> float:
-    """Reduce priority for URLs that look like bulk data or generated inventories."""
+def classify_url_archetype(url: str) -> str:
+    """Classify a discovered URL into a coarse page archetype."""
     path = _normalized_path(url)
+    host = host_key(url)
     suffix = PurePosixPath(path).suffix.lower()
 
+    if host == "www.iana.org" and path.startswith("/go/"):
+        return ARCHETYPE_REDIRECT_HUB
+
+    if host == "datatracker.ietf.org" and (
+        path.startswith("/doc/html/")
+        or path.startswith("/doc/draft-")
+    ):
+        return ARCHETYPE_DOCUMENT_PAGE
+
+    if host == "www.rfc-editor.org" and (
+        path.startswith("/rfc/")
+        or path.startswith("/in-notes/")
+    ):
+        return ARCHETYPE_DOCUMENT_PAGE
+
     if "/domains/idn-tables/tables/" in path:
-        return 0.7
+        return ARCHETYPE_REGISTRY_LISTING
+
+    if path.startswith("/assignments/"):
+        return ARCHETYPE_REGISTRY_LISTING
 
     if suffix in _BULK_FILE_SUFFIXES:
         if any(hint in path for hint in _BULK_PATH_HINTS):
-            return 0.45
-        return 0.2
+            return ARCHETYPE_REGISTRY_LISTING
+        return ARCHETYPE_GENERIC_PAGE
 
-    return 0.0
+    return ARCHETYPE_GENERIC_PAGE
 
 
-def _parent_page_penalty(parent_url: str, parent_signals: PageSignals | None) -> float:
-    """Reduce child priority when the parent page looks like a bulk listing."""
-    if parent_signals is None:
-        return 0.0
-
-    penalty = 0.0
+def classify_parent_archetype(parent_url: str, parent_signals: PageSignals | None) -> str:
+    """Classify the fetched parent page so child ranking can react to context."""
     parent_path = _normalized_path(parent_url)
+    if "/domains/idn-tables" in parent_path:
+        return ARCHETYPE_REGISTRY_LISTING
+
+    if parent_signals is None:
+        return classify_url_archetype(parent_url)
+
     content_type = parent_signals.content_type.lower()
     title = (parent_signals.title or "").lower()
-    meta_robots = (parent_signals.meta_robots or "").lower()
-
-    if "/domains/idn-tables/" in parent_path:
-        penalty += 0.3
-
     if any(hint in title for hint in _BULK_TITLE_HINTS):
-        penalty += 0.2
+        return ARCHETYPE_REGISTRY_LISTING
 
     if parent_signals.content_length >= 512 * 1024:
-        penalty += 0.1
+        return ARCHETYPE_REGISTRY_LISTING
 
     if content_type and "html" not in content_type:
+        return ARCHETYPE_REGISTRY_LISTING
+
+    return classify_url_archetype(parent_url)
+
+
+def _context_penalty(parent_archetype: str, parent_signals: PageSignals | None) -> float:
+    """Reduce child priority when discovered from low-signal parent pages."""
+    penalty = 0.0
+    meta_robots = (parent_signals.meta_robots or "").lower() if parent_signals else ""
+
+    if parent_archetype == ARCHETYPE_REGISTRY_LISTING:
+        penalty += 0.2
+    elif parent_archetype == ARCHETYPE_REDIRECT_HUB:
         penalty += 0.1
 
     if "nofollow" in meta_robots:
         penalty += 0.15
 
-    return min(penalty, 0.45)
+    return min(penalty, 0.35)
 
 
 def _adjust_priority(
@@ -152,17 +193,23 @@ def _adjust_priority(
     url: str,
     parent_url: str,
     parent_signals: PageSignals | None,
-) -> float:
+) -> tuple[float, str]:
     """Apply lightweight quality heuristics while keeping discovery open."""
+    archetype = classify_url_archetype(url)
+    parent_archetype = classify_parent_archetype(parent_url, parent_signals)
     priority = base_priority
-    priority -= _bulk_path_penalty(url)
-    priority -= _parent_page_penalty(parent_url, parent_signals)
-    return max(_MIN_PRIORITY, round(priority, 2))
+    priority += _ARCHETYPE_ADJUSTMENTS[archetype]
+    priority -= _context_penalty(parent_archetype, parent_signals)
+    return max(_MIN_PRIORITY, round(priority, 2)), archetype
 
 
 def rank_seed_url(url: str) -> EnqueueDecision:
     """Assign the highest priority to explicit seed URLs."""
-    return EnqueueDecision(priority=SEED_PRIORITY, discovery_kind=DISCOVERY_SEED)
+    return EnqueueDecision(
+        priority=SEED_PRIORITY,
+        discovery_kind=DISCOVERY_SEED,
+        archetype=classify_url_archetype(url),
+    )
 
 
 def rank_discovered_url(
@@ -178,33 +225,39 @@ def rank_discovered_url(
     known_seed_hosts = seed_hosts or set()
 
     if child_host and child_host == parent_host:
-        return EnqueueDecision(
-            priority=_adjust_priority(
-                SAME_HOST_PRIORITY,
-                url=url,
-                parent_url=parent_url,
-                parent_signals=parent_signals,
-            ),
-            discovery_kind=DISCOVERY_SAME_HOST,
-        )
-
-    if child_host and child_host in known_seed_hosts:
-        return EnqueueDecision(
-            priority=_adjust_priority(
-                SEED_HOST_PRIORITY,
-                url=url,
-                parent_url=parent_url,
-                parent_signals=parent_signals,
-            ),
-            discovery_kind=DISCOVERY_SEED_HOST,
-        )
-
-    return EnqueueDecision(
-        priority=_adjust_priority(
-            EXTERNAL_PRIORITY,
+        priority, archetype = _adjust_priority(
+            SAME_HOST_PRIORITY,
             url=url,
             parent_url=parent_url,
             parent_signals=parent_signals,
-        ),
+        )
+        return EnqueueDecision(
+            priority=priority,
+            discovery_kind=DISCOVERY_SAME_HOST,
+            archetype=archetype,
+        )
+
+    if child_host and child_host in known_seed_hosts:
+        priority, archetype = _adjust_priority(
+            SEED_HOST_PRIORITY,
+            url=url,
+            parent_url=parent_url,
+            parent_signals=parent_signals,
+        )
+        return EnqueueDecision(
+            priority=priority,
+            discovery_kind=DISCOVERY_SEED_HOST,
+            archetype=archetype,
+        )
+
+    priority, archetype = _adjust_priority(
+        EXTERNAL_PRIORITY,
+        url=url,
+        parent_url=parent_url,
+        parent_signals=parent_signals,
+    )
+    return EnqueueDecision(
+        priority=priority,
         discovery_kind=DISCOVERY_EXTERNAL,
+        archetype=archetype,
     )
