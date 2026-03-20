@@ -18,6 +18,9 @@ logger = logging.getLogger(__name__)
 
 _MAX_RECONNECT_ATTEMPTS = 5
 _RECONNECT_DELAY = 5.0
+_BACKLOG_READY_PER_HOST = 128
+_BACKLOG_LOW_PRIORITY = 0.75
+_BACKLOG_DEFER_SECONDS = 1800.0
 
 
 class CrawlDaemon:
@@ -77,6 +80,13 @@ class CrawlDaemon:
                     self._ensure_seeds(frontier)
                     self._recrawl_stale(storage, frontier)
                     frontier.requeue_failed()
+                    deferred = frontier.defer_overcrowded_backlog(
+                        keep_ready_per_domain=_BACKLOG_READY_PER_HOST,
+                        low_priority_threshold=_BACKLOG_LOW_PRIORITY,
+                        defer_seconds=_BACKLOG_DEFER_SECONDS,
+                    )
+                    if deferred:
+                        logger.info("Deferred %d low-priority backlog URLs", deferred)
 
                     pending = frontier.pending_count()
                     if pending == 0:
@@ -125,6 +135,13 @@ class CrawlDaemon:
                 reranked = frontier.rerank_discovered(self._seeds)
                 if reranked:
                     logger.info("Re-ranked %d frontier URLs", reranked)
+                deferred = frontier.defer_overcrowded_backlog(
+                    keep_ready_per_domain=_BACKLOG_READY_PER_HOST,
+                    low_priority_threshold=_BACKLOG_LOW_PRIORITY,
+                    defer_seconds=_BACKLOG_DEFER_SECONDS,
+                )
+                if deferred:
+                    logger.info("Deferred %d low-priority backlog URLs", deferred)
                 logger.info("Database connected (attempt %d)", attempt)
                 return storage, frontier
             except psycopg2.OperationalError as e:

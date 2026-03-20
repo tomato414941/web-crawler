@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import time
 from typing import TYPE_CHECKING
 from urllib.parse import urlparse
@@ -13,7 +14,7 @@ import typer
 
 from .config import settings
 from .core import HttpFetcher
-from .discovery import rank_discovered_url, rank_seed_url, seed_hosts_from_urls
+from .discovery import PageSignals, rank_discovered_url, rank_seed_url, seed_hosts_from_urls
 from .domain_manager import DomainManager
 from .domain_store import DomainStore
 from .frontier import CrawlTask, Frontier
@@ -28,6 +29,12 @@ if TYPE_CHECKING:
 
 # Workers wait this many idle ticks (× 0.1s) before giving up
 _WORKER_PATIENCE = 50
+_EXPLORATION_EVERY = 4
+_TITLE_PATTERN = re.compile(r"<title[^>]*>(.*?)</title>", re.IGNORECASE | re.DOTALL)
+_META_ROBOTS_PATTERN = re.compile(
+    r'<meta[^>]+name=["\']robots["\'][^>]+content=["\']([^"\']+)["\']',
+    re.IGNORECASE | re.DOTALL,
+)
 
 
 class CrawlerEngine:
@@ -99,6 +106,8 @@ class CrawlerEngine:
         self._running = False
         self._claimed_pages = 0
         self._page_lock = asyncio.Lock()
+        self._lease_lock = asyncio.Lock()
+        self._leases_issued = 0
 
     async def __aenter__(self) -> "CrawlerEngine":
         return self
@@ -129,7 +138,33 @@ class CrawlerEngine:
             discovery_kind=decision.discovery_kind,
         )
 
-    def _build_discovered_tasks(self, parent_url: str, links: list[str], depth: int) -> list[CrawlTask]:
+    def _build_page_signals(self, response) -> PageSignals:
+        """Extract lightweight ranking signals from a fetched page."""
+        headers = {key.lower(): value for key, value in response.headers.items()}
+        content_type = headers.get("content-type", "")
+        title = None
+        meta_robots = None
+
+        if "html" in content_type.lower():
+            if match := _TITLE_PATTERN.search(response.text):
+                title = match.group(1).strip()[:300]
+            if match := _META_ROBOTS_PATTERN.search(response.text):
+                meta_robots = match.group(1).strip().lower()
+
+        return PageSignals(
+            content_type=content_type,
+            content_length=len(response.content),
+            title=title,
+            meta_robots=meta_robots,
+        )
+
+    def _build_discovered_tasks(
+        self,
+        parent_url: str,
+        links: list[str],
+        depth: int,
+        parent_signals: PageSignals | None = None,
+    ) -> list[CrawlTask]:
         """Assign ranking metadata to discovered outlinks before enqueueing."""
         tasks: list[CrawlTask] = []
         for link in links:
@@ -139,6 +174,7 @@ class CrawlerEngine:
                 parent_url=parent_url,
                 url=link,
                 seed_hosts=self.seed_hosts,
+                parent_signals=parent_signals,
             )
             tasks.append(
                 CrawlTask(
@@ -198,7 +234,13 @@ class CrawlerEngine:
             if task.depth < self.max_depth:
                 links = extract_links(response.text, response.url)
                 result.outlinks = links
-                new_tasks = self._build_discovered_tasks(url, links, task.depth + 1)
+                page_signals = self._build_page_signals(response)
+                new_tasks = self._build_discovered_tasks(
+                    url,
+                    links,
+                    task.depth + 1,
+                    parent_signals=page_signals,
+                )
                 self.frontier.add_many(new_tasks)
 
             self.domain_manager.record_success(url)
@@ -266,7 +308,7 @@ class CrawlerEngine:
             if not await self._claim_page_slot():
                 break
 
-            task = self.frontier.lease_next()
+            task = await self._lease_task()
             if not task:
                 await self._release_page_slot(success=False)
                 idle_ticks += 1
@@ -294,11 +336,23 @@ class CrawlerEngine:
                     self.results.append(result.to_dict())
                 logger.info("[%d/%d] %s", self.pages_crawled, self.max_pages, result.url)
 
+    async def _lease_task(self) -> CrawlTask | None:
+        """Alternate between best-first and breadth-first leases."""
+        async with self._lease_lock:
+            prioritize_breadth = self._leases_issued % _EXPLORATION_EVERY == 0
+            self._leases_issued += 1
+
+        task = self.frontier.lease_next(prioritize_breadth=prioritize_breadth)
+        if task is None and prioritize_breadth:
+            return self.frontier.lease_next()
+        return task
+
     async def crawl(self) -> list[dict]:
         """Run the crawler and return results."""
         self._running = True
         self.pages_crawled = 0
         self._claimed_pages = 0
+        self._leases_issued = 0
 
         if self.start_url and self.frontier.pending_count() == 0:
             self.frontier.add(self._build_seed_task(self.start_url))

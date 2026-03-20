@@ -211,6 +211,16 @@ class TestFrontier:
         assert result is not None
         assert result.url == "http://b.com/1"
 
+    def test_lease_next_can_prefer_breadth_over_depth(self, frontier):
+        for i in range(5):
+            frontier.add(CrawlTask(url=f"http://a.com/{i}", depth=0, priority=1.0, added_at=1000 + i))
+        frontier.add(CrawlTask(url="http://b.com/1", depth=0, priority=0.8, added_at=2000))
+
+        result = frontier.lease_next(prioritize_breadth=True)
+
+        assert result is not None
+        assert result.url == "http://b.com/1"
+
     def test_lease_next_marks_leased(self, frontier):
         frontier.add(CrawlTask(url="http://example.com", depth=0))
         frontier.lease_next()
@@ -377,6 +387,31 @@ class TestFrontier:
         assert last_success_at is not None
         assert last_error is None
 
+    def test_defer_overcrowded_backlog_delays_excess_low_priority_urls(self, frontier):
+        frontier.add(CrawlTask(url="http://a.com/1", depth=1, priority=0.55, added_at=1000))
+        frontier.add(CrawlTask(url="http://a.com/2", depth=1, priority=0.55, added_at=1001))
+        frontier.add(CrawlTask(url="http://a.com/3", depth=1, priority=0.55, added_at=1002))
+
+        delayed = frontier.defer_overcrowded_backlog(
+            keep_ready_per_domain=1,
+            low_priority_threshold=0.75,
+            defer_seconds=60.0,
+        )
+
+        assert delayed == 2
+
+        with frontier._conn.cursor() as cur:
+            cur.execute(
+                "SELECT url, next_fetch_at FROM frontier WHERE domain = 'a.com' ORDER BY url ASC"
+            )
+            rows = cur.fetchall()
+
+        ready = [url for url, next_fetch_at in rows if next_fetch_at <= time.time()]
+        deferred = [url for url, next_fetch_at in rows if next_fetch_at > time.time()]
+
+        assert ready == ["http://a.com/1"]
+        assert deferred == ["http://a.com/2", "http://a.com/3"]
+
     def test_rerank_discovered_updates_legacy_backlog(self, frontier):
         frontier.add(
             CrawlTask(
@@ -411,3 +446,28 @@ class TestFrontier:
             ("http://example.com/page", 1.25, DISCOVERY_SAME_HOST),
             ("http://external.com/page", 0.8, DISCOVERY_EXTERNAL),
         ]
+
+    def test_rerank_discovered_lowers_bulk_backlog_urls(self, frontier):
+        frontier.add(
+            CrawlTask(
+                url="https://www.iana.org/domains/idn-tables/tables/zara_uk_1.txt",
+                depth=1,
+                priority=1.25,
+                discovery_kind=DISCOVERY_SAME_HOST,
+                source_url="https://www.iana.org/domains/idn-tables",
+            )
+        )
+
+        updated = frontier.rerank_discovered(["https://www.iana.org/"])
+
+        assert updated == 1
+
+        with frontier._conn.cursor() as cur:
+            cur.execute(
+                "SELECT priority, discovery_kind FROM frontier WHERE url = %s",
+                ("https://www.iana.org/domains/idn-tables/tables/zara_uk_1.txt",),
+            )
+            priority, discovery_kind = cur.fetchone()
+
+        assert discovery_kind == DISCOVERY_SAME_HOST
+        assert priority < 0.75

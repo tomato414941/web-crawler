@@ -17,8 +17,10 @@ class FakeFrontier:
         self.failed: list[str] = []
         self.failures: list[dict] = []
         self.added_batches: list[list[CrawlTask]] = []
+        self.lease_calls: list[dict[str, object]] = []
 
-    def lease_next(self):
+    def lease_next(self, prioritize_breadth: bool = False, **_: object):
+        self.lease_calls.append({"prioritize_breadth": prioritize_breadth})
         if self.tasks:
             return self.tasks.pop(0)
         return None
@@ -225,3 +227,34 @@ async def test_crawler_assigns_discovery_metadata_to_outlinks():
         "https://github.com/ietf-tools/datatracker"
     ].priority
     assert by_url["https://github.com/ietf-tools/datatracker"].discovery_kind == DISCOVERY_EXTERNAL
+
+
+@pytest.mark.asyncio
+async def test_crawler_reserves_some_leases_for_breadth():
+    frontier = FakeFrontier(
+        [
+            CrawlTask(url="https://example.com/1", depth=0),
+            CrawlTask(url="https://example.com/2", depth=0),
+        ]
+    )
+    domain_manager = FakeDomainManager()
+    fetcher = FakeFetcher(
+        [
+            Response(url="https://example.com/1", status=200, content=b"<html>1</html>", headers={}),
+            Response(url="https://example.com/2", status=200, content=b"<html>2</html>", headers={}),
+        ]
+    )
+
+    async with CrawlerEngine(
+        max_pages=2,
+        concurrency=1,
+        frontier=frontier,
+        domain_manager=domain_manager,
+    ) as engine:
+        engine.fetcher = fetcher
+        await engine.crawl()
+
+    assert frontier.lease_calls[:2] == [
+        {"prioritize_breadth": True},
+        {"prioritize_breadth": False},
+    ]
