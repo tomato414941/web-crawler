@@ -58,6 +58,10 @@ class PgStorage:
         self._conn.commit()
         logger.info("Postgres storage initialized")
 
+    def _finish_read(self) -> None:
+        """Close read-only transactions so API requests do not hold relation locks."""
+        self._conn.commit()
+
     def save(self, result: CrawlResult | Mapping[str, object]) -> bool:
         """Save a single crawl result. Returns True if inserted."""
         data = result_to_dict(result)
@@ -139,84 +143,100 @@ class PgStorage:
         where = " AND ".join(conditions)
         params.extend([limit, offset])
 
-        with self._conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            cur.execute(
-                f"""SELECT url_hash, url, domain, title, status, content_length,
-                           outlinks, crawled_at
-                    FROM pages WHERE {where}
-                    ORDER BY crawled_at ASC
-                    LIMIT %s OFFSET %s""",
-                params,
-            )
-            return [dict(row) for row in cur.fetchall()]
+        try:
+            with self._conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(
+                    f"""SELECT url_hash, url, domain, title, status, content_length,
+                               outlinks, crawled_at
+                        FROM pages WHERE {where}
+                        ORDER BY crawled_at ASC
+                        LIMIT %s OFFSET %s""",
+                    params,
+                )
+                pages = [dict(row) for row in cur.fetchall()]
+            self._finish_read()
+            return pages
+        except Exception:
+            self._conn.rollback()
+            raise
 
     def get_page(self, url_hash: str) -> dict | None:
         """Get a single page with full content."""
-        with self._conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            cur.execute(
-                """SELECT url_hash, url, domain, title, content, status,
-                          content_length, depth, source_url, outlinks, crawled_at
-                   FROM pages WHERE url_hash = %s""",
-                (url_hash,),
-            )
-            row = cur.fetchone()
+        try:
+            with self._conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(
+                    """SELECT url_hash, url, domain, title, content, status,
+                              content_length, depth, source_url, outlinks, crawled_at
+                       FROM pages WHERE url_hash = %s""",
+                    (url_hash,),
+                )
+                row = cur.fetchone()
+            self._finish_read()
             return dict(row) if row else None
+        except Exception:
+            self._conn.rollback()
+            raise
 
     def get_stats(self) -> dict:
         """Get crawl statistics."""
-        with self._conn.cursor() as cur:
-            cur.execute(
-                """SELECT
-                     count(*) as total_pages,
-                     count(DISTINCT domain) as domains,
-                     min(crawled_at) as oldest,
-                     max(crawled_at) as newest,
-                     sum(content_length) as total_bytes
-                   FROM pages"""
-            )
-            row = cur.fetchone()
-
-            cur.execute("SELECT to_regclass('public.frontier')")
-            frontier_exists = cur.fetchone()[0] is not None
-
-            frontier_status: dict[str, int] = {}
-            discovery_kinds: dict[str, int] = {}
-            top_pending_domains: list[dict[str, object]] = []
-            if frontier_exists:
-                cur.execute("SELECT status, COUNT(*) FROM frontier GROUP BY status")
-                frontier_status = {status: count for status, count in cur.fetchall()}
-
+        try:
+            with self._conn.cursor() as cur:
                 cur.execute(
-                    """SELECT discovery_kind, COUNT(*)
-                       FROM frontier
-                       GROUP BY discovery_kind"""
+                    """SELECT
+                         count(*) as total_pages,
+                         count(DISTINCT domain) as domains,
+                         min(crawled_at) as oldest,
+                         max(crawled_at) as newest,
+                         sum(content_length) as total_bytes
+                       FROM pages"""
                 )
-                discovery_kinds = {kind: count for kind, count in cur.fetchall()}
+                row = cur.fetchone()
+
+                cur.execute("SELECT to_regclass('public.frontier')")
+                frontier_exists = cur.fetchone()[0] is not None
+
+                frontier_status: dict[str, int] = {}
+                discovery_kinds: dict[str, int] = {}
+                top_pending_domains: list[dict[str, object]] = []
+                if frontier_exists:
+                    cur.execute("SELECT status, COUNT(*) FROM frontier GROUP BY status")
+                    frontier_status = {status: count for status, count in cur.fetchall()}
+
+                    cur.execute(
+                        """SELECT discovery_kind, COUNT(*)
+                           FROM frontier
+                           GROUP BY discovery_kind"""
+                    )
+                    discovery_kinds = {kind: count for kind, count in cur.fetchall()}
+
+                    cur.execute(
+                        """SELECT domain, COUNT(*)
+                           FROM frontier
+                           WHERE status = 'pending'
+                           GROUP BY domain
+                           ORDER BY COUNT(*) DESC, domain ASC
+                           LIMIT 10"""
+                    )
+                    top_pending_domains = [
+                        {"domain": domain, "count": count}
+                        for domain, count in cur.fetchall()
+                    ]
 
                 cur.execute(
                     """SELECT domain, COUNT(*)
-                       FROM frontier
-                       WHERE status = 'pending'
+                       FROM pages
                        GROUP BY domain
                        ORDER BY COUNT(*) DESC, domain ASC
                        LIMIT 10"""
                 )
-                top_pending_domains = [
+                top_page_domains = [
                     {"domain": domain, "count": count}
                     for domain, count in cur.fetchall()
                 ]
-
-            cur.execute(
-                """SELECT domain, COUNT(*)
-                   FROM pages
-                   GROUP BY domain
-                   ORDER BY COUNT(*) DESC, domain ASC
-                   LIMIT 10"""
-            )
-            top_page_domains = [
-                {"domain": domain, "count": count}
-                for domain, count in cur.fetchall()
-            ]
+            self._finish_read()
+        except Exception:
+            self._conn.rollback()
+            raise
 
         return {
             "total_pages": row[0],
