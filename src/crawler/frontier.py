@@ -254,6 +254,36 @@ class Frontier:
             "), 0)"
         )
 
+    def _host_inventory_sql(self, alias: str) -> str:
+        """Return SQL that estimates how much of the frontier a host already owns."""
+        return (
+            "COALESCE(("
+            "SELECT COUNT(*) "
+            "FROM frontier AS known "
+            f"WHERE known.domain = {alias}.domain"
+            "), 0)"
+        )
+
+    def _lease_order_by_sql(self, alias: str, prioritize_breadth: bool) -> str:
+        """Return the ORDER BY clause used for lease selection."""
+        host_pressure = self._host_pressure_sql(alias)
+        if prioritize_breadth:
+            host_inventory = self._host_inventory_sql(alias)
+            return (
+                f"{host_inventory} ASC, "
+                f"{host_pressure} ASC, "
+                f"{alias}.priority DESC, "
+                f"{alias}.next_fetch_at ASC, "
+                f"{alias}.added_at ASC"
+            )
+
+        return (
+            f"{alias}.priority DESC, "
+            f"{host_pressure} ASC, "
+            f"{alias}.next_fetch_at ASC, "
+            f"{alias}.added_at ASC"
+        )
+
     def _upsert_tasks(self, tasks: list[CrawlTask]) -> int:
         """Insert new tasks and promote existing metadata when a better discovery wins."""
         if not tasks:
@@ -361,6 +391,7 @@ class Frontier:
         self,
         domain: str | None = None,
         lease_seconds: float | None = None,
+        prioritize_breadth: bool = False,
     ) -> CrawlTask | None:
         """Lease the next ready URL, optionally filtered by domain."""
         now = time.time()
@@ -368,7 +399,7 @@ class Frontier:
         duration = self._lease_seconds if lease_seconds is None else lease_seconds
         lease_expires_at = now + duration
         where, where_params = self._build_ready_where(alias="candidate", now=now, domain=domain)
-        host_pressure = self._host_pressure_sql("candidate")
+        order_by = self._lease_order_by_sql("candidate", prioritize_breadth=prioritize_breadth)
         params: list[object] = [lease_token, lease_expires_at, *where_params]
 
         try:
@@ -383,11 +414,7 @@ class Frontier:
                             SELECT candidate.url
                             FROM frontier AS candidate
                             WHERE {where}
-                            ORDER BY
-                                candidate.priority DESC,
-                                {host_pressure} ASC,
-                                candidate.next_fetch_at ASC,
-                                candidate.added_at ASC
+                            ORDER BY {order_by}
                             LIMIT 1
                             FOR UPDATE SKIP LOCKED
                         )
@@ -436,6 +463,7 @@ class Frontier:
         count: int = 10,
         domain: str | None = None,
         lease_seconds: float | None = None,
+        prioritize_breadth: bool = False,
     ) -> list[CrawlTask]:
         """Lease a batch of ready URLs."""
         now = time.time()
@@ -443,7 +471,7 @@ class Frontier:
         duration = self._lease_seconds if lease_seconds is None else lease_seconds
         lease_expires_at = now + duration
         where, where_params = self._build_ready_where(alias="candidate", now=now, domain=domain)
-        host_pressure = self._host_pressure_sql("candidate")
+        order_by = self._lease_order_by_sql("candidate", prioritize_breadth=prioritize_breadth)
         params: list[object] = [lease_token, lease_expires_at, *where_params, count]
 
         try:
@@ -458,11 +486,7 @@ class Frontier:
                             SELECT candidate.url
                             FROM frontier AS candidate
                             WHERE {where}
-                            ORDER BY
-                                candidate.priority DESC,
-                                {host_pressure} ASC,
-                                candidate.next_fetch_at ASC,
-                                candidate.added_at ASC
+                            ORDER BY {order_by}
                             LIMIT %s
                             FOR UPDATE SKIP LOCKED
                         )
@@ -605,6 +629,46 @@ class Frontier:
     def recover_leased(self, expired_only: bool = True) -> int:
         """Reset leased URLs back to pending."""
         count = self._recover_leased_locked(time.time(), expired_only=expired_only)
+        self._conn.commit()
+        return count
+
+    def defer_overcrowded_backlog(
+        self,
+        *,
+        keep_ready_per_domain: int = 128,
+        low_priority_threshold: float = 0.75,
+        defer_seconds: float = 1800.0,
+    ) -> int:
+        """Delay excess low-priority backlog so one host cannot dominate the ready queue."""
+        if keep_ready_per_domain <= 0:
+            return 0
+
+        now = time.time()
+        deferred_until = now + defer_seconds
+        with self._conn.cursor() as cur:
+            cur.execute(
+                f"""WITH ranked AS (
+                        SELECT
+                            url,
+                            ROW_NUMBER() OVER (
+                                PARTITION BY domain
+                                ORDER BY priority DESC, next_fetch_at ASC, added_at ASC
+                            ) AS rownum
+                        FROM frontier
+                        WHERE status = '{PENDING_STATUS}'
+                          AND next_fetch_at <= %s
+                          AND priority <= %s
+                    )
+                    UPDATE frontier
+                    SET next_fetch_at = GREATEST(next_fetch_at, %s)
+                    WHERE url IN (
+                        SELECT url
+                        FROM ranked
+                        WHERE rownum > %s
+                    )""",
+                (now, low_priority_threshold, deferred_until, keep_ready_per_domain),
+            )
+            count = cur.rowcount
         self._conn.commit()
         return count
 
