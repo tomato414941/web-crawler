@@ -2,6 +2,7 @@
 
 import os
 import pytest
+from psycopg2.extensions import TRANSACTION_STATUS_IDLE
 
 # Skip all tests if no Postgres available
 pytestmark = pytest.mark.skipif(
@@ -135,3 +136,27 @@ def test_get_stats_includes_frontier_breakdown(pg_storage):
         {"domain": "example.com", "count": 1},
         {"domain": "other.com", "count": 1},
     ]
+
+
+def test_read_methods_leave_connection_idle(pg_storage):
+    result = {
+        "url": "https://example.com/page1",
+        "status": 200,
+        "content_length": 100,
+        "depth": 0,
+        "timestamp": 1710000000.0,
+        "content": "<html><title>Example</title></html>",
+        "outlinks": [],
+    }
+    pg_storage.save(result)
+
+    listed = pg_storage.list_pages()
+    assert listed
+    assert pg_storage._conn.info.transaction_status == TRANSACTION_STATUS_IDLE
+
+    page = pg_storage.get_page(listed[0]["url_hash"])
+    assert page is not None
+    assert pg_storage._conn.info.transaction_status == TRANSACTION_STATUS_IDLE
+
+    pg_storage.get_stats()
+    assert pg_storage._conn.info.transaction_status == TRANSACTION_STATUS_IDLE
