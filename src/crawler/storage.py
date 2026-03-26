@@ -13,6 +13,12 @@ import psycopg2.extras
 from .result import CrawlResult, result_to_dict
 
 logger = logging.getLogger(__name__)
+FRONTIER_STATS_REQUIRED_COLUMNS = {
+    "status",
+    "discovery_kind",
+    "archetype",
+    "domain",
+}
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS pages (
@@ -73,6 +79,15 @@ class PgStorage:
             (table_name,),
         )
         return {column_name for (column_name,) in cur.fetchall()}
+
+    def _assert_current_frontier_stats_schema(self, cur) -> None:
+        columns = self._get_public_table_columns(cur, "frontier")
+        missing = sorted(FRONTIER_STATS_REQUIRED_COLUMNS - columns)
+        if missing:
+            missing_columns = ", ".join(missing)
+            raise RuntimeError(
+                f"frontier schema is outdated for stats; missing columns: {missing_columns}"
+            )
 
     def save(self, result: CrawlResult | Mapping[str, object]) -> bool:
         """Save a single crawl result. Returns True if inserted."""
@@ -212,40 +227,37 @@ class PgStorage:
                 archetypes: dict[str, int] = {}
                 top_pending_domains: list[dict[str, object]] = []
                 if frontier_exists:
-                    frontier_columns = self._get_public_table_columns(cur, "frontier")
+                    self._assert_current_frontier_stats_schema(cur)
 
                     cur.execute("SELECT status, COUNT(*) FROM public.frontier GROUP BY status")
                     frontier_status = {status: count for status, count in cur.fetchall()}
 
-                    if "discovery_kind" in frontier_columns:
-                        cur.execute(
-                            """SELECT discovery_kind, COUNT(*)
-                               FROM public.frontier
-                               GROUP BY discovery_kind"""
-                        )
-                        discovery_kinds = {kind: count for kind, count in cur.fetchall()}
+                    cur.execute(
+                        """SELECT discovery_kind, COUNT(*)
+                           FROM public.frontier
+                           GROUP BY discovery_kind"""
+                    )
+                    discovery_kinds = {kind: count for kind, count in cur.fetchall()}
 
-                    if "archetype" in frontier_columns:
-                        cur.execute(
-                            """SELECT archetype, COUNT(*)
-                               FROM public.frontier
-                               GROUP BY archetype"""
-                        )
-                        archetypes = {archetype: count for archetype, count in cur.fetchall()}
+                    cur.execute(
+                        """SELECT archetype, COUNT(*)
+                           FROM public.frontier
+                           GROUP BY archetype"""
+                    )
+                    archetypes = {archetype: count for archetype, count in cur.fetchall()}
 
-                    if "domain" in frontier_columns:
-                        cur.execute(
-                            """SELECT domain, COUNT(*)
-                               FROM public.frontier
-                               WHERE status = 'pending'
-                               GROUP BY domain
-                               ORDER BY COUNT(*) DESC, domain ASC
-                               LIMIT 10"""
-                        )
-                        top_pending_domains = [
-                            {"domain": domain, "count": count}
-                            for domain, count in cur.fetchall()
-                        ]
+                    cur.execute(
+                        """SELECT domain, COUNT(*)
+                           FROM public.frontier
+                           WHERE status = 'pending'
+                           GROUP BY domain
+                           ORDER BY COUNT(*) DESC, domain ASC
+                           LIMIT 10"""
+                    )
+                    top_pending_domains = [
+                        {"domain": domain, "count": count}
+                        for domain, count in cur.fetchall()
+                    ]
 
                 cur.execute(
                     """SELECT domain, COUNT(*)

@@ -11,7 +11,7 @@ from urllib.parse import urlparse
 
 import psycopg2.extras
 
-from .discovery import ARCHETYPE_GENERIC_PAGE, DISCOVERY_SEED, discovery_rank, rank_discovered_url, rank_seed_url, seed_hosts_from_urls
+from .discovery import ARCHETYPE_GENERIC_PAGE, DISCOVERY_SEED, discovery_rank
 from .urls import normalize_url
 
 if TYPE_CHECKING:
@@ -27,6 +27,29 @@ FAILED_STATUS = "failed"
 DEFAULT_LEASE_SECONDS = 300.0
 DEFAULT_RETRY_BACKOFF_SECONDS = 30.0
 MAX_RETRY_BACKOFF_SECONDS = 1800.0
+FRONTIER_REQUIRED_COLUMNS = {
+    "url",
+    "domain",
+    "depth",
+    "priority",
+    "discovery_kind",
+    "archetype",
+    "source_url",
+    "added_at",
+    "status",
+    "next_fetch_at",
+    "last_success_at",
+    "fail_streak",
+    "lease_token",
+    "lease_expires_at",
+    "last_error",
+}
+FRONTIER_ALLOWED_STATUSES = {
+    PENDING_STATUS,
+    LEASED_STATUS,
+    DONE_STATUS,
+    FAILED_STATUS,
+}
 
 FRONTIER_SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS frontier (
@@ -46,15 +69,6 @@ CREATE TABLE IF NOT EXISTS frontier (
     lease_expires_at DOUBLE PRECISION,
     last_error TEXT
 );
-
-ALTER TABLE frontier ADD COLUMN IF NOT EXISTS next_fetch_at DOUBLE PRECISION NOT NULL DEFAULT 0;
-ALTER TABLE frontier ADD COLUMN IF NOT EXISTS last_success_at DOUBLE PRECISION;
-ALTER TABLE frontier ADD COLUMN IF NOT EXISTS fail_streak INTEGER NOT NULL DEFAULT 0;
-ALTER TABLE frontier ADD COLUMN IF NOT EXISTS lease_token TEXT;
-ALTER TABLE frontier ADD COLUMN IF NOT EXISTS lease_expires_at DOUBLE PRECISION;
-ALTER TABLE frontier ADD COLUMN IF NOT EXISTS last_error TEXT;
-ALTER TABLE frontier ADD COLUMN IF NOT EXISTS discovery_kind TEXT NOT NULL DEFAULT 'seed';
-ALTER TABLE frontier ADD COLUMN IF NOT EXISTS archetype TEXT NOT NULL DEFAULT 'generic_page';
 
 CREATE INDEX IF NOT EXISTS idx_frontier_status ON frontier(status);
 CREATE INDEX IF NOT EXISTS idx_frontier_domain ON frontier(domain);
@@ -208,15 +222,40 @@ class Frontier:
             )
             return cur.rowcount
 
+    def _get_frontier_columns(self) -> set[str]:
+        with self._conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT column_name
+                FROM information_schema.columns
+                WHERE table_schema = 'public' AND table_name = 'frontier'
+                """
+            )
+            return {column_name for (column_name,) in cur.fetchall()}
+
+    def _assert_current_schema(self) -> None:
+        columns = self._get_frontier_columns()
+        missing = sorted(FRONTIER_REQUIRED_COLUMNS - columns)
+        if missing:
+            missing_columns = ", ".join(missing)
+            raise RuntimeError(f"frontier schema is outdated; missing columns: {missing_columns}")
+
+        with self._conn.cursor() as cur:
+            cur.execute("SELECT DISTINCT status FROM frontier")
+            invalid_statuses = sorted(
+                status
+                for (status,) in cur.fetchall()
+                if status not in FRONTIER_ALLOWED_STATUSES
+            )
+        if invalid_statuses:
+            invalid = ", ".join(invalid_statuses)
+            raise RuntimeError(f"frontier contains unsupported statuses: {invalid}")
+
     def _init_schema(self):
         with self._conn.cursor() as cur:
             cur.execute(FRONTIER_SCHEMA_SQL)
-            cur.execute(
-                f"""UPDATE frontier
-                    SET status = '{LEASED_STATUS}'
-                    WHERE status = 'processing'"""
-            )
         self._conn.commit()
+        self._assert_current_schema()
         logger.info("Frontier schema initialized")
 
     def _is_better_task(self, candidate: CrawlTask, current: CrawlTask) -> bool:
@@ -378,48 +417,6 @@ class Frontier:
             self._conn.rollback()
             logger.exception("Failed to upsert batch of %d URLs", len(tasks))
             return 0
-
-    def rerank_discovered(self, seed_urls: list[str]) -> int:
-        """Recompute backlog priority and discovery metadata using current ranking rules."""
-        seed_hosts = seed_hosts_from_urls(seed_urls)
-        updates: list[tuple[float, str, str]] = []
-        with self._conn.cursor() as cur:
-            cur.execute("SELECT url, source_url, priority, discovery_kind, archetype FROM frontier")
-            rows = cur.fetchall()
-
-        for url, source_url, priority, discovery_kind, archetype in rows:
-            if source_url:
-                decision = rank_discovered_url(
-                    parent_url=source_url,
-                    url=url,
-                    seed_hosts=seed_hosts,
-                )
-            else:
-                decision = rank_seed_url(url)
-
-            if (
-                priority != decision.priority
-                or discovery_kind != decision.discovery_kind
-                or archetype != decision.archetype
-            ):
-                updates.append((decision.priority, decision.discovery_kind, decision.archetype, url))
-
-        if not updates:
-            return 0
-
-        with self._conn.cursor() as cur:
-            psycopg2.extras.execute_batch(
-                cur,
-                """UPDATE frontier
-                   SET priority = %s,
-                       discovery_kind = %s,
-                       archetype = %s
-                   WHERE url = %s""",
-                updates,
-                page_size=200,
-            )
-        self._conn.commit()
-        return len(updates)
 
     def add(self, task: CrawlTask) -> bool:
         """Add a URL to the frontier. Returns True if inserted or metadata improved."""
