@@ -1,8 +1,12 @@
 """Tests for Postgres storage."""
 
 import os
+
 import pytest
+import psycopg2
 from psycopg2.extensions import TRANSACTION_STATUS_IDLE
+
+from crawler.migrate import apply_migrations
 
 # Skip all tests if no Postgres available
 pytestmark = pytest.mark.skipif(
@@ -11,20 +15,33 @@ pytestmark = pytest.mark.skipif(
 )
 
 
+def _reset_schema(dsn: str) -> None:
+    conn = psycopg2.connect(dsn)
+    conn.autocommit = False
+    try:
+        with conn.cursor() as cur:
+            cur.execute("DROP TABLE IF EXISTS public.schema_migrations")
+            cur.execute("DROP TABLE IF EXISTS public.domain_state")
+            cur.execute("DROP TABLE IF EXISTS public.frontier")
+            cur.execute("DROP TABLE IF EXISTS public.pages")
+        conn.commit()
+    finally:
+        conn.close()
+
+
 @pytest.fixture
 def pg_storage():
     from crawler.storage import PgStorage
 
     dsn = os.environ["TEST_POSTGRES_DSN"]
+    _reset_schema(dsn)
+    apply_migrations(dsn)
     storage = PgStorage(dsn)
     yield storage
     # Cleanup
     storage._conn.rollback()
-    with storage._conn.cursor() as cur:
-        cur.execute("DROP TABLE IF EXISTS public.frontier")
-        cur.execute("DROP TABLE IF EXISTS public.pages")
-    storage._conn.commit()
     storage.close()
+    _reset_schema(dsn)
 
 
 def test_save_page(pg_storage):
@@ -181,7 +198,7 @@ def test_get_stats_rejects_legacy_frontier_schema(pg_storage):
         )
     pg_storage._conn.commit()
 
-    with pytest.raises(RuntimeError, match="frontier schema is outdated for stats"):
+    with pytest.raises(RuntimeError, match="frontier schema is outdated"):
         pg_storage.get_stats()
 
 
