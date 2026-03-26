@@ -80,7 +80,6 @@ class CrawlDaemon:
                 try:
                     self._ensure_seeds(frontier)
                     self._recrawl_stale(storage, frontier)
-                    frontier.requeue_failed()
                     deferred = frontier.defer_overcrowded_backlog(
                         keep_ready_per_domain=_BACKLOG_READY_PER_HOST,
                         low_priority_threshold=_BACKLOG_LOW_PRIORITY,
