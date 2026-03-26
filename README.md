@@ -137,6 +137,8 @@ crawler serve --port 8080 --postgres postgresql://user:pass@localhost/db
 | `GET /pages/{url_hash}` | Get page details with content |
 | `GET /stats` | Crawl statistics, including frontier error breakdown and top error domains |
 
+Daemon logs also emit a per-cycle `errors=...` summary using the same categories as `/stats`.
+
 ## Docker
 
 ```bash
