@@ -208,6 +208,11 @@ In daemon mode, seeds are starting points for graph expansion. The crawler is ex
 discover and follow links onto other domains unless a specific crawl run is configured to stay
 on the same domain.
 
+Discovery priority is now based on generic URL structure rather than site-specific rules.
+Redirect-like paths, document-like paths, and bulk/listing paths are classified from reusable
+path heuristics so the scheduler does not depend on hard-coded `IANA` / `IETF` / `RFC Editor`
+special cases.
+
 ## Deployment
 
 Current deployment shape:
@@ -233,6 +238,25 @@ stale-page churn so the daemon does not spend cycles requeueing dead backlog too
 Store them in a local `.env` on the server; do not commit runtime-specific values.
 
 These production seeds are only bootstrap points. They do not define the full crawl scope.
+
+`docker-compose.yml` consumes these `CRAWL_*` variables as CLI flags for `crawler daemon`.
+The application also exposes lower-level `CRAWLER_*` settings for scheduler tuning:
+
+```bash
+CRAWLER_FRONTIER_LEASE_SECONDS=300
+CRAWLER_FRONTIER_RETRY_BACKOFF_SECONDS=30
+CRAWLER_FRONTIER_MAX_RETRY_BACKOFF_SECONDS=1800
+CRAWLER_ROBOTS_CACHE_TTL=3600
+CRAWLER_HOST_BACKOFF_SECONDS=30
+CRAWLER_MAX_HOST_BACKOFF_SECONDS=600
+CRAWLER_DAEMON_KEEP_READY_PER_DOMAIN=128
+CRAWLER_DAEMON_BACKLOG_LOW_PRIORITY=0.75
+CRAWLER_DAEMON_BACKLOG_DEFER_SECONDS=1800
+CRAWLER_DAEMON_MIN_READY_SLEEP=0.5
+```
+
+Use `CRAWLER_*` only when you need to tune scheduler behavior without changing the daemon CLI
+arguments wired through Compose.
 
 Before pushing:
 - Run `pytest -q`
