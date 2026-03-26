@@ -7,6 +7,7 @@ import psycopg2
 import pytest
 
 from crawler.domain_store import DomainStore
+from crawler.migrate import apply_migrations
 
 PG_DSN = os.environ.get("TEST_POSTGRES_DSN", "postgresql://crawler:crawler@localhost/crawldb_test")
 
@@ -30,8 +31,15 @@ class TestDomainStore:
         conn = psycopg2.connect(PG_DSN)
         conn.autocommit = False
         with conn.cursor() as cur:
+            cur.execute("DROP TABLE IF EXISTS schema_migrations")
             cur.execute("DROP TABLE IF EXISTS domain_state")
+            cur.execute("DROP TABLE IF EXISTS frontier")
+            cur.execute("DROP TABLE IF EXISTS pages")
         conn.commit()
+        conn.close()
+        apply_migrations(PG_DSN)
+        conn = psycopg2.connect(PG_DSN)
+        conn.autocommit = False
         store = DomainStore(conn, default_delay=1.5)
         yield store
         conn.close()

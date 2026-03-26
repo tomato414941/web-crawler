@@ -251,6 +251,26 @@ def serve(
 
 
 @app.command()
+def migrate(
+    postgres: str = typer.Option(None, "--postgres", envvar="CRAWLER_POSTGRES_DSN", help="Postgres DSN"),
+):
+    """Apply pending database migrations."""
+    if not postgres:
+        typer.echo("Error: --postgres or CRAWLER_POSTGRES_DSN is required", err=True)
+        raise typer.Exit(1)
+
+    from .migrate import apply_migrations
+
+    applied = apply_migrations(postgres)
+    if applied:
+        typer.echo("Applied migrations:")
+        for version in applied:
+            typer.echo(f"  {version}")
+    else:
+        typer.echo("No pending migrations")
+
+
+@app.command()
 def daemon(
     seeds: list[str] = typer.Argument(..., help="Seed URLs to crawl"),
     cycle_pages: int = typer.Option(500, "--cycle-pages", help="Pages per cycle"),

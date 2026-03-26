@@ -26,6 +26,9 @@ crawler = "crawler.cli:app"
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
+[tool.hatch.build]
+include = ["src/crawler/sql_migrations/*.sql"]
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/crawler"]
 

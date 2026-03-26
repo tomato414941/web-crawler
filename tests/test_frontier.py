@@ -9,6 +9,7 @@ import pytest
 from crawler.domain_store import DomainStore
 from crawler.discovery import DISCOVERY_EXTERNAL, DISCOVERY_SAME_HOST, DISCOVERY_SEED_HOST
 from crawler.frontier import CrawlTask, Frontier, LEASED_STATUS
+from crawler.migrate import apply_migrations
 from crawler.urls import normalize_url
 
 PG_DSN = os.environ.get("TEST_POSTGRES_DSN", "postgresql://crawler:crawler@localhost/crawldb_test")
@@ -93,9 +94,15 @@ class TestFrontier:
         conn = psycopg2.connect(PG_DSN)
         conn.autocommit = False
         with conn.cursor() as cur:
+            cur.execute("DROP TABLE IF EXISTS schema_migrations")
             cur.execute("DROP TABLE IF EXISTS frontier")
             cur.execute("DROP TABLE IF EXISTS domain_state")
+            cur.execute("DROP TABLE IF EXISTS pages")
         conn.commit()
+        conn.close()
+        apply_migrations(PG_DSN)
+        conn = psycopg2.connect(PG_DSN)
+        conn.autocommit = False
         f = Frontier(conn)
         self.domain_store = DomainStore(conn)
         f.attach_domain_store(self.domain_store)

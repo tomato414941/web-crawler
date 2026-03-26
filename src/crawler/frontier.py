@@ -12,6 +12,7 @@ from urllib.parse import urlparse
 import psycopg2.extras
 
 from .discovery import ARCHETYPE_GENERIC_PAGE, DISCOVERY_SEED, discovery_rank
+from .schema import assert_public_table_columns
 from .urls import normalize_url
 
 if TYPE_CHECKING:
@@ -51,36 +52,6 @@ FRONTIER_ALLOWED_STATUSES = {
     FAILED_STATUS,
 }
 
-FRONTIER_SCHEMA_SQL = """
-CREATE TABLE IF NOT EXISTS frontier (
-    url TEXT PRIMARY KEY,
-    domain TEXT NOT NULL,
-    depth INTEGER NOT NULL,
-    priority REAL NOT NULL DEFAULT 1.0,
-    discovery_kind TEXT NOT NULL DEFAULT 'seed',
-    archetype TEXT NOT NULL DEFAULT 'generic_page',
-    source_url TEXT,
-    added_at DOUBLE PRECISION NOT NULL,
-    status TEXT NOT NULL DEFAULT 'pending',
-    next_fetch_at DOUBLE PRECISION NOT NULL DEFAULT 0,
-    last_success_at DOUBLE PRECISION,
-    fail_streak INTEGER NOT NULL DEFAULT 0,
-    lease_token TEXT,
-    lease_expires_at DOUBLE PRECISION,
-    last_error TEXT
-);
-
-CREATE INDEX IF NOT EXISTS idx_frontier_status ON frontier(status);
-CREATE INDEX IF NOT EXISTS idx_frontier_domain ON frontier(domain);
-CREATE INDEX IF NOT EXISTS idx_frontier_pending
-    ON frontier(priority DESC, next_fetch_at ASC, added_at ASC) WHERE status = 'pending';
-CREATE INDEX IF NOT EXISTS idx_frontier_pending_domain
-    ON frontier(domain) WHERE status = 'pending';
-CREATE INDEX IF NOT EXISTS idx_frontier_leased_expiry
-    ON frontier(lease_expires_at) WHERE status = 'leased';
-"""
-
-
 @dataclass
 class CrawlTask:
     """A URL to crawl with metadata."""
@@ -118,7 +89,7 @@ class Frontier:
         self._retry_backoff_seconds = retry_backoff_seconds
         self._max_retry_backoff_seconds = max_retry_backoff_seconds
         self._domain_store: DomainStore | None = None
-        self._init_schema()
+        self._assert_current_schema()
 
     def attach_domain_store(self, domain_store: "DomainStore | None") -> None:
         """Attach the persistent host scheduler used for lease selection."""
@@ -222,23 +193,8 @@ class Frontier:
             )
             return cur.rowcount
 
-    def _get_frontier_columns(self) -> set[str]:
-        with self._conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT column_name
-                FROM information_schema.columns
-                WHERE table_schema = 'public' AND table_name = 'frontier'
-                """
-            )
-            return {column_name for (column_name,) in cur.fetchall()}
-
     def _assert_current_schema(self) -> None:
-        columns = self._get_frontier_columns()
-        missing = sorted(FRONTIER_REQUIRED_COLUMNS - columns)
-        if missing:
-            missing_columns = ", ".join(missing)
-            raise RuntimeError(f"frontier schema is outdated; missing columns: {missing_columns}")
+        assert_public_table_columns(self._conn, "frontier", FRONTIER_REQUIRED_COLUMNS)
 
         with self._conn.cursor() as cur:
             cur.execute("SELECT DISTINCT status FROM frontier")
@@ -250,13 +206,6 @@ class Frontier:
         if invalid_statuses:
             invalid = ", ".join(invalid_statuses)
             raise RuntimeError(f"frontier contains unsupported statuses: {invalid}")
-
-    def _init_schema(self):
-        with self._conn.cursor() as cur:
-            cur.execute(FRONTIER_SCHEMA_SQL)
-        self._conn.commit()
-        self._assert_current_schema()
-        logger.info("Frontier schema initialized")
 
     def _is_better_task(self, candidate: CrawlTask, current: CrawlTask) -> bool:
         """Return True when candidate should replace current task metadata."""

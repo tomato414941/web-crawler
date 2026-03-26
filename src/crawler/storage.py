@@ -11,34 +11,29 @@ import psycopg2
 import psycopg2.extras
 
 from .result import CrawlResult, result_to_dict
+from .schema import assert_public_table_columns
 
 logger = logging.getLogger(__name__)
+PAGES_REQUIRED_COLUMNS = {
+    "url_hash",
+    "url",
+    "domain",
+    "title",
+    "content",
+    "status",
+    "content_length",
+    "depth",
+    "source_url",
+    "outlinks",
+    "crawled_at",
+    "created_at",
+}
 FRONTIER_STATS_REQUIRED_COLUMNS = {
     "status",
     "discovery_kind",
     "archetype",
     "domain",
 }
-
-SCHEMA_SQL = """
-CREATE TABLE IF NOT EXISTS pages (
-    url_hash TEXT PRIMARY KEY,
-    url TEXT NOT NULL,
-    domain TEXT NOT NULL,
-    title TEXT,
-    content TEXT,
-    status INTEGER,
-    content_length INTEGER,
-    depth INTEGER,
-    source_url TEXT,
-    outlinks TEXT[],
-    crawled_at DOUBLE PRECISION NOT NULL,
-    created_at DOUBLE PRECISION NOT NULL DEFAULT EXTRACT(EPOCH FROM NOW())
-);
-
-CREATE INDEX IF NOT EXISTS idx_pages_domain ON pages(domain);
-CREATE INDEX IF NOT EXISTS idx_pages_crawled_at ON pages(crawled_at);
-"""
 
 
 _TITLE_PATTERN = re.compile(r"<title[^>]*>(.*?)</title>", re.IGNORECASE | re.DOTALL)
@@ -55,39 +50,12 @@ class PgStorage:
         self._dsn = dsn
         self._conn = psycopg2.connect(dsn)
         self._conn.autocommit = False
-        self._init_schema()
+        assert_public_table_columns(self._conn, "pages", PAGES_REQUIRED_COLUMNS)
         self._count = 0
-
-    def _init_schema(self):
-        with self._conn.cursor() as cur:
-            cur.execute(SCHEMA_SQL)
-        self._conn.commit()
-        logger.info("Postgres storage initialized")
 
     def _finish_read(self) -> None:
         """Close read-only transactions so API requests do not hold relation locks."""
         self._conn.commit()
-
-    def _get_public_table_columns(self, cur, table_name: str) -> set[str]:
-        """Return the public-column names for a table if it exists."""
-        cur.execute(
-            """
-            SELECT column_name
-            FROM information_schema.columns
-            WHERE table_schema = 'public' AND table_name = %s
-            """,
-            (table_name,),
-        )
-        return {column_name for (column_name,) in cur.fetchall()}
-
-    def _assert_current_frontier_stats_schema(self, cur) -> None:
-        columns = self._get_public_table_columns(cur, "frontier")
-        missing = sorted(FRONTIER_STATS_REQUIRED_COLUMNS - columns)
-        if missing:
-            missing_columns = ", ".join(missing)
-            raise RuntimeError(
-                f"frontier schema is outdated for stats; missing columns: {missing_columns}"
-            )
 
     def save(self, result: CrawlResult | Mapping[str, object]) -> bool:
         """Save a single crawl result. Returns True if inserted."""
@@ -227,7 +195,11 @@ class PgStorage:
                 archetypes: dict[str, int] = {}
                 top_pending_domains: list[dict[str, object]] = []
                 if frontier_exists:
-                    self._assert_current_frontier_stats_schema(cur)
+                    assert_public_table_columns(
+                        self._conn,
+                        "frontier",
+                        FRONTIER_STATS_REQUIRED_COLUMNS,
+                    )
 
                     cur.execute("SELECT status, COUNT(*) FROM public.frontier GROUP BY status")
                     frontier_status = {status: count for status, count in cur.fetchall()}
