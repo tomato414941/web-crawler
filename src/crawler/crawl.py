@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections import Counter
 import logging
 import re
 import time
@@ -17,6 +18,7 @@ from .core import HttpFetcher
 from .discovery import PageSignals, rank_discovered_url, rank_seed_url, seed_hosts_from_urls
 from .domain_manager import DomainManager
 from .domain_store import DomainStore
+from .error_stats import categorize_crawl_error
 from .frontier import CrawlTask, Frontier
 from .output import StreamingOutputWriter
 from .result import CrawlFailure, CrawlResult
@@ -103,11 +105,13 @@ class CrawlerEngine:
 
         self.results: list[dict] = []
         self.pages_crawled = 0
+        self.failure_breakdown: dict[str, int] = {}
         self._running = False
         self._claimed_pages = 0
         self._page_lock = asyncio.Lock()
         self._lease_lock = asyncio.Lock()
         self._leases_issued = 0
+        self._failure_counts: Counter[str] = Counter()
 
     async def __aenter__(self) -> "CrawlerEngine":
         return self
@@ -327,6 +331,9 @@ class CrawlerEngine:
 
             if isinstance(result, CrawlFailure):
                 await self._release_page_slot(success=False)
+                category = categorize_crawl_error(result.error)
+                if category:
+                    self._failure_counts[category] += 1
                 logger.warning("Failed %s: %s", result.url, result.error)
             else:
                 await self._release_page_slot(success=True)
@@ -353,6 +360,8 @@ class CrawlerEngine:
         """Run the crawler and return results."""
         self._running = True
         self.pages_crawled = 0
+        self.failure_breakdown = {}
+        self._failure_counts = Counter()
         self._claimed_pages = 0
         self._leases_issued = 0
 
@@ -367,6 +376,7 @@ class CrawlerEngine:
 
         await asyncio.gather(*workers)
         self._running = False
+        self.failure_breakdown = dict(self._failure_counts)
 
         return self.results
 
