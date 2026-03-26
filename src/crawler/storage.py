@@ -1,5 +1,6 @@
 """Postgres storage for crawl results."""
 
+from collections import Counter
 from collections.abc import Mapping
 import hashlib
 import logging
@@ -33,6 +34,7 @@ FRONTIER_STATS_REQUIRED_COLUMNS = {
     "discovery_kind",
     "archetype",
     "domain",
+    "last_error",
 }
 
 
@@ -41,6 +43,31 @@ _TITLE_PATTERN = re.compile(r"<title[^>]*>(.*?)</title>", re.IGNORECASE | re.DOT
 
 def _url_hash(url: str) -> str:
     return hashlib.blake2b(url.encode(), digest_size=8).hexdigest()
+
+
+def _categorize_frontier_error(error: str | None) -> str | None:
+    """Collapse raw crawl errors into stable operator-facing buckets."""
+    if not error:
+        return None
+
+    if error.startswith("http_"):
+        try:
+            status = int(error.split("_", 1)[1])
+        except ValueError:
+            return "http_other"
+        if 400 <= status < 500:
+            return "http_4xx"
+        if 500 <= status < 600:
+            return "http_5xx"
+        return "http_other"
+
+    if error == "timeout":
+        return "timeout"
+
+    if error == "connection_error" or "Server disconnected without sending a response." in error:
+        return "connection_error"
+
+    return "other"
 
 
 class PgStorage:
@@ -194,6 +221,8 @@ class PgStorage:
                 discovery_kinds: dict[str, int] = {}
                 archetypes: dict[str, int] = {}
                 top_pending_domains: list[dict[str, object]] = []
+                active_error_breakdown: dict[str, int] = {}
+                top_error_domains: list[dict[str, object]] = []
                 if frontier_exists:
                     assert_public_table_columns(
                         self._conn,
@@ -231,6 +260,45 @@ class PgStorage:
                         for domain, count in cur.fetchall()
                     ]
 
+                    cur.execute(
+                        """SELECT last_error, COUNT(*)
+                           FROM public.frontier
+                           WHERE last_error IS NOT NULL
+                             AND status IN ('pending', 'failed')
+                           GROUP BY last_error"""
+                    )
+                    error_counts = Counter()
+                    for error, count in cur.fetchall():
+                        category = _categorize_frontier_error(error)
+                        if category:
+                            error_counts[category] += count
+                    active_error_breakdown = {
+                        category: error_counts[category]
+                        for category in (
+                            "http_4xx",
+                            "http_5xx",
+                            "timeout",
+                            "connection_error",
+                            "http_other",
+                            "other",
+                        )
+                        if error_counts.get(category)
+                    }
+
+                    cur.execute(
+                        """SELECT domain, COUNT(*)
+                           FROM public.frontier
+                           WHERE last_error IS NOT NULL
+                             AND status IN ('pending', 'failed')
+                           GROUP BY domain
+                           ORDER BY COUNT(*) DESC, domain ASC
+                           LIMIT 10"""
+                    )
+                    top_error_domains = [
+                        {"domain": domain, "count": count}
+                        for domain, count in cur.fetchall()
+                    ]
+
                 cur.execute(
                     """SELECT domain, COUNT(*)
                        FROM pages
@@ -258,6 +326,8 @@ class PgStorage:
             "archetypes": archetypes,
             "top_page_domains": top_page_domains,
             "top_pending_domains": top_pending_domains,
+            "active_error_breakdown": active_error_breakdown,
+            "top_error_domains": top_error_domains,
         }
 
     def close(self):
