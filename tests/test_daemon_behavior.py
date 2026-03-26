@@ -262,3 +262,69 @@ async def test_daemon_logs_cycle_error_breakdown(caplog):
         await daemon.run()
 
     assert "errors=http_4xx=3, timeout=1" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_daemon_uses_configured_backlog_controls():
+    class FakeStorage:
+        def close(self):
+            return None
+
+    class FakeFrontier:
+        def __init__(self):
+            self.defer_args = None
+
+        def pending_count(self):
+            return 1
+
+        def ready_count(self):
+            return 1
+
+        def next_ready_delay(self):
+            return None
+
+        def defer_overcrowded_backlog(self, **kwargs):
+            self.defer_args = kwargs
+            return 0
+
+        def recover_leased(self, expired_only=False):
+            return 0
+
+        def upsert_seeds(self, urls, priority=2.0):
+            return len(urls)
+
+        def stats(self):
+            return {"pending": 1, "total": 1}
+
+    daemon = CrawlDaemon(
+        seeds=["https://example.com/"],
+        postgres_dsn="postgresql://unused",
+        cycle_pages=10,
+        recrawl_ttl=3600,
+        backlog_ready_per_domain=7,
+        backlog_low_priority=0.4,
+        backlog_defer_seconds=12.0,
+    )
+    frontier = FakeFrontier()
+    storage = FakeStorage()
+
+    daemon._install_signals = lambda: None
+    daemon._recrawl_stale = lambda _storage, _frontier: None
+
+    async def fake_connect():
+        return storage, frontier
+
+    async def fake_run_cycle(_storage, _frontier):
+        daemon._shutdown = True
+        return 0, {}
+
+    daemon._connect = fake_connect
+    daemon._run_cycle = fake_run_cycle
+
+    await daemon.run()
+
+    assert frontier.defer_args == {
+        "keep_ready_per_domain": 7,
+        "low_priority_threshold": 0.4,
+        "defer_seconds": 12.0,
+    }

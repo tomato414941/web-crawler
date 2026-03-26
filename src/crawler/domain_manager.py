@@ -8,6 +8,7 @@ from urllib.parse import urlparse
 import httpx
 from robotexclusionrulesparser import RobotExclusionRulesParser
 
+from .config import settings
 from .domain_state import PersistedDomainState, RuntimeDomainState
 from .tls import build_ssl_context
 
@@ -39,19 +40,24 @@ class DomainManager:
         default_delay: float = 1.0,
         respect_robots: bool = True,
         max_retries: int = 3,
-        robots_cache_ttl: float = ROBOTS_CACHE_TTL,
+        robots_cache_ttl: float | None = None,
         domain_store: "DomainStore | None" = None,
-        host_backoff_seconds: float = DEFAULT_HOST_BACKOFF_SECONDS,
-        max_host_backoff_seconds: float = MAX_HOST_BACKOFF_SECONDS,
+        host_backoff_seconds: float | None = None,
+        max_host_backoff_seconds: float | None = None,
     ):
         self.user_agent = user_agent
         self.default_delay = default_delay
         self.respect_robots = respect_robots
         self.max_retries = max_retries
-        self.robots_cache_ttl = robots_cache_ttl
+        self.robots_cache_ttl = settings.robots_cache_ttl if robots_cache_ttl is None else robots_cache_ttl
         self._domain_store = domain_store
-        self._host_backoff_seconds = host_backoff_seconds
-        self._max_host_backoff_seconds = max_host_backoff_seconds
+        self._host_backoff_seconds = (
+            settings.host_backoff_seconds if host_backoff_seconds is None else host_backoff_seconds
+        )
+        self._max_host_backoff_seconds = (
+            settings.max_host_backoff_seconds
+            if max_host_backoff_seconds is None else max_host_backoff_seconds
+        )
         self._runtime_states: dict[str, RuntimeDomainState] = {}
         self._locks: dict[str, asyncio.Lock] = {}
         self._client: httpx.AsyncClient | None = None

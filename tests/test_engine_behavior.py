@@ -233,17 +233,17 @@ async def test_crawler_collects_failure_breakdown():
 
 @pytest.mark.asyncio
 async def test_crawler_assigns_discovery_metadata_to_outlinks():
-    frontier = FakeFrontier([CrawlTask(url="https://www.iana.org/", depth=0)])
+    frontier = FakeFrontier([CrawlTask(url="https://example.com/", depth=0)])
     domain_manager = FakeDomainManager()
     fetcher = FakeFetcher(
         [
             Response(
-                url="https://www.iana.org/",
+                url="https://example.com/",
                 status=200,
                 content=(
-                    b'<a href="https://www.iana.org/domains">same host</a>'
-                    b'<a href="https://datatracker.ietf.org/wg/">seed host</a>'
-                    b'<a href="https://github.com/ietf-tools/datatracker">external</a>'
+                    b'<a href="https://example.com/domains">same host</a>'
+                    b'<a href="https://docs.example.com/guide/">seed host</a>'
+                    b'<a href="https://external.example.net/project">external</a>'
                 ),
                 headers={},
             )
@@ -256,7 +256,7 @@ async def test_crawler_assigns_discovery_metadata_to_outlinks():
         same_domain=False,
         frontier=frontier,
         domain_manager=domain_manager,
-        seed_urls=["https://www.iana.org/", "https://datatracker.ietf.org/"],
+        seed_urls=["https://example.com/", "https://docs.example.com/"],
     ) as engine:
         engine.fetcher = fetcher
         await engine.crawl()
@@ -264,32 +264,32 @@ async def test_crawler_assigns_discovery_metadata_to_outlinks():
     added = frontier.added_batches[0]
     by_url = {task.url: task for task in added}
 
-    assert by_url["https://www.iana.org/domains"].discovery_kind == DISCOVERY_SAME_HOST
-    assert by_url["https://www.iana.org/domains"].archetype == ARCHETYPE_GENERIC_PAGE
-    assert by_url["https://www.iana.org/domains"].priority > by_url[
-        "https://datatracker.ietf.org/wg"
+    assert by_url["https://example.com/domains"].discovery_kind == DISCOVERY_SAME_HOST
+    assert by_url["https://example.com/domains"].archetype == ARCHETYPE_GENERIC_PAGE
+    assert by_url["https://example.com/domains"].priority > by_url[
+        "https://docs.example.com/guide"
     ].priority
-    assert by_url["https://datatracker.ietf.org/wg"].discovery_kind == DISCOVERY_SEED_HOST
-    assert by_url["https://datatracker.ietf.org/wg"].archetype == ARCHETYPE_GENERIC_PAGE
-    assert by_url["https://datatracker.ietf.org/wg"].priority > by_url[
-        "https://github.com/ietf-tools/datatracker"
+    assert by_url["https://docs.example.com/guide"].discovery_kind == DISCOVERY_SEED_HOST
+    assert by_url["https://docs.example.com/guide"].archetype == ARCHETYPE_GENERIC_PAGE
+    assert by_url["https://docs.example.com/guide"].priority > by_url[
+        "https://external.example.net/project"
     ].priority
-    assert by_url["https://github.com/ietf-tools/datatracker"].discovery_kind == DISCOVERY_EXTERNAL
-    assert by_url["https://github.com/ietf-tools/datatracker"].archetype == ARCHETYPE_GENERIC_PAGE
+    assert by_url["https://external.example.net/project"].discovery_kind == DISCOVERY_EXTERNAL
+    assert by_url["https://external.example.net/project"].archetype == ARCHETYPE_GENERIC_PAGE
 
 
 @pytest.mark.asyncio
 async def test_crawler_assigns_page_archetypes_to_outlinks():
-    frontier = FakeFrontier([CrawlTask(url="https://www.iana.org/", depth=0)])
+    frontier = FakeFrontier([CrawlTask(url="https://example.com/", depth=0)])
     domain_manager = FakeDomainManager()
     fetcher = FakeFetcher(
         [
             Response(
-                url="https://www.iana.org/",
+                url="https://example.com/",
                 status=200,
                 content=(
-                    b'<a href="https://www.iana.org/go/rfc9142">redirect hub</a>'
-                    b'<a href="https://datatracker.ietf.org/doc/html/rfc9142">document</a>'
+                    b'<a href="https://example.com/go/rfc9142">redirect hub</a>'
+                    b'<a href="https://docs.example.com/doc/rfc9142">document</a>'
                 ),
                 headers={"content-type": "text/html; charset=utf-8"},
             )
@@ -302,7 +302,7 @@ async def test_crawler_assigns_page_archetypes_to_outlinks():
         same_domain=False,
         frontier=frontier,
         domain_manager=domain_manager,
-        seed_urls=["https://www.iana.org/", "https://datatracker.ietf.org/"],
+        seed_urls=["https://example.com/", "https://docs.example.com/"],
     ) as engine:
         engine.fetcher = fetcher
         await engine.crawl()
@@ -310,10 +310,10 @@ async def test_crawler_assigns_page_archetypes_to_outlinks():
     added = frontier.added_batches[0]
     by_url = {task.url: task for task in added}
 
-    assert by_url["https://www.iana.org/go/rfc9142"].archetype == ARCHETYPE_REDIRECT_HUB
-    assert by_url["https://datatracker.ietf.org/doc/html/rfc9142"].archetype == ARCHETYPE_DOCUMENT_PAGE
-    assert by_url["https://datatracker.ietf.org/doc/html/rfc9142"].priority > by_url[
-        "https://www.iana.org/go/rfc9142"
+    assert by_url["https://example.com/go/rfc9142"].archetype == ARCHETYPE_REDIRECT_HUB
+    assert by_url["https://docs.example.com/doc/rfc9142"].archetype == ARCHETYPE_DOCUMENT_PAGE
+    assert by_url["https://docs.example.com/doc/rfc9142"].priority > by_url[
+        "https://example.com/go/rfc9142"
     ].priority
 
 

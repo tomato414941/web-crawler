@@ -412,6 +412,13 @@ class TestFrontier:
         assert fail_streak == 1
         assert priority == 0.75
 
+    def test_compute_retry_backoff_uses_configured_values(self, frontier):
+        configured = Frontier(frontier._conn, retry_backoff_seconds=5.0, max_retry_backoff_seconds=12.0)
+
+        assert configured._compute_retry_backoff(1) == 5.0
+        assert configured._compute_retry_backoff(2) == 10.0
+        assert configured._compute_retry_backoff(3) == 12.0
+
     def test_lease_next_prefers_fresh_url_over_retried_url(self, frontier):
         frontier.add(CrawlTask(url="http://retry.com/page", depth=0, priority=1.25))
         first = frontier.lease_next(domain="retry.com")
