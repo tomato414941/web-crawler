@@ -203,25 +203,45 @@ class CrawlDaemon:
 
     def _recrawl_stale(self, storage: PgStorage, frontier: Frontier):
         """Re-queue pages older than recrawl_ttl."""
+        pending = frontier.pending_count()
+        if pending >= self._cycle_pages:
+            return
+
+        batch_size = self._cycle_pages - pending
+        if batch_size <= 0:
+            return
+
         cutoff = time.time() - self._recrawl_ttl
         now = time.time()
         with storage.conn.cursor() as cur:
             cur.execute(
-                """UPDATE frontier
+                """WITH candidates AS (
+                       SELECT frontier.url
+                       FROM frontier
+                       JOIN pages ON frontier.url = pages.url
+                       WHERE pages.crawled_at < %s
+                         AND frontier.status = 'done'
+                       ORDER BY pages.crawled_at ASC
+                       LIMIT %s
+                   )
+                   UPDATE frontier
                    SET status = 'pending',
                        next_fetch_at = %s,
                        lease_token = NULL,
                        lease_expires_at = NULL
-                   FROM pages
-                   WHERE frontier.url = pages.url
-                     AND pages.crawled_at < %s
-                     AND frontier.status = 'done'""",
-                (now, cutoff),
+                   WHERE url IN (SELECT url FROM candidates)""",
+                (cutoff, batch_size, now),
             )
             count = cur.rowcount
         storage.conn.commit()
         if count:
-            logger.info("Re-queued %d stale pages (TTL=%ds)", count, self._recrawl_ttl)
+            logger.info(
+                "Re-queued %d stale pages (TTL=%ds, pending=%d, target=%d)",
+                count,
+                self._recrawl_ttl,
+                pending,
+                self._cycle_pages,
+            )
 
     def _install_signals(self):
         """Register signal handlers for graceful shutdown."""
