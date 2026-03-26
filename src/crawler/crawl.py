@@ -14,6 +14,7 @@ import httpx
 import typer
 
 from .config import settings
+from .content_policy import should_extract_links, should_store_text_content
 from .core import HttpFetcher
 from .discovery import PageSignals, rank_discovered_url, rank_seed_url, seed_hosts_from_urls
 from .domain_manager import DomainManager
@@ -232,12 +233,22 @@ class CrawlerEngine:
                 depth=task.depth,
                 source_url=task.source_url,
                 timestamp=time.time(),
-                content=response.text,
+                content=(
+                    response.text
+                    if should_store_text_content(
+                        response.headers.get("content-type"),
+                        response.content,
+                    )
+                    else ""
+                ),
                 outlinks=[],
             )
 
             # Extract and queue new links (dedup handled by frontier ON CONFLICT)
-            if task.depth < self.max_depth:
+            if task.depth < self.max_depth and should_extract_links(
+                response.headers.get("content-type"),
+                response.content,
+            ):
                 links = extract_links(response.text, response.url)
                 result.outlinks = links
                 page_signals = self._build_page_signals(response)

@@ -46,6 +46,15 @@ def _url_hash(url: str) -> str:
     return hashlib.blake2b(url.encode(), digest_size=8).hexdigest()
 
 
+def _sanitize_stored_content(content: object) -> str:
+    """Drop content that cannot be represented safely in the TEXT storage column."""
+    if not isinstance(content, str):
+        return ""
+    if "\x00" in content:
+        return ""
+    return content
+
+
 class PgStorage:
     """Store crawl results in Postgres."""
 
@@ -71,7 +80,7 @@ class PgStorage:
         domain = urlparse(url).netloc
 
         title = None
-        content = data.get("content", "")
+        content = _sanitize_stored_content(data.get("content", ""))
         if content:
             m = _TITLE_PATTERN.search(content)
             if m:

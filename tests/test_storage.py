@@ -88,6 +88,27 @@ def test_upsert_on_conflict(pg_storage):
         assert cur.fetchone()[0] == "V2"
 
 
+def test_save_drops_nul_content_to_metadata_only(pg_storage):
+    result = {
+        "url": "https://example.com/file.pdf",
+        "status": 200,
+        "content_length": 1000,
+        "depth": 0,
+        "timestamp": 1710000000.0,
+        "content": "prefix\x00suffix",
+        "outlinks": [],
+    }
+
+    assert pg_storage.save(result) is True
+
+    with pg_storage._conn.cursor() as cur:
+        cur.execute("SELECT title, content FROM pages WHERE url = %s", ("https://example.com/file.pdf",))
+        title, content = cur.fetchone()
+
+    assert title is None
+    assert content == ""
+
+
 def test_get_stats_includes_frontier_breakdown(pg_storage):
     page_results = [
         {
