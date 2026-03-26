@@ -28,6 +28,8 @@ FAILED_STATUS = "failed"
 DEFAULT_LEASE_SECONDS = 300.0
 DEFAULT_RETRY_BACKOFF_SECONDS = 30.0
 MAX_RETRY_BACKOFF_SECONDS = 1800.0
+RETRY_PRIORITY_DECAY = 0.6
+MIN_RETRY_PRIORITY = 0.25
 FRONTIER_REQUIRED_COLUMNS = {
     "url",
     "domain",
@@ -102,6 +104,12 @@ class Frontier:
             return base
         delay = base * (2 ** (fail_streak - 1))
         return min(delay, self._max_retry_backoff_seconds)
+
+    def _compute_retry_priority(self, priority: float, fail_streak: int) -> float:
+        """Lower retry priority so repeatedly failing URLs do not dominate the queue."""
+        if fail_streak <= 0:
+            return priority
+        return max(MIN_RETRY_PRIORITY, round(priority * (RETRY_PRIORITY_DECAY ** fail_streak), 2))
 
     def _lease_match_sql(self, lease_token: str | None) -> tuple[str, tuple]:
         """Build an optional lease-token predicate for completion updates."""
@@ -566,7 +574,7 @@ class Frontier:
 
         with self._conn.cursor() as cur:
             cur.execute(
-                f"SELECT fail_streak FROM frontier WHERE url = %s{lease_sql} FOR UPDATE",
+                f"SELECT fail_streak, priority FROM frontier WHERE url = %s{lease_sql} FOR UPDATE",
                 (normalized, *lease_params),
             )
             row = cur.fetchone()
@@ -575,6 +583,7 @@ class Frontier:
                 return False
 
             next_fail_streak = row[0] + 1
+            next_priority = self._compute_retry_priority(row[1], next_fail_streak)
             retry_delay = backoff_seconds
             if retryable and retry_delay is None:
                 retry_delay = self._compute_retry_backoff(next_fail_streak)
@@ -586,6 +595,7 @@ class Frontier:
                     SET status = %s,
                         next_fetch_at = %s,
                         fail_streak = %s,
+                        priority = %s,
                         last_error = %s,
                         lease_token = NULL,
                         lease_expires_at = NULL
@@ -594,6 +604,7 @@ class Frontier:
                     status,
                     next_fetch_at,
                     next_fail_streak,
+                    next_priority,
                     error,
                     normalized,
                     *lease_params,
