@@ -5,6 +5,7 @@ import asyncio
 import httpx
 
 from .protocols import Response
+from ..tls import build_ssl_context
 
 DEFAULT_USER_AGENT = "WebCrawler/0.1 (+https://github.com/web-crawler)"
 
@@ -38,6 +39,7 @@ class HttpFetcher:
                         limits=self.limits,
                         headers={"User-Agent": self.user_agent},
                         follow_redirects=True,
+                        verify=build_ssl_context(),
                     )
         return self._client
 
