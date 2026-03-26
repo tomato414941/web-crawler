@@ -19,8 +19,10 @@ def pg_storage():
     storage = PgStorage(dsn)
     yield storage
     # Cleanup
+    storage._conn.rollback()
     with storage._conn.cursor() as cur:
-        cur.execute("DROP TABLE IF EXISTS pages")
+        cur.execute("DROP TABLE IF EXISTS public.frontier")
+        cur.execute("DROP TABLE IF EXISTS public.pages")
     storage._conn.commit()
     storage.close()
 
@@ -94,6 +96,7 @@ def test_get_stats_includes_frontier_breakdown(pg_storage):
         pg_storage.save(result)
 
     with pg_storage._conn.cursor() as cur:
+        cur.execute("DROP TABLE IF EXISTS public.frontier")
         cur.execute(
             """
             CREATE TABLE IF NOT EXISTS frontier (
@@ -138,6 +141,53 @@ def test_get_stats_includes_frontier_breakdown(pg_storage):
         {"domain": "example.com", "count": 1},
         {"domain": "other.com", "count": 1},
     ]
+
+
+def test_get_stats_tolerates_legacy_frontier_schema(pg_storage):
+    result = {
+        "url": "https://example.com/page1",
+        "status": 200,
+        "content_length": 100,
+        "depth": 0,
+        "timestamp": 1710000000.0,
+        "content": "<html><title>Example</title></html>",
+        "outlinks": [],
+    }
+    pg_storage.save(result)
+
+    with pg_storage._conn.cursor() as cur:
+        cur.execute("DROP TABLE IF EXISTS public.frontier")
+    pg_storage._conn.commit()
+
+    with pg_storage._conn.cursor() as cur:
+        cur.execute(
+            """
+            CREATE TABLE public.frontier (
+                url TEXT PRIMARY KEY,
+                domain TEXT NOT NULL,
+                depth INTEGER NOT NULL,
+                priority REAL NOT NULL DEFAULT 1.0,
+                source_url TEXT,
+                added_at DOUBLE PRECISION NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending'
+            )
+            """
+        )
+        cur.execute(
+            """
+            INSERT INTO frontier (url, domain, depth, priority, source_url, added_at, status)
+            VALUES ('https://example.com/page2', 'example.com', 1, 1.0, 'https://example.com/page1', 1710000001.0, 'pending')
+            """
+        )
+    pg_storage._conn.commit()
+
+    stats = pg_storage.get_stats()
+
+    assert stats["total_pages"] == 1
+    assert stats["frontier_status"] == {"pending": 1}
+    assert stats["discovery_kinds"] == {}
+    assert stats["archetypes"] == {}
+    assert stats["top_pending_domains"] == [{"domain": "example.com", "count": 1}]
 
 
 def test_read_methods_leave_connection_idle(pg_storage):

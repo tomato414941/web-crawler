@@ -368,7 +368,7 @@ class Frontier:
                            EXCLUDED.priority > frontier.priority
                            OR {new_rank} > {existing_rank}
                            OR EXCLUDED.depth < frontier.depth
-                           OR frontier.source_url IS NULL
+                           OR (frontier.source_url IS NULL AND EXCLUDED.source_url IS NOT NULL)
                            OR EXCLUDED.next_fetch_at < frontier.next_fetch_at""",
                     rows,
                     page_size=200,
