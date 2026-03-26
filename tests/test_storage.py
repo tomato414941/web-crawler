@@ -158,6 +158,43 @@ def test_get_stats_includes_frontier_breakdown(pg_storage):
         {"domain": "example.com", "count": 1},
         {"domain": "other.com", "count": 1},
     ]
+    assert stats["active_error_breakdown"] == {}
+    assert stats["top_error_domains"] == []
+
+
+def test_get_stats_includes_active_error_breakdown(pg_storage):
+    with pg_storage._conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO frontier (
+                url, domain, depth, priority, discovery_kind, archetype, source_url,
+                added_at, status, next_fetch_at, fail_streak, last_error
+            )
+            VALUES
+                ('https://example.com/404', 'example.com', 0, 1.0, 'seed', 'generic_page', NULL, 1710000000.0, 'pending', 1710000000.0, 1, 'http_404'),
+                ('https://example.com/503', 'example.com', 0, 1.0, 'seed', 'generic_page', NULL, 1710000001.0, 'pending', 1710000001.0, 1, 'http_503'),
+                ('https://other.com/timeout', 'other.com', 0, 1.0, 'external', 'generic_page', NULL, 1710000002.0, 'pending', 1710000002.0, 2, 'timeout'),
+                ('https://other.com/disconnect', 'other.com', 0, 1.0, 'external', 'generic_page', NULL, 1710000003.0, 'failed', 1710000003.0, 3, 'Server disconnected without sending a response.'),
+                ('https://third.com/connect', 'third.com', 0, 1.0, 'external', 'generic_page', NULL, 1710000004.0, 'pending', 1710000004.0, 1, 'connection_error'),
+                ('https://third.com/other', 'third.com', 0, 1.0, 'external', 'generic_page', NULL, 1710000005.0, 'pending', 1710000005.0, 1, 'weird_error')
+            """
+        )
+    pg_storage._conn.commit()
+
+    stats = pg_storage.get_stats()
+
+    assert stats["active_error_breakdown"] == {
+        "http_4xx": 1,
+        "http_5xx": 1,
+        "timeout": 1,
+        "connection_error": 2,
+        "other": 1,
+    }
+    assert stats["top_error_domains"] == [
+        {"domain": "example.com", "count": 2},
+        {"domain": "other.com", "count": 2},
+        {"domain": "third.com", "count": 2},
+    ]
 
 
 def test_get_stats_rejects_legacy_frontier_schema(pg_storage):
