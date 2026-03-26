@@ -150,9 +150,6 @@ class CrawlDaemon:
                 count = frontier.recover_leased(expired_only=False)
                 if count:
                     logger.info("Recovered %d leased URLs", count)
-                reranked = frontier.rerank_discovered(self._seeds)
-                if reranked:
-                    logger.info("Re-ranked %d frontier URLs", reranked)
                 deferred = frontier.defer_overcrowded_backlog(
                     keep_ready_per_domain=_BACKLOG_READY_PER_HOST,
                     low_priority_threshold=_BACKLOG_LOW_PRIORITY,

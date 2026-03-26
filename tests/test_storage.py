@@ -143,7 +143,7 @@ def test_get_stats_includes_frontier_breakdown(pg_storage):
     ]
 
 
-def test_get_stats_tolerates_legacy_frontier_schema(pg_storage):
+def test_get_stats_rejects_legacy_frontier_schema(pg_storage):
     result = {
         "url": "https://example.com/page1",
         "status": 200,
@@ -181,13 +181,8 @@ def test_get_stats_tolerates_legacy_frontier_schema(pg_storage):
         )
     pg_storage._conn.commit()
 
-    stats = pg_storage.get_stats()
-
-    assert stats["total_pages"] == 1
-    assert stats["frontier_status"] == {"pending": 1}
-    assert stats["discovery_kinds"] == {}
-    assert stats["archetypes"] == {}
-    assert stats["top_pending_domains"] == [{"domain": "example.com", "count": 1}]
+    with pytest.raises(RuntimeError, match="frontier schema is outdated for stats"):
+        pg_storage.get_stats()
 
 
 def test_read_methods_leave_connection_idle(pg_storage):
