@@ -18,10 +18,6 @@ logger = logging.getLogger(__name__)
 
 _MAX_RECONNECT_ATTEMPTS = 5
 _RECONNECT_DELAY = 5.0
-_BACKLOG_READY_PER_HOST = 128
-_BACKLOG_LOW_PRIORITY = 0.75
-_BACKLOG_DEFER_SECONDS = 1800.0
-_MIN_READY_SLEEP = 0.5
 
 
 def _format_error_breakdown(error_breakdown: dict[str, int]) -> str:
@@ -54,6 +50,10 @@ class CrawlDaemon:
         delay: float = 1.0,
         cycle_pause: float = 5.0,
         idle_sleep: float = 60.0,
+        backlog_ready_per_domain: int | None = None,
+        backlog_low_priority: float | None = None,
+        backlog_defer_seconds: float | None = None,
+        min_ready_sleep: float | None = None,
     ):
         self._seeds = seeds
         self._postgres_dsn = postgres_dsn
@@ -64,6 +64,19 @@ class CrawlDaemon:
         self._delay = delay
         self._cycle_pause = cycle_pause
         self._idle_sleep = idle_sleep
+        self._backlog_ready_per_domain = (
+            settings.daemon_keep_ready_per_domain
+            if backlog_ready_per_domain is None else backlog_ready_per_domain
+        )
+        self._backlog_low_priority = (
+            settings.daemon_backlog_low_priority
+            if backlog_low_priority is None else backlog_low_priority
+        )
+        self._backlog_defer_seconds = (
+            settings.daemon_backlog_defer_seconds
+            if backlog_defer_seconds is None else backlog_defer_seconds
+        )
+        self._min_ready_sleep = settings.daemon_min_ready_sleep if min_ready_sleep is None else min_ready_sleep
         self._shutdown = False
         self._engine: CrawlerEngine | None = None
         self._domain_store: DomainStore | None = None
@@ -97,9 +110,9 @@ class CrawlDaemon:
                     self._ensure_seeds(frontier)
                     self._recrawl_stale(storage, frontier)
                     deferred = frontier.defer_overcrowded_backlog(
-                        keep_ready_per_domain=_BACKLOG_READY_PER_HOST,
-                        low_priority_threshold=_BACKLOG_LOW_PRIORITY,
-                        defer_seconds=_BACKLOG_DEFER_SECONDS,
+                        keep_ready_per_domain=self._backlog_ready_per_domain,
+                        low_priority_threshold=self._backlog_low_priority,
+                        defer_seconds=self._backlog_defer_seconds,
                     )
                     if deferred:
                         logger.info("Deferred %d low-priority backlog URLs", deferred)
@@ -117,7 +130,7 @@ class CrawlDaemon:
                         if next_ready_delay is not None:
                             sleep_seconds = min(
                                 self._idle_sleep,
-                                max(_MIN_READY_SLEEP, next_ready_delay),
+                                max(self._min_ready_sleep, next_ready_delay),
                             )
                         logger.info(
                             "No ready URLs (pending=%d), sleeping %.1fs",
@@ -171,9 +184,9 @@ class CrawlDaemon:
                 if count:
                     logger.info("Recovered %d leased URLs", count)
                 deferred = frontier.defer_overcrowded_backlog(
-                    keep_ready_per_domain=_BACKLOG_READY_PER_HOST,
-                    low_priority_threshold=_BACKLOG_LOW_PRIORITY,
-                    defer_seconds=_BACKLOG_DEFER_SECONDS,
+                    keep_ready_per_domain=self._backlog_ready_per_domain,
+                    low_priority_threshold=self._backlog_low_priority,
+                    defer_seconds=self._backlog_defer_seconds,
                 )
                 if deferred:
                     logger.info("Deferred %d low-priority backlog URLs", deferred)
