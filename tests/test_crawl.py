@@ -151,3 +151,15 @@ class TestExtractLinks:
         html = '<a href="/page"><strong>Bold</strong> Text</a>'
         links = extract_links(html, "http://example.com")
         assert links == ["http://example.com/page"]
+
+    def test_skips_empty_href_attribute(self):
+        """Empty href values should be ignored without crashing."""
+        html = '<a href="">Empty</a><a href="/page">Valid</a>'
+        links = extract_links(html, "http://example.com")
+        assert links == ["http://example.com/page"]
+
+    def test_skips_malformed_href_attribute(self):
+        """Malformed href attributes should be ignored without crashing."""
+        html = '<a href>Broken</a><a href="/page">Valid</a>'
+        links = extract_links(html, "http://example.com")
+        assert links == ["http://example.com/page"]
