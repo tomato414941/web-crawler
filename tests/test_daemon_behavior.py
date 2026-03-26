@@ -2,6 +2,7 @@
 
 import os
 import time
+from types import SimpleNamespace
 
 import psycopg2
 import pytest
@@ -147,11 +148,8 @@ async def test_daemon_does_not_auto_requeue_failed_urls():
         def pending_count(self):
             return 1
 
-        def ready_count(self):
-            return 1
-
-        def next_ready_delay(self):
-            return None
+        def readiness(self):
+            return SimpleNamespace(pending=1, ready=1, next_ready_delay=None)
 
         def defer_overcrowded_backlog(self, **_kwargs):
             return 0
@@ -218,11 +216,8 @@ async def test_daemon_logs_cycle_error_breakdown(caplog):
         def pending_count(self):
             return 1
 
-        def ready_count(self):
-            return 1
-
-        def next_ready_delay(self):
-            return None
+        def readiness(self):
+            return SimpleNamespace(pending=1, ready=1, next_ready_delay=None)
 
         def defer_overcrowded_backlog(self, **_kwargs):
             return 0
@@ -277,11 +272,8 @@ async def test_daemon_uses_configured_backlog_controls():
         def pending_count(self):
             return 1
 
-        def ready_count(self):
-            return 1
-
-        def next_ready_delay(self):
-            return None
+        def readiness(self):
+            return SimpleNamespace(pending=1, ready=1, next_ready_delay=None)
 
         def defer_overcrowded_backlog(self, **kwargs):
             self.defer_args = kwargs

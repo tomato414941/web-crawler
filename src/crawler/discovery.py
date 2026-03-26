@@ -35,33 +35,10 @@ _ARCHETYPE_ADJUSTMENTS = {
 }
 
 _MIN_PRIORITY = 0.25
-_BULK_FILE_SUFFIXES = {
-    ".txt",
-    ".csv",
-    ".tsv",
-    ".json",
-    ".xml",
-}
-_BULK_PATH_HINTS = (
-    "/assignment/",
-    "/assignments/",
-    "/table/",
-    "/tables/",
-    "/archive/",
-    "/archives/",
-    "/download/",
-    "/downloads/",
-    "/registry/",
-    "/registries/",
-    "/mirror/",
-    "/mirrors/",
-    "/data/",
-    "/datasets/",
-)
 _REDIRECT_SEGMENTS = {"go", "goto", "redirect", "r", "out", "jump"}
-_DOCUMENT_SEGMENTS = {"doc", "docs", "document", "documents", "draft", "drafts", "spec", "specs"}
+_DOCUMENT_HINTS = {"doc", "docs", "document", "documents", "draft", "drafts", "spec", "specs"}
 _DOCUMENT_FILENAME_PREFIXES = ("draft-", "rfc")
-_LISTING_SEGMENTS = {
+_LISTING_HINTS = (
     "assignment",
     "assignments",
     "archive",
@@ -82,22 +59,10 @@ _LISTING_SEGMENTS = {
     "repositories",
     "table",
     "tables",
-}
-_BULK_TITLE_HINTS = (
+)
+_LISTING_TITLE_HINTS = (
     "index of",
     "directory listing",
-    "archive",
-    "archives",
-    "table",
-    "tables",
-    "registry",
-    "registries",
-    "repository",
-    "repositories",
-    "catalog",
-    "catalogue",
-    "dataset",
-    "datasets",
 )
 
 
@@ -145,6 +110,19 @@ def _path_segments(path: str) -> tuple[str, ...]:
     return tuple(segment.lower() for segment in PurePosixPath(path).parts if segment not in {"", "/"})
 
 
+def _path_has_hint(path: str, hints: tuple[str, ...] | set[str]) -> bool:
+    """Return True when a normalized path contains one of the hint segments."""
+    for hint in hints:
+        if f"/{hint}/" in path or path.endswith(f"/{hint}"):
+            return True
+    return False
+
+
+def _contains_hint(text: str, hints: tuple[str, ...] | set[str]) -> bool:
+    """Return True when free text contains any hint token."""
+    return any(hint in text for hint in hints)
+
+
 def _is_redirect_hub(segments: tuple[str, ...]) -> bool:
     """Identify short redirect-style paths without relying on host-specific rules."""
     return bool(segments) and segments[0] in _REDIRECT_SEGMENTS and len(segments) <= 2
@@ -154,24 +132,18 @@ def _is_document_path(segments: tuple[str, ...], filename: str) -> bool:
     """Identify document-like URLs from generic path structure."""
     if filename.startswith(_DOCUMENT_FILENAME_PREFIXES):
         return True
-    return any(
-        segment in _DOCUMENT_SEGMENTS and index < len(segments) - 1
-        for index, segment in enumerate(segments)
-    )
+    return any(segment in _DOCUMENT_HINTS for segment in segments[:-1])
 
 
-def _is_listing_path(path: str, segments: tuple[str, ...]) -> bool:
+def _is_listing_path(path: str) -> bool:
     """Identify bulk/listing pages from generic path hints."""
-    return any(segment in _LISTING_SEGMENTS for segment in segments) or any(
-        hint in path for hint in _BULK_PATH_HINTS
-    )
+    return _path_has_hint(path, _LISTING_HINTS)
 
 
 def classify_url_archetype(url: str) -> str:
     """Classify a discovered URL into a coarse page archetype."""
     path = _normalized_path(url)
     segments = _path_segments(path)
-    suffix = PurePosixPath(path).suffix.lower()
     filename = PurePosixPath(path).name.lower()
 
     if _is_redirect_hub(segments):
@@ -180,13 +152,8 @@ def classify_url_archetype(url: str) -> str:
     if _is_document_path(segments, filename):
         return ARCHETYPE_DOCUMENT_PAGE
 
-    if _is_listing_path(path, segments):
+    if _is_listing_path(path):
         return ARCHETYPE_REGISTRY_LISTING
-
-    if suffix in _BULK_FILE_SUFFIXES:
-        if any(hint in path for hint in _BULK_PATH_HINTS):
-            return ARCHETYPE_REGISTRY_LISTING
-        return ARCHETYPE_GENERIC_PAGE
 
     return ARCHETYPE_GENERIC_PAGE
 
@@ -194,8 +161,7 @@ def classify_url_archetype(url: str) -> str:
 def classify_parent_archetype(parent_url: str, parent_signals: PageSignals | None) -> str:
     """Classify the fetched parent page so child ranking can react to context."""
     parent_path = _normalized_path(parent_url)
-    parent_segments = _path_segments(parent_path)
-    if _is_listing_path(parent_path, parent_segments):
+    if _is_listing_path(parent_path):
         return ARCHETYPE_REGISTRY_LISTING
 
     if parent_signals is None:
@@ -203,7 +169,7 @@ def classify_parent_archetype(parent_url: str, parent_signals: PageSignals | Non
 
     content_type = parent_signals.content_type.lower()
     title = (parent_signals.title or "").lower()
-    if any(hint in title for hint in _BULK_TITLE_HINTS):
+    if _contains_hint(title, _LISTING_TITLE_HINTS) or _contains_hint(title, _LISTING_HINTS):
         return ARCHETYPE_REGISTRY_LISTING
 
     if parent_signals.content_length >= 512 * 1024:

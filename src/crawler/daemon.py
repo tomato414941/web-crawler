@@ -117,15 +117,16 @@ class CrawlDaemon:
                     if deferred:
                         logger.info("Deferred %d low-priority backlog URLs", deferred)
 
-                    pending = frontier.pending_count()
+                    readiness = frontier.readiness()
+                    pending = readiness.pending
                     if pending == 0:
                         logger.info("No URLs to crawl, sleeping %ds", self._idle_sleep)
                         await self._interruptible_sleep(self._idle_sleep)
                         continue
 
-                    ready = frontier.ready_count()
+                    ready = readiness.ready
                     if ready == 0:
-                        next_ready_delay = frontier.next_ready_delay()
+                        next_ready_delay = readiness.next_ready_delay
                         sleep_seconds = self._idle_sleep
                         if next_ready_delay is not None:
                             sleep_seconds = min(

@@ -77,6 +77,24 @@ class CrawlTask:
             self.next_fetch_at = self.added_at
 
 
+@dataclass(frozen=True)
+class FrontierReadiness:
+    """Summary of the current pending queue readiness."""
+
+    pending: int
+    ready: int
+    next_ready_delay: float | None
+
+
+@dataclass(frozen=True)
+class _ReadySql:
+    """SQL fragments for pending URL readiness checks."""
+
+    where: str
+    params: tuple[object, ...]
+    ready_at: str
+
+
 class Frontier:
     """URL frontier with PostgreSQL persistence. Dedup via ON CONFLICT."""
 
@@ -124,14 +142,32 @@ class Frontier:
             return "", ()
         return " AND lease_token = %s", (lease_token,)
 
-    def _build_ready_where(
+    def _ready_sql(
         self,
         *,
         alias: str,
         now: float,
         domain: str | None = None,
-    ) -> tuple[str, list[object]]:
-        """Build the ready-candidate filter for lease selection."""
+    ) -> _ReadySql:
+        """Build readiness SQL fragments for lease and queue inspection."""
+        next_request_sql = "0"
+        backoff_sql = "0"
+        if self._domain_store is not None:
+            next_request_sql = (
+                "COALESCE(("
+                "SELECT ds.next_request_at "
+                "FROM domain_state AS ds "
+                f"WHERE ds.host_key = {alias}.domain"
+                "), 0)"
+            )
+            backoff_sql = (
+                "COALESCE(("
+                "SELECT ds.backoff_until "
+                "FROM domain_state AS ds "
+                f"WHERE ds.host_key = {alias}.domain"
+                "), 0)"
+            )
+
         conditions = [
             f"{alias}.status = '{PENDING_STATUS}'",
             f"{alias}.next_fetch_at <= %s",
@@ -141,16 +177,8 @@ class Frontier:
         if self._domain_store is not None:
             conditions.extend(
                 [
-                    f"""COALESCE((
-                            SELECT ds.next_request_at
-                            FROM domain_state AS ds
-                            WHERE ds.host_key = {alias}.domain
-                        ), 0) <= %s""",
-                    f"""COALESCE((
-                            SELECT ds.backoff_until
-                            FROM domain_state AS ds
-                            WHERE ds.host_key = {alias}.domain
-                        ), 0) <= %s""",
+                    f"{next_request_sql} <= %s",
+                    f"{backoff_sql} <= %s",
                 ]
             )
             params.extend([now, now])
@@ -159,31 +187,11 @@ class Frontier:
             conditions.append(f"{alias}.domain = %s")
             params.append(domain)
 
-        return " AND ".join(conditions), params
-
-    def _ready_at_sql(self, alias: str) -> str:
-        """Return SQL that computes when a pending URL becomes leaseable."""
-        parts = [f"{alias}.next_fetch_at"]
-        if self._domain_store is not None:
-            parts.extend(
-                [
-                    (
-                        "COALESCE(("
-                        "SELECT ds.next_request_at "
-                        "FROM domain_state AS ds "
-                        f"WHERE ds.host_key = {alias}.domain"
-                        "), 0)"
-                    ),
-                    (
-                        "COALESCE(("
-                        "SELECT ds.backoff_until "
-                        "FROM domain_state AS ds "
-                        f"WHERE ds.host_key = {alias}.domain"
-                        "), 0)"
-                    ),
-                ]
-            )
-        return f"GREATEST({', '.join(parts)})"
+        return _ReadySql(
+            where=" AND ".join(conditions),
+            params=tuple(params),
+            ready_at=f"GREATEST({alias}.next_fetch_at, {next_request_sql}, {backoff_sql})",
+        )
 
     def _recover_leased_locked(self, now: float, expired_only: bool) -> int:
         """Reset leased URLs back to pending inside an open transaction."""
@@ -275,9 +283,9 @@ class Frontier:
             f"ELSE 0 END"
         )
 
-    def _host_pressure_sql(self, alias: str) -> str:
-        """Return SQL that estimates how congested a host is in the pending queue."""
-        return (
+    def _lease_order_by_sql(self, alias: str, prioritize_breadth: bool) -> str:
+        """Return the ORDER BY clause used for lease selection."""
+        host_pressure = (
             "COALESCE(("
             "SELECT COUNT(*) "
             "FROM frontier AS pressure "
@@ -285,22 +293,14 @@ class Frontier:
             f"AND pressure.domain = {alias}.domain"
             "), 0)"
         )
-
-    def _host_inventory_sql(self, alias: str) -> str:
-        """Return SQL that estimates how much of the frontier a host already owns."""
-        return (
-            "COALESCE(("
-            "SELECT COUNT(*) "
-            "FROM frontier AS known "
-            f"WHERE known.domain = {alias}.domain"
-            "), 0)"
-        )
-
-    def _lease_order_by_sql(self, alias: str, prioritize_breadth: bool) -> str:
-        """Return the ORDER BY clause used for lease selection."""
-        host_pressure = self._host_pressure_sql(alias)
         if prioritize_breadth:
-            host_inventory = self._host_inventory_sql(alias)
+            host_inventory = (
+                "COALESCE(("
+                "SELECT COUNT(*) "
+                "FROM frontier AS known "
+                f"WHERE known.domain = {alias}.domain"
+                "), 0)"
+            )
             return (
                 f"{host_inventory} ASC, "
                 f"{host_pressure} ASC, "
@@ -401,9 +401,9 @@ class Frontier:
         lease_token = uuid.uuid4().hex
         duration = self._lease_seconds if lease_seconds is None else lease_seconds
         lease_expires_at = now + duration
-        where, where_params = self._build_ready_where(alias="candidate", now=now, domain=domain)
+        ready_sql = self._ready_sql(alias="candidate", now=now, domain=domain)
         order_by = self._lease_order_by_sql("candidate", prioritize_breadth=prioritize_breadth)
-        params: list[object] = [lease_token, lease_expires_at, *where_params]
+        params: list[object] = [lease_token, lease_expires_at, *ready_sql.params]
 
         try:
             self._recover_leased_locked(now, expired_only=True)
@@ -416,7 +416,7 @@ class Frontier:
                         WHERE url = (
                             SELECT candidate.url
                             FROM frontier AS candidate
-                            WHERE {where}
+                            WHERE {ready_sql.where}
                             ORDER BY {order_by}
                             LIMIT 1
                             FOR UPDATE SKIP LOCKED
@@ -476,9 +476,9 @@ class Frontier:
         lease_token = uuid.uuid4().hex
         duration = self._lease_seconds if lease_seconds is None else lease_seconds
         lease_expires_at = now + duration
-        where, where_params = self._build_ready_where(alias="candidate", now=now, domain=domain)
+        ready_sql = self._ready_sql(alias="candidate", now=now, domain=domain)
         order_by = self._lease_order_by_sql("candidate", prioritize_breadth=prioritize_breadth)
-        params: list[object] = [lease_token, lease_expires_at, *where_params, count]
+        params: list[object] = [lease_token, lease_expires_at, *ready_sql.params, count]
 
         try:
             self._recover_leased_locked(now, expired_only=True)
@@ -491,7 +491,7 @@ class Frontier:
                         WHERE url IN (
                             SELECT candidate.url
                             FROM frontier AS candidate
-                            WHERE {where}
+                            WHERE {ready_sql.where}
                             ORDER BY {order_by}
                             LIMIT %s
                             FOR UPDATE SKIP LOCKED
@@ -737,31 +737,37 @@ class Frontier:
             )
             return cur.fetchone()[0]
 
+    def readiness(self, now: float | None = None) -> FrontierReadiness:
+        """Return a single snapshot of pending and leaseable queue state."""
+        now = time.time() if now is None else now
+        ready_sql = self._ready_sql(alias="frontier", now=now)
+        with self._conn.cursor() as cur:
+            cur.execute(
+                f"""SELECT
+                        COUNT(*) FILTER (WHERE status = '{PENDING_STATUS}') AS pending,
+                        COUNT(*) FILTER (WHERE {ready_sql.where}) AS ready,
+                        MIN(CASE
+                                WHEN status = '{PENDING_STATUS}' THEN {ready_sql.ready_at}
+                            END) AS next_ready_at
+                    FROM frontier""",
+                ready_sql.params,
+            )
+            pending, ready, next_ready_at = cur.fetchone()
+
+        next_ready_delay = None if next_ready_at is None else max(0.0, next_ready_at - now)
+        return FrontierReadiness(
+            pending=pending or 0,
+            ready=ready or 0,
+            next_ready_delay=next_ready_delay,
+        )
+
     def ready_count(self, now: float | None = None) -> int:
         """Get count of pending URLs that are leaseable right now."""
-        now = time.time() if now is None else now
-        where, params = self._build_ready_where(alias="frontier", now=now)
-        with self._conn.cursor() as cur:
-            cur.execute(f"SELECT COUNT(*) FROM frontier WHERE {where}", params)
-            return cur.fetchone()[0]
+        return self.readiness(now=now).ready
 
     def next_ready_delay(self, now: float | None = None) -> float | None:
         """Return seconds until the next pending URL becomes leaseable."""
-        now = time.time() if now is None else now
-        ready_at_sql = self._ready_at_sql("frontier")
-        with self._conn.cursor() as cur:
-            cur.execute(
-                f"""SELECT MIN({ready_at_sql})
-                    FROM frontier
-                    WHERE status = %s""",
-                (PENDING_STATUS,),
-            )
-            row = cur.fetchone()
-
-        next_ready_at = row[0] if row else None
-        if next_ready_at is None:
-            return None
-        return max(0.0, next_ready_at - now)
+        return self.readiness(now=now).next_ready_delay
 
     def is_seen(self, url: str) -> bool:
         """Check if URL exists in frontier."""

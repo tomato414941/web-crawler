@@ -332,6 +332,18 @@ class TestFrontier:
         assert frontier.ready_count(now=now) == 0
         assert frontier.next_ready_delay(now=now) == pytest.approx(30.0, abs=1e-3)
 
+    def test_readiness_summarizes_pending_and_ready(self, frontier):
+        now = time.time()
+        frontier.add(CrawlTask(url="http://a.com/1", depth=0, next_fetch_at=now))
+        frontier.add(CrawlTask(url="http://b.com/1", depth=0, next_fetch_at=now + 30))
+        self.domain_store.record_failure("a.com", backoff_seconds=20.0, now=now)
+
+        readiness = frontier.readiness(now=now)
+
+        assert readiness.pending == 2
+        assert readiness.ready == 0
+        assert readiness.next_ready_delay == pytest.approx(20.0, abs=1e-3)
+
     def test_domain_filter(self, frontier):
         frontier.add(CrawlTask(url="http://a.com/page", depth=0))
         frontier.add(CrawlTask(url="http://b.com/page", depth=0))
