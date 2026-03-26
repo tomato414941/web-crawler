@@ -16,7 +16,7 @@
 
 2. Tighten operational visibility.
    - `/stats` now exposes active frontier error breakdown and top error domains.
-   - Add the same error breakdown to daemon cycle logs so failures are visible without querying the API.
+   - Daemon cycle logs now emit the same error breakdown categories.
 
 3. Finish documentation cleanup.
    - Keep README aligned with compose, migrations, and production env defaults.
