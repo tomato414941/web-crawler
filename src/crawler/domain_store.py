@@ -6,25 +6,18 @@ import logging
 import time
 
 from .domain_state import PersistedDomainState
+from .schema import assert_public_table_columns
 
 logger = logging.getLogger(__name__)
-
-DOMAIN_STATE_SCHEMA_SQL = """
-CREATE TABLE IF NOT EXISTS domain_state (
-    host_key TEXT PRIMARY KEY,
-    crawl_delay_seconds DOUBLE PRECISION NOT NULL DEFAULT 1.0,
-    next_request_at DOUBLE PRECISION NOT NULL DEFAULT 0,
-    backoff_until DOUBLE PRECISION NOT NULL DEFAULT 0,
-    consecutive_failures INTEGER NOT NULL DEFAULT 0,
-    robots_checked_at DOUBLE PRECISION NOT NULL DEFAULT 0,
-    updated_at DOUBLE PRECISION NOT NULL DEFAULT 0
-);
-
-CREATE INDEX IF NOT EXISTS idx_domain_state_next_request_at
-    ON domain_state(next_request_at);
-CREATE INDEX IF NOT EXISTS idx_domain_state_backoff_until
-    ON domain_state(backoff_until);
-"""
+DOMAIN_STATE_REQUIRED_COLUMNS = {
+    "host_key",
+    "crawl_delay_seconds",
+    "next_request_at",
+    "backoff_until",
+    "consecutive_failures",
+    "robots_checked_at",
+    "updated_at",
+}
 
 
 class DomainStore:
@@ -33,13 +26,7 @@ class DomainStore:
     def __init__(self, conn, default_delay: float = 1.0):
         self._conn = conn
         self._default_delay = default_delay
-        self._init_schema()
-
-    def _init_schema(self):
-        with self._conn.cursor() as cur:
-            cur.execute(DOMAIN_STATE_SCHEMA_SQL)
-        self._conn.commit()
-        logger.info("Domain state schema initialized")
+        assert_public_table_columns(self._conn, "domain_state", DOMAIN_STATE_REQUIRED_COLUMNS)
 
     def _row_to_state(self, row: tuple) -> PersistedDomainState:
         return PersistedDomainState(
