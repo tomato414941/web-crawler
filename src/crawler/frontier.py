@@ -11,6 +11,7 @@ from urllib.parse import urlparse
 
 import psycopg2.extras
 
+from .config import settings
 from .discovery import ARCHETYPE_GENERIC_PAGE, DISCOVERY_SEED, discovery_rank
 from .schema import assert_public_table_columns
 from .urls import normalize_url
@@ -82,14 +83,20 @@ class Frontier:
     def __init__(
         self,
         conn,
-        lease_seconds: float = DEFAULT_LEASE_SECONDS,
-        retry_backoff_seconds: float = DEFAULT_RETRY_BACKOFF_SECONDS,
-        max_retry_backoff_seconds: float = MAX_RETRY_BACKOFF_SECONDS,
+        lease_seconds: float | None = None,
+        retry_backoff_seconds: float | None = None,
+        max_retry_backoff_seconds: float | None = None,
     ):
         self._conn = conn
-        self._lease_seconds = lease_seconds
-        self._retry_backoff_seconds = retry_backoff_seconds
-        self._max_retry_backoff_seconds = max_retry_backoff_seconds
+        self._lease_seconds = settings.frontier_lease_seconds if lease_seconds is None else lease_seconds
+        self._retry_backoff_seconds = (
+            settings.frontier_retry_backoff_seconds
+            if retry_backoff_seconds is None else retry_backoff_seconds
+        )
+        self._max_retry_backoff_seconds = (
+            settings.frontier_max_retry_backoff_seconds
+            if max_retry_backoff_seconds is None else max_retry_backoff_seconds
+        )
         self._domain_store: DomainStore | None = None
         self._assert_current_schema()
 

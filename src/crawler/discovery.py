@@ -43,6 +43,8 @@ _BULK_FILE_SUFFIXES = {
     ".xml",
 }
 _BULK_PATH_HINTS = (
+    "/assignment/",
+    "/assignments/",
     "/table/",
     "/tables/",
     "/archive/",
@@ -56,6 +58,31 @@ _BULK_PATH_HINTS = (
     "/data/",
     "/datasets/",
 )
+_REDIRECT_SEGMENTS = {"go", "goto", "redirect", "r", "out", "jump"}
+_DOCUMENT_SEGMENTS = {"doc", "docs", "document", "documents", "draft", "drafts", "spec", "specs"}
+_DOCUMENT_FILENAME_PREFIXES = ("draft-", "rfc")
+_LISTING_SEGMENTS = {
+    "assignment",
+    "assignments",
+    "archive",
+    "archives",
+    "catalog",
+    "catalogue",
+    "dataset",
+    "datasets",
+    "download",
+    "downloads",
+    "index",
+    "indexes",
+    "mirror",
+    "mirrors",
+    "registry",
+    "registries",
+    "repository",
+    "repositories",
+    "table",
+    "tables",
+}
 _BULK_TITLE_HINTS = (
     "index of",
     "directory listing",
@@ -113,31 +140,47 @@ def _normalized_path(url: str) -> str:
     return urlparse(url).path.lower()
 
 
+def _path_segments(path: str) -> tuple[str, ...]:
+    """Return normalized path segments for host-agnostic heuristics."""
+    return tuple(segment.lower() for segment in PurePosixPath(path).parts if segment not in {"", "/"})
+
+
+def _is_redirect_hub(segments: tuple[str, ...]) -> bool:
+    """Identify short redirect-style paths without relying on host-specific rules."""
+    return bool(segments) and segments[0] in _REDIRECT_SEGMENTS and len(segments) <= 2
+
+
+def _is_document_path(segments: tuple[str, ...], filename: str) -> bool:
+    """Identify document-like URLs from generic path structure."""
+    if filename.startswith(_DOCUMENT_FILENAME_PREFIXES):
+        return True
+    return any(
+        segment in _DOCUMENT_SEGMENTS and index < len(segments) - 1
+        for index, segment in enumerate(segments)
+    )
+
+
+def _is_listing_path(path: str, segments: tuple[str, ...]) -> bool:
+    """Identify bulk/listing pages from generic path hints."""
+    return any(segment in _LISTING_SEGMENTS for segment in segments) or any(
+        hint in path for hint in _BULK_PATH_HINTS
+    )
+
+
 def classify_url_archetype(url: str) -> str:
     """Classify a discovered URL into a coarse page archetype."""
     path = _normalized_path(url)
-    host = host_key(url)
+    segments = _path_segments(path)
     suffix = PurePosixPath(path).suffix.lower()
+    filename = PurePosixPath(path).name.lower()
 
-    if host == "www.iana.org" and path.startswith("/go/"):
+    if _is_redirect_hub(segments):
         return ARCHETYPE_REDIRECT_HUB
 
-    if host == "datatracker.ietf.org" and (
-        path.startswith("/doc/html/")
-        or path.startswith("/doc/draft-")
-    ):
+    if _is_document_path(segments, filename):
         return ARCHETYPE_DOCUMENT_PAGE
 
-    if host == "www.rfc-editor.org" and (
-        path.startswith("/rfc/")
-        or path.startswith("/in-notes/")
-    ):
-        return ARCHETYPE_DOCUMENT_PAGE
-
-    if "/domains/idn-tables/tables/" in path:
-        return ARCHETYPE_REGISTRY_LISTING
-
-    if path.startswith("/assignments/"):
+    if _is_listing_path(path, segments):
         return ARCHETYPE_REGISTRY_LISTING
 
     if suffix in _BULK_FILE_SUFFIXES:
@@ -151,7 +194,8 @@ def classify_url_archetype(url: str) -> str:
 def classify_parent_archetype(parent_url: str, parent_signals: PageSignals | None) -> str:
     """Classify the fetched parent page so child ranking can react to context."""
     parent_path = _normalized_path(parent_url)
-    if "/domains/idn-tables" in parent_path:
+    parent_segments = _path_segments(parent_path)
+    if _is_listing_path(parent_path, parent_segments):
         return ARCHETYPE_REGISTRY_LISTING
 
     if parent_signals is None:

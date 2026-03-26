@@ -318,6 +318,27 @@ class TestDomainManagerErrorHandling:
         finally:
             await manager.close()
 
+    async def test_record_error_uses_configured_backoff(self, httpx_mock):
+        """record_error should honor explicit backoff settings."""
+        httpx_mock.add_response(url="http://example.com/robots.txt", status_code=404)
+
+        store = StubDomainStore()
+        manager = DomainManager(
+            domain_store=store,
+            host_backoff_seconds=5.0,
+            max_host_backoff_seconds=12.0,
+        )
+        try:
+            await manager.get_state("http://example.com/page")
+            manager.record_error("http://example.com/page")
+            assert store.states["example.com"].backoff_until == 5.0
+            manager.record_error("http://example.com/page")
+            assert store.states["example.com"].backoff_until == 10.0
+            manager.record_error("http://example.com/page")
+            assert store.states["example.com"].backoff_until == 12.0
+        finally:
+            await manager.close()
+
     async def test_record_success_persists_reset(self, httpx_mock):
         """record_success should reset durable failure state."""
         httpx_mock.add_response(url="http://example.com/robots.txt", status_code=404)

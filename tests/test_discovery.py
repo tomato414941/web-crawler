@@ -26,16 +26,16 @@ from crawler.discovery import (
 def test_seed_hosts_from_urls_normalizes_hosts():
     result = seed_hosts_from_urls(
         [
-            "HTTPS://WWW.IANA.ORG/",
-            "https://datatracker.ietf.org/wg",
+            "HTTPS://EXAMPLE.COM/",
+            "https://docs.example.com/guide",
         ]
     )
 
-    assert result == {"www.iana.org", "datatracker.ietf.org"}
+    assert result == {"example.com", "docs.example.com"}
 
 
 def test_rank_seed_url_returns_seed_priority():
-    result = rank_seed_url("https://www.iana.org/")
+    result = rank_seed_url("https://example.com/")
 
     assert result.discovery_kind == DISCOVERY_SEED
     assert result.priority == SEED_PRIORITY
@@ -44,9 +44,9 @@ def test_rank_seed_url_returns_seed_priority():
 
 def test_rank_discovered_url_prefers_same_host():
     result = rank_discovered_url(
-        parent_url="https://www.iana.org/domains",
-        url="https://www.iana.org/protocols",
-        seed_hosts={"www.iana.org"},
+        parent_url="https://example.com/domains",
+        url="https://example.com/protocols",
+        seed_hosts={"example.com"},
     )
 
     assert result.discovery_kind == DISCOVERY_SAME_HOST
@@ -55,9 +55,9 @@ def test_rank_discovered_url_prefers_same_host():
 
 def test_rank_discovered_url_prefers_seed_host_over_external():
     result = rank_discovered_url(
-        parent_url="https://www.iana.org/domains",
-        url="https://datatracker.ietf.org/wg/",
-        seed_hosts={"www.iana.org", "datatracker.ietf.org"},
+        parent_url="https://example.com/domains",
+        url="https://docs.example.com/guide/",
+        seed_hosts={"example.com", "docs.example.com"},
     )
 
     assert result.discovery_kind == DISCOVERY_SEED_HOST
@@ -66,9 +66,9 @@ def test_rank_discovered_url_prefers_seed_host_over_external():
 
 def test_rank_discovered_url_marks_other_hosts_external():
     result = rank_discovered_url(
-        parent_url="https://www.iana.org/domains",
-        url="https://github.com/ietf-tools/datatracker",
-        seed_hosts={"www.iana.org", "datatracker.ietf.org"},
+        parent_url="https://example.com/domains",
+        url="https://external.example.net/project",
+        seed_hosts={"example.com", "docs.example.com"},
     )
 
     assert result.discovery_kind == DISCOVERY_EXTERNAL
@@ -77,25 +77,25 @@ def test_rank_discovered_url_marks_other_hosts_external():
 
 
 def test_classify_url_archetype_detects_redirect_hubs():
-    assert classify_url_archetype("https://www.iana.org/go/rfc9000") == ARCHETYPE_REDIRECT_HUB
+    assert classify_url_archetype("https://example.com/go/rfc9000") == ARCHETYPE_REDIRECT_HUB
 
 
 def test_classify_url_archetype_detects_registry_listings():
     assert (
-        classify_url_archetype("https://www.iana.org/assignments/tls-extensiontype-values/tls-extensiontype-values.xhtml")
+        classify_url_archetype("https://example.com/assignments/tls-extensiontype-values/tls-extensiontype-values.xhtml")
         == ARCHETYPE_REGISTRY_LISTING
     )
 
 
 def test_classify_url_archetype_detects_document_pages():
-    assert classify_url_archetype("https://datatracker.ietf.org/doc/html/rfc9000") == ARCHETYPE_DOCUMENT_PAGE
+    assert classify_url_archetype("https://docs.example.com/doc/rfc9000") == ARCHETYPE_DOCUMENT_PAGE
 
 
 def test_rank_discovered_url_downgrades_bulk_data_paths():
     result = rank_discovered_url(
-        parent_url="https://www.iana.org/domains/idn-tables",
-        url="https://www.iana.org/domains/idn-tables/tables/zara_uk_1.txt",
-        seed_hosts={"www.iana.org"},
+        parent_url="https://example.com/archives/index",
+        url="https://example.com/tables/zara_uk_1.txt",
+        seed_hosts={"example.com"},
     )
 
     assert result.discovery_kind == DISCOVERY_SAME_HOST
@@ -105,9 +105,9 @@ def test_rank_discovered_url_downgrades_bulk_data_paths():
 
 def test_rank_discovered_url_downgrades_redirect_hubs():
     result = rank_discovered_url(
-        parent_url="https://www.iana.org/assignments/",
-        url="https://www.iana.org/go/rfc9142",
-        seed_hosts={"www.iana.org", "datatracker.ietf.org"},
+        parent_url="https://example.com/assignments/",
+        url="https://example.com/go/rfc9142",
+        seed_hosts={"example.com", "docs.example.com"},
     )
 
     assert result.discovery_kind == DISCOVERY_SAME_HOST
@@ -117,9 +117,9 @@ def test_rank_discovered_url_downgrades_redirect_hubs():
 
 def test_rank_discovered_url_promotes_document_pages():
     result = rank_discovered_url(
-        parent_url="https://www.iana.org/go/rfc9142",
-        url="https://datatracker.ietf.org/doc/html/rfc9142",
-        seed_hosts={"www.iana.org", "datatracker.ietf.org"},
+        parent_url="https://example.com/go/rfc9142",
+        url="https://docs.example.com/doc/rfc9142",
+        seed_hosts={"example.com", "docs.example.com"},
     )
 
     assert result.discovery_kind == DISCOVERY_SEED_HOST
