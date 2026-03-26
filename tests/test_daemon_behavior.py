@@ -6,7 +6,7 @@ import time
 import psycopg2
 import pytest
 
-from crawler.daemon import CrawlDaemon
+from crawler.daemon import CrawlDaemon, _format_error_breakdown
 from crawler.frontier import CrawlTask, Frontier
 from crawler.migrate import apply_migrations
 from crawler.storage import PgStorage
@@ -186,7 +186,7 @@ async def test_daemon_does_not_auto_requeue_failed_urls():
 
     async def fake_run_cycle(_storage, _frontier):
         daemon._shutdown = True
-        return 0
+        return 0, {}
 
     daemon._connect = fake_connect
     daemon._run_cycle = fake_run_cycle
@@ -194,3 +194,71 @@ async def test_daemon_does_not_auto_requeue_failed_urls():
     await daemon.run()
 
     assert frontier.requeue_failed_calls == 0
+
+
+def test_format_error_breakdown_orders_known_categories():
+    formatted = _format_error_breakdown(
+        {
+            "other": 1,
+            "connection_error": 2,
+            "http_4xx": 3,
+        }
+    )
+
+    assert formatted == "http_4xx=3, connection_error=2, other=1"
+
+
+@pytest.mark.asyncio
+async def test_daemon_logs_cycle_error_breakdown(caplog):
+    class FakeStorage:
+        def close(self):
+            return None
+
+    class FakeFrontier:
+        def pending_count(self):
+            return 1
+
+        def ready_count(self):
+            return 1
+
+        def next_ready_delay(self):
+            return None
+
+        def defer_overcrowded_backlog(self, **_kwargs):
+            return 0
+
+        def recover_leased(self, expired_only=False):
+            return 0
+
+        def upsert_seeds(self, urls, priority=2.0):
+            return len(urls)
+
+        def stats(self):
+            return {"pending": 1, "total": 1}
+
+    daemon = CrawlDaemon(
+        seeds=["https://example.com/"],
+        postgres_dsn="postgresql://unused",
+        cycle_pages=10,
+        recrawl_ttl=3600,
+    )
+    frontier = FakeFrontier()
+    storage = FakeStorage()
+
+    daemon._install_signals = lambda: None
+    daemon._recrawl_stale = lambda _storage, _frontier: None
+
+    async def fake_connect():
+        return storage, frontier
+
+    async def fake_run_cycle(_storage, _frontier):
+        daemon._shutdown = True
+        return 2, {"http_4xx": 3, "timeout": 1}
+
+    daemon._connect = fake_connect
+    daemon._run_cycle = fake_run_cycle
+
+    with caplog.at_level("INFO", logger="crawler.daemon"):
+        await daemon.run()
+
+    assert "errors=http_4xx=3, timeout=1" in caplog.text
