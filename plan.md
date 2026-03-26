@@ -15,8 +15,8 @@
    - Avoid spending cycles on long runs of known-dead historical backlog.
 
 2. Tighten operational visibility.
-   - Add simple rate and error counters that distinguish success, 4xx, 5xx, timeout, and connection failures.
-   - Make it easier to see why crawl throughput drops.
+   - `/stats` now exposes active frontier error breakdown and top error domains.
+   - Add the same error breakdown to daemon cycle logs so failures are visible without querying the API.
 
 3. Finish documentation cleanup.
    - Keep README aligned with compose, migrations, and production env defaults.

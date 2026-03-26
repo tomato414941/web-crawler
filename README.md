@@ -135,7 +135,7 @@ crawler serve --port 8080 --postgres postgresql://user:pass@localhost/db
 | `GET /health` | Health check |
 | `GET /pages` | List pages (`?since=`, `?limit=`, `?domain=`) |
 | `GET /pages/{url_hash}` | Get page details with content |
-| `GET /stats` | Crawl statistics |
+| `GET /stats` | Crawl statistics, including frontier error breakdown and top error domains |
 
 ## Docker
 
