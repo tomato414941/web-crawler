@@ -132,3 +132,65 @@ def test_recrawl_stale_requeues_only_oldest_rows_needed(pg_resources):
         "https://example.com/stale-2": "pending",
         "https://example.com/stale-3": "done",
     }
+
+
+@pytest.mark.asyncio
+async def test_daemon_does_not_auto_requeue_failed_urls():
+    class FakeStorage:
+        def close(self):
+            return None
+
+    class FakeFrontier:
+        def __init__(self):
+            self.requeue_failed_calls = 0
+
+        def pending_count(self):
+            return 1
+
+        def ready_count(self):
+            return 1
+
+        def next_ready_delay(self):
+            return None
+
+        def defer_overcrowded_backlog(self, **_kwargs):
+            return 0
+
+        def recover_leased(self, expired_only=False):
+            return 0
+
+        def upsert_seeds(self, urls, priority=2.0):
+            return len(urls)
+
+        def requeue_failed(self):
+            self.requeue_failed_calls += 1
+            return 1
+
+        def stats(self):
+            return {"pending": 1, "total": 1}
+
+    daemon = CrawlDaemon(
+        seeds=["https://example.com/"],
+        postgres_dsn="postgresql://unused",
+        cycle_pages=10,
+        recrawl_ttl=3600,
+    )
+    frontier = FakeFrontier()
+    storage = FakeStorage()
+
+    daemon._install_signals = lambda: None
+    daemon._recrawl_stale = lambda _storage, _frontier: None
+
+    async def fake_connect():
+        return storage, frontier
+
+    async def fake_run_cycle(_storage, _frontier):
+        daemon._shutdown = True
+        return 0
+
+    daemon._connect = fake_connect
+    daemon._run_cycle = fake_run_cycle
+
+    await daemon.run()
+
+    assert frontier.requeue_failed_calls == 0

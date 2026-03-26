@@ -388,6 +388,50 @@ class TestFrontier:
         assert last_error == "timeout"
         assert next_fetch_at > time.time()
 
+    def test_retryable_failure_demotes_priority(self, frontier):
+        frontier.add(CrawlTask(url="http://example.com/retry", depth=0, priority=1.25))
+        result = frontier.lease_next()
+        assert result is not None
+
+        frontier.mark_failed(
+            result.url,
+            retryable=True,
+            error="timeout",
+            backoff_seconds=0,
+            lease_token=result.lease_token,
+        )
+
+        with frontier._conn.cursor() as cur:
+            cur.execute(
+                "SELECT status, fail_streak, priority FROM frontier WHERE url = %s",
+                (result.url,),
+            )
+            status, fail_streak, priority = cur.fetchone()
+
+        assert status == "pending"
+        assert fail_streak == 1
+        assert priority == 0.75
+
+    def test_lease_next_prefers_fresh_url_over_retried_url(self, frontier):
+        frontier.add(CrawlTask(url="http://retry.com/page", depth=0, priority=1.25))
+        first = frontier.lease_next(domain="retry.com")
+        assert first is not None
+
+        frontier.mark_failed(
+            first.url,
+            retryable=True,
+            error="timeout",
+            backoff_seconds=0,
+            lease_token=first.lease_token,
+        )
+
+        frontier.add(CrawlTask(url="http://fresh.com/page", depth=0, priority=1.0))
+
+        next_task = frontier.lease_next()
+
+        assert next_task is not None
+        assert next_task.url == "http://fresh.com/page"
+
     def test_mark_done_resets_fail_streak(self, frontier):
         frontier.add(CrawlTask(url="http://example.com", depth=0))
         first = frontier.lease_next()
