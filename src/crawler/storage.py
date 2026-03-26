@@ -62,6 +62,18 @@ class PgStorage:
         """Close read-only transactions so API requests do not hold relation locks."""
         self._conn.commit()
 
+    def _get_public_table_columns(self, cur, table_name: str) -> set[str]:
+        """Return the public-column names for a table if it exists."""
+        cur.execute(
+            """
+            SELECT column_name
+            FROM information_schema.columns
+            WHERE table_schema = 'public' AND table_name = %s
+            """,
+            (table_name,),
+        )
+        return {column_name for (column_name,) in cur.fetchall()}
+
     def save(self, result: CrawlResult | Mapping[str, object]) -> bool:
         """Save a single crawl result. Returns True if inserted."""
         data = result_to_dict(result)
@@ -200,35 +212,40 @@ class PgStorage:
                 archetypes: dict[str, int] = {}
                 top_pending_domains: list[dict[str, object]] = []
                 if frontier_exists:
-                    cur.execute("SELECT status, COUNT(*) FROM frontier GROUP BY status")
+                    frontier_columns = self._get_public_table_columns(cur, "frontier")
+
+                    cur.execute("SELECT status, COUNT(*) FROM public.frontier GROUP BY status")
                     frontier_status = {status: count for status, count in cur.fetchall()}
 
-                    cur.execute(
-                        """SELECT discovery_kind, COUNT(*)
-                           FROM frontier
-                           GROUP BY discovery_kind"""
-                    )
-                    discovery_kinds = {kind: count for kind, count in cur.fetchall()}
+                    if "discovery_kind" in frontier_columns:
+                        cur.execute(
+                            """SELECT discovery_kind, COUNT(*)
+                               FROM public.frontier
+                               GROUP BY discovery_kind"""
+                        )
+                        discovery_kinds = {kind: count for kind, count in cur.fetchall()}
 
-                    cur.execute(
-                        """SELECT archetype, COUNT(*)
-                           FROM frontier
-                           GROUP BY archetype"""
-                    )
-                    archetypes = {archetype: count for archetype, count in cur.fetchall()}
+                    if "archetype" in frontier_columns:
+                        cur.execute(
+                            """SELECT archetype, COUNT(*)
+                               FROM public.frontier
+                               GROUP BY archetype"""
+                        )
+                        archetypes = {archetype: count for archetype, count in cur.fetchall()}
 
-                    cur.execute(
-                        """SELECT domain, COUNT(*)
-                           FROM frontier
-                           WHERE status = 'pending'
-                           GROUP BY domain
-                           ORDER BY COUNT(*) DESC, domain ASC
-                           LIMIT 10"""
-                    )
-                    top_pending_domains = [
-                        {"domain": domain, "count": count}
-                        for domain, count in cur.fetchall()
-                    ]
+                    if "domain" in frontier_columns:
+                        cur.execute(
+                            """SELECT domain, COUNT(*)
+                               FROM public.frontier
+                               WHERE status = 'pending'
+                               GROUP BY domain
+                               ORDER BY COUNT(*) DESC, domain ASC
+                               LIMIT 10"""
+                        )
+                        top_pending_domains = [
+                            {"domain": domain, "count": count}
+                            for domain, count in cur.fetchall()
+                        ]
 
                 cur.execute(
                     """SELECT domain, COUNT(*)

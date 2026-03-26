@@ -1,8 +1,11 @@
 """Tests for HttpFetcher."""
 
+import ssl
+
 import pytest
 
 from crawler.core import HttpFetcher, Response
+from crawler.tls import build_ssl_context
 
 
 @pytest.fixture
@@ -11,6 +14,30 @@ def fetcher():
 
 
 class TestHttpFetcher:
+    async def test_fetcher_uses_certifi_bundle(self, monkeypatch):
+        """Fetcher should pin the CA bundle for stable TLS verification."""
+        captured: dict = {}
+
+        class DummyClient:
+            async def get(self, url):
+                raise AssertionError("network call not expected")
+
+            async def aclose(self):
+                return None
+
+        def fake_async_client(*args, **kwargs):
+            captured.update(kwargs)
+            return DummyClient()
+
+        monkeypatch.setattr("crawler.core.fetcher.httpx.AsyncClient", fake_async_client)
+
+        fetcher = HttpFetcher(timeout=10.0)
+        await fetcher._get_client()
+
+        context = captured["verify"]
+        assert isinstance(context, ssl.SSLContext)
+        assert context.cert_store_stats() == build_ssl_context().cert_store_stats()
+
     async def test_fetch_returns_response(self, fetcher, httpx_mock):
         """Fetch returns a Response with correct fields."""
         httpx_mock.add_response(

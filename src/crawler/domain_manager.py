@@ -9,6 +9,7 @@ import httpx
 from robotexclusionrulesparser import RobotExclusionRulesParser
 
 from .domain_state import PersistedDomainState, RuntimeDomainState
+from .tls import build_ssl_context
 
 if TYPE_CHECKING:
     from .domain_store import DomainStore
@@ -75,6 +76,7 @@ class DomainManager:
                     self._client = httpx.AsyncClient(
                         timeout=10.0,
                         headers={"User-Agent": self.user_agent},
+                        verify=build_ssl_context(),
                     )
         return self._client
 
