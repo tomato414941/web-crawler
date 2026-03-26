@@ -157,6 +157,7 @@ async def test_crawler_marks_server_errors_failed():
     assert frontier.done == []
     assert frontier.failed == ["https://example.com/error"]
     assert domain_manager.errors == ["https://example.com/error"]
+    assert engine.failure_breakdown == {"http_5xx": 1}
 
 
 @pytest.mark.asyncio
@@ -190,6 +191,44 @@ async def test_crawler_does_not_exceed_max_pages_with_concurrency():
     assert engine.pages_crawled == 1
     assert len(results) == 1
     assert len(fetcher.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_crawler_collects_failure_breakdown():
+    frontier = FakeFrontier(
+        [
+            CrawlTask(url="https://example.com/missing", depth=0),
+            CrawlTask(url="https://example.com/error", depth=0),
+        ]
+    )
+    domain_manager = FakeDomainManager()
+    fetcher = FakeFetcher(
+        [
+            Response(
+                url="https://example.com/missing",
+                status=404,
+                content=b"<html>missing</html>",
+                headers={},
+            ),
+            Response(
+                url="https://example.com/error",
+                status=503,
+                content=b"<html>error</html>",
+                headers={},
+            ),
+        ]
+    )
+
+    async with CrawlerEngine(
+        max_pages=10,
+        concurrency=1,
+        frontier=frontier,
+        domain_manager=domain_manager,
+    ) as engine:
+        engine.fetcher = fetcher
+        await engine.crawl()
+
+    assert engine.failure_breakdown == {"http_4xx": 1, "http_5xx": 1}
 
 
 @pytest.mark.asyncio

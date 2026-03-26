@@ -11,6 +11,7 @@ from urllib.parse import urlparse
 import psycopg2
 import psycopg2.extras
 
+from .error_stats import categorize_crawl_error
 from .result import CrawlResult, result_to_dict
 from .schema import assert_public_table_columns
 
@@ -43,31 +44,6 @@ _TITLE_PATTERN = re.compile(r"<title[^>]*>(.*?)</title>", re.IGNORECASE | re.DOT
 
 def _url_hash(url: str) -> str:
     return hashlib.blake2b(url.encode(), digest_size=8).hexdigest()
-
-
-def _categorize_frontier_error(error: str | None) -> str | None:
-    """Collapse raw crawl errors into stable operator-facing buckets."""
-    if not error:
-        return None
-
-    if error.startswith("http_"):
-        try:
-            status = int(error.split("_", 1)[1])
-        except ValueError:
-            return "http_other"
-        if 400 <= status < 500:
-            return "http_4xx"
-        if 500 <= status < 600:
-            return "http_5xx"
-        return "http_other"
-
-    if error == "timeout":
-        return "timeout"
-
-    if error == "connection_error" or "Server disconnected without sending a response." in error:
-        return "connection_error"
-
-    return "other"
 
 
 class PgStorage:
@@ -269,7 +245,7 @@ class PgStorage:
                     )
                     error_counts = Counter()
                     for error, count in cur.fetchall():
-                        category = _categorize_frontier_error(error)
+                        category = categorize_crawl_error(error)
                         if category:
                             error_counts[category] += count
                     active_error_breakdown = {

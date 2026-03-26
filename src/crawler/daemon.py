@@ -24,6 +24,22 @@ _BACKLOG_DEFER_SECONDS = 1800.0
 _MIN_READY_SLEEP = 0.5
 
 
+def _format_error_breakdown(error_breakdown: dict[str, int]) -> str:
+    """Render a stable one-line error summary for cycle logs."""
+    if not error_breakdown:
+        return "none"
+    ordered = (
+        "http_4xx",
+        "http_5xx",
+        "timeout",
+        "connection_error",
+        "http_other",
+        "other",
+    )
+    parts = [f"{name}={error_breakdown[name]}" for name in ordered if error_breakdown.get(name)]
+    return ", ".join(parts) if parts else "none"
+
+
 class CrawlDaemon:
     """Runs CrawlerEngine in cycles, re-crawling stale pages and re-seeding."""
 
@@ -114,12 +130,17 @@ class CrawlDaemon:
                     cycle += 1
                     logger.info("Cycle %d: %d ready / %d pending URLs", cycle, ready, pending)
                     start = time.time()
-                    pages = await self._run_cycle(storage, frontier)
+                    pages, error_breakdown = await self._run_cycle(storage, frontier)
                     elapsed = time.time() - start
                     rate = pages / elapsed if elapsed > 0 else 0
                     logger.info(
-                        "Cycle %d complete: %d pages in %.1fs (%.1f pages/s) | %s",
-                        cycle, pages, elapsed, rate, frontier.stats(),
+                        "Cycle %d complete: %d pages in %.1fs (%.1f pages/s) | errors=%s | %s",
+                        cycle,
+                        pages,
+                        elapsed,
+                        rate,
+                        _format_error_breakdown(error_breakdown),
+                        frontier.stats(),
                     )
 
                     if not self._shutdown:
@@ -173,7 +194,7 @@ class CrawlDaemon:
                 pass
         return None
 
-    async def _run_cycle(self, storage: PgStorage, frontier: Frontier) -> int:
+    async def _run_cycle(self, storage: PgStorage, frontier: Frontier) -> tuple[int, dict[str, int]]:
         """Run one crawl cycle."""
         async with CrawlerEngine(
             max_pages=self._cycle_pages,
@@ -190,7 +211,7 @@ class CrawlDaemon:
             self._engine = engine
             await engine.crawl()
             self._engine = None
-            return engine.pages_crawled
+            return engine.pages_crawled, engine.failure_breakdown
 
     def _ensure_seeds(self, frontier: Frontier):
         """Re-seed frontier when empty."""
