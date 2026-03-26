@@ -2,10 +2,14 @@
 
 Async web crawler with adaptive rendering, AI agent, and REST API.
 
+This project targets the public web as a whole. Seed URLs are entry points for discovery,
+not an allowlist of the only domains the crawler may visit.
+
 ## Features
 
 - **Adaptive Fetching** — HTTP first, auto-switches to browser rendering for JS-heavy sites
 - **AI Agent** — Claude-powered autonomous browsing for complex tasks
+- **Web-scale Discovery** — Seed URLs start the crawl, but discovered external domains are valid crawl targets
 - **Postgres-backed Frontier** — Persistent crawl scheduler with URL leasing and retry backoff
 - **Host Scheduling State** — Durable per-host crawl delay and cooldown tracking in PostgreSQL
 - **REST API** — Serve crawled pages via `/pages`, `/stats` endpoints
@@ -48,6 +52,9 @@ crawler fetch https://example.com
 # Start PostgreSQL locally with Docker
 docker compose up -d postgres
 
+# Apply schema migrations
+crawler migrate --postgres postgresql://crawler:crawler@localhost:5433/crawldb
+
 # Crawl a site (Postgres is required)
 crawler crawl https://example.com -n 100 \
   --postgres postgresql://crawler:crawler@localhost:5433/crawldb
@@ -71,6 +78,8 @@ crawler serve --port 8080 \
 | `extract` | Extract data with CSS/XPath selectors |
 | `agent` | AI-powered autonomous browsing |
 | `serve` | Start REST API server |
+| `migrate` | Apply pending database migrations |
+| `daemon` | Run the continuous crawler loop |
 
 ### crawl
 
@@ -131,11 +140,11 @@ crawler serve --port 8080 --postgres postgresql://user:pass@localhost/db
 ## Docker
 
 ```bash
-# Start Postgres + API
-docker compose up -d postgres api
+# Start the full stack
+docker compose up -d
 
-# Run continuous crawler daemon
-docker compose up -d crawler
+# The compose stack runs migrations before api / crawler
+docker compose ps -a
 
 # Run a one-shot crawl manually
 docker compose run --rm crawler crawler crawl https://example.com -n 100
@@ -143,6 +152,7 @@ docker compose run --rm crawler crawler crawl https://example.com -n 100
 
 Default compose services:
 - `postgres` — persistent crawl data, frontier state, and host scheduling state
+- `migrate` — one-shot schema migration runner
 - `api` — FastAPI server on port `8080`
 - `crawler` — continuous daemon worker
 
@@ -192,6 +202,10 @@ Two persistent schedulers work together:
 1. **URL frontier** — controls retry timing, leasing, and recrawl eligibility
 2. **Host state** — controls per-host crawl delay and cooldown via `domain_state`
 
+In daemon mode, seeds are starting points for graph expansion. The crawler is expected to
+discover and follow links onto other domains unless a specific crawl run is configured to stay
+on the same domain.
+
 ## Deployment
 
 Current deployment shape:
@@ -204,16 +218,19 @@ Current deployment shape:
 Recommended production `.env`:
 
 ```bash
-CRAWL_SEED_URLS="https://www.iana.org/ https://datatracker.ietf.org/ https://www.rfc-editor.org/ https://www.icann.org/"
-CRAWL_CYCLE_PAGES=200
-CRAWL_RECRAWL_TTL=604800
+CRAWL_SEED_URLS="https://www.iana.org/ https://datatracker.ietf.org/ https://www.rfc-editor.org/"
+CRAWL_CYCLE_PAGES=300
+CRAWL_RECRAWL_TTL=2592000
 CRAWL_MAX_DEPTH=2
-CRAWL_CONCURRENCY=3
-CRAWL_DELAY=2.0
+CRAWL_CONCURRENCY=6
+CRAWL_DELAY=0.5
 ```
 
-These defaults target public standards / registry hosts and keep crawl pacing conservative.
+These defaults avoid `www.icann.org`, which is currently hostile to the crawler, and reduce
+stale-page churn so the daemon does not spend cycles requeueing dead backlog too aggressively.
 Store them in a local `.env` on the server; do not commit runtime-specific values.
+
+These production seeds are only bootstrap points. They do not define the full crawl scope.
 
 Before pushing:
 - Run `pytest -q`
