@@ -318,6 +318,38 @@ async def test_crawler_assigns_page_archetypes_to_outlinks():
 
 
 @pytest.mark.asyncio
+async def test_crawler_treats_pdf_as_metadata_only():
+    frontier = FakeFrontier([CrawlTask(url="https://example.com/spec.pdf", depth=0)])
+    domain_manager = FakeDomainManager()
+    fetcher = FakeFetcher(
+        [
+            Response(
+                url="https://example.com/spec.pdf",
+                status=200,
+                content=b"%PDF-1.7\x00binary<a href=\"https://example.com/hidden\">ignored</a>",
+                headers={"content-type": "application/pdf"},
+            )
+        ]
+    )
+
+    async with CrawlerEngine(
+        max_pages=1,
+        frontier=frontier,
+        domain_manager=domain_manager,
+    ) as engine:
+        engine.fetcher = fetcher
+        results = await engine.crawl()
+
+    assert engine.pages_crawled == 1
+    assert frontier.done == ["https://example.com/spec.pdf"]
+    assert frontier.added_batches == []
+    assert len(results) == 1
+    assert results[0]["url"] == "https://example.com/spec.pdf"
+    assert results[0]["content"] == ""
+    assert results[0]["outlinks"] == []
+
+
+@pytest.mark.asyncio
 async def test_crawler_reserves_some_leases_for_breadth():
     frontier = FakeFrontier(
         [
