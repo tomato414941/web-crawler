@@ -1,37 +1,20 @@
 # web-crawler plan
 
-## Current state
+## Active priorities
 
-- Explicit schema migrations are in place and required before app startup.
-- Runtime frontier backward compatibility has been removed.
-- The malformed `href` parser crash has been fixed.
-- Production seeds currently exclude `www.icann.org`.
-- Production recrawl TTL is currently set to 30 days to avoid stale backlog churn.
+1. Verify live crawl throughput after the latest queue and discovery changes.
+   - Confirm cycle completion times and pages/s on production.
+   - Check whether `www.rfc-editor.org` backlog still dominates active crawl time.
+   - Watch `/stats` and daemon error breakdowns for new failure patterns.
 
-## Immediate priorities
+2. Revisit recrawl policy once live queue quality is stable.
+   - Decide whether 30-day recrawl TTL is still appropriate.
+   - Tune stale-page requeueing based on measured throughput instead of defensive defaults.
 
-1. Reduce queue pollution from dead URLs.
-   - Demote or suppress repeatedly failing URLs earlier.
-   - Avoid spending cycles on long runs of known-dead historical backlog.
+3. Add a small runbook for operational queue changes.
+   - Document safe queue resets.
+   - Document how to change seeds without reintroducing dead backlog.
 
-2. Tighten operational visibility.
-   - `/stats` now exposes active frontier error breakdown and top error domains.
-   - Daemon cycle logs now emit the same error breakdown categories.
+## Deferred
 
-3. Finish documentation cleanup.
-   - Keep README aligned with compose, migrations, and production env defaults.
-   - Document the current production assumptions in one place.
-
-## Near-term cleanup
-
-1. Revisit recrawl policy after queue quality improves.
-2. Add a small runbook for safe queue resets and seed changes.
-3. Add queue hygiene rules so stale low-value backlog does not dominate active crawl time.
-
-## Done recently
-
-- Added explicit `crawler migrate`.
-- Updated compose to run migrations before `api` and `crawler`.
-- Dropped frontier legacy compatibility.
-- Fixed malformed anchor extraction.
-- Removed `icann` from active production seeds.
+1. Add more queue hygiene only if live metrics show stale or dead backlog still dominating crawl time.
