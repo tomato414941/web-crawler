@@ -47,7 +47,13 @@ def extract_anchors(html: str, base_url: str) -> list[tuple[str, str]]:
     results = []
     tree = HTMLParser(html)
     for node in tree.css("a[href]"):
-        href = node.attributes.get("href", "").strip()
+        href_raw = node.attributes.get("href")
+        if not href_raw:
+            continue
+
+        href = href_raw.strip()
+        if not href:
+            continue
 
         if href.startswith(_SKIP_SCHEMES):
             continue
