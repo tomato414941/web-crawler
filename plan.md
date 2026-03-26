@@ -18,3 +18,4 @@
 ## Deferred
 
 1. Add more queue hygiene only if live metrics show stale or dead backlog still dominating crawl time.
+2. Implement metadata-only handling for binary documents such as PDF instead of treating them as stored text.

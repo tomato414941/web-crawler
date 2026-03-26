@@ -213,6 +213,12 @@ Redirect-like paths, document-like paths, and bulk/listing paths are classified 
 path heuristics so the scheduler does not depend on hard-coded `IANA` / `IETF` / `RFC Editor`
 special cases.
 
+### Content Scope
+
+Content handling policy is documented in [docs/CONTENT_POLICY.md](/home/dev/projects/web-crawler/docs/CONTENT_POLICY.md).
+Use that document as the source of truth for what is stored as page content, what is treated as
+metadata-only, and which content types remain deferred.
+
 ## Deployment
 
 Current deployment shape:
