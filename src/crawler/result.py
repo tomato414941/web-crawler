@@ -17,8 +17,12 @@ class CrawlStageTimings:
     frontier_ms: float = 0.0
     persist_ms: float = 0.0
     output_ms: float = 0.0
+    parse_queue_wait_ms: float = 0.0
+    publish_queue_wait_ms: float = 0.0
     process_ms: float = 0.0
     slot_ms: float = 0.0
+    parse_queue_depth: int = 0
+    publish_queue_depth: int = 0
 
 
 @dataclass(slots=True)
