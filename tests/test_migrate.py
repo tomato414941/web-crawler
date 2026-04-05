@@ -21,6 +21,7 @@ def _reset_schema(dsn: str) -> None:
             cur.execute("DROP TABLE IF EXISTS public.schema_migrations")
             cur.execute("DROP TABLE IF EXISTS public.domain_state")
             cur.execute("DROP TABLE IF EXISTS public.frontier")
+            cur.execute("DROP TABLE IF EXISTS public.crawler_runtime_stats")
             cur.execute("DROP TABLE IF EXISTS public.pages")
         conn.commit()
     finally:
@@ -38,7 +39,7 @@ def migrated_dsn():
 def test_apply_migrations_creates_expected_tables(migrated_dsn):
     applied = apply_migrations(migrated_dsn)
 
-    assert applied == ["001_initial_schema.sql"]
+    assert applied == ["001_initial_schema.sql", "002_runtime_stats.sql"]
 
     conn = psycopg2.connect(migrated_dsn)
     try:
@@ -48,7 +49,8 @@ def test_apply_migrations_creates_expected_tables(migrated_dsn):
                 SELECT to_regclass('public.pages'),
                        to_regclass('public.frontier'),
                        to_regclass('public.domain_state'),
-                       to_regclass('public.schema_migrations')
+                       to_regclass('public.schema_migrations'),
+                       to_regclass('public.crawler_runtime_stats')
                 """
             )
             assert cur.fetchone() == (
@@ -56,6 +58,7 @@ def test_apply_migrations_creates_expected_tables(migrated_dsn):
                 "frontier",
                 "domain_state",
                 "schema_migrations",
+                "crawler_runtime_stats",
             )
     finally:
         conn.close()
