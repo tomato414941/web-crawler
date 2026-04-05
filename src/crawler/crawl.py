@@ -54,7 +54,9 @@ def _format_timings(timings: CrawlStageTimings | None) -> str:
         return ""
     return (
         "lease=%0.1fms precheck=%0.1fms fetch=%0.1fms parse=%0.1fms "
-        "frontier=%0.1fms persist=%0.1fms output=%0.1fms process=%0.1fms slot=%0.1fms"
+        "frontier=%0.1fms persist=%0.1fms output=%0.1fms "
+        "parse_q_wait=%0.1fms publish_q_wait=%0.1fms process=%0.1fms slot=%0.1fms "
+        "parse_q_depth=%d publish_q_depth=%d"
     ) % (
         timings.lease_ms,
         timings.precheck_ms,
@@ -63,8 +65,12 @@ def _format_timings(timings: CrawlStageTimings | None) -> str:
         timings.frontier_ms,
         timings.persist_ms,
         timings.output_ms,
+        timings.parse_queue_wait_ms,
+        timings.publish_queue_wait_ms,
         timings.process_ms,
         timings.slot_ms,
+        timings.parse_queue_depth,
+        timings.publish_queue_depth,
     )
 
 
@@ -76,6 +82,17 @@ class _FetchedPage:
     response: Response
     timings: CrawlStageTimings
     process_started: float
+    enqueued_at: float = 0.0
+    queue_depth: int = 0
+
+
+@dataclass(slots=True)
+class _PublishItem:
+    """Parsed result handed from parser to publisher."""
+
+    result: CrawlResult
+    enqueued_at: float = 0.0
+    queue_depth: int = 0
 
 
 class CrawlerEngine:
@@ -153,7 +170,7 @@ class CrawlerEngine:
         self._leases_issued = 0
         self._failure_counts: Counter[str] = Counter()
         self._parse_queue: asyncio.Queue[_FetchedPage | object] | None = None
-        self._publish_queue: asyncio.Queue[CrawlResult | object] | None = None
+        self._publish_queue: asyncio.Queue[_PublishItem | object] | None = None
 
     async def __aenter__(self) -> "CrawlerEngine":
         return self
@@ -411,9 +428,13 @@ class CrawlerEngine:
                 result.timings.lease_ms = lease_ms
                 result.timings.slot_ms = _elapsed_ms(slot_started)
                 if self._parse_queue is not None:
+                    result.queue_depth = self._parse_queue.qsize()
+                    result.enqueued_at = time.perf_counter()
                     await self._parse_queue.put(result)
                 else:
                     parsed = await self._parse_fetched_page(result)
+                    parsed.timings.publish_queue_depth = 0
+                    parsed.timings.publish_queue_wait_ms = 0.0
                     await self._publish_result(parsed)
                     logger.info(
                         "[%d/%d] %s (%s)",
@@ -488,10 +509,19 @@ class CrawlerEngine:
                 break
 
             fetched = item
+            fetched.timings.parse_queue_wait_ms = (
+                _elapsed_ms(fetched.enqueued_at) if fetched.enqueued_at else 0.0
+            )
+            fetched.timings.parse_queue_depth = fetched.queue_depth
             try:
                 result = await self._parse_fetched_page(fetched)
                 if self._publish_queue is not None:
-                    await self._publish_queue.put(result)
+                    queue_item = _PublishItem(
+                        result=result,
+                        enqueued_at=time.perf_counter(),
+                        queue_depth=self._publish_queue.qsize(),
+                    )
+                    await self._publish_queue.put(queue_item)
                 else:
                     await self._publish_result(result)
                     logger.info(
@@ -545,7 +575,12 @@ class CrawlerEngine:
                 self._publish_queue.task_done()
                 break
 
-            result = item
+            queue_item = item
+            result = queue_item.result
+            result.timings.publish_queue_wait_ms = (
+                _elapsed_ms(queue_item.enqueued_at) if queue_item.enqueued_at else 0.0
+            )
+            result.timings.publish_queue_depth = queue_item.queue_depth
             try:
                 await self._publish_result(result)
                 logger.info(

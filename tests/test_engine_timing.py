@@ -101,6 +101,10 @@ async def test_crawler_engine_records_stage_timings():
     assert result.timings.parse_ms >= 0
     assert result.timings.frontier_ms >= 0
     assert result.timings.persist_ms >= 0
+    assert result.timings.parse_queue_wait_ms >= 0
+    assert result.timings.publish_queue_wait_ms >= 0
+    assert result.timings.parse_queue_depth >= 0
+    assert result.timings.publish_queue_depth >= 0
     assert result.timings.process_ms >= result.timings.fetch_ms
     assert result.timings.process_ms >= result.timings.slot_ms
     assert frontier.done == [("https://example.com/", "lease-1")]
@@ -132,3 +136,30 @@ async def test_parse_frontier_delay_does_not_extend_fetch_slot():
     result = storage.saved[0]
     assert result.timings.frontier_ms >= 200
     assert result.timings.slot_ms < result.timings.frontier_ms
+
+
+class _SlowStorage(_FakeStorage):
+    def save(self, result):
+        time.sleep(0.25)
+        return super().save(result)
+
+
+@pytest.mark.asyncio
+async def test_queue_wait_metrics_record_backpressure():
+    frontier = _FakeFrontier(CrawlTask(url="https://example.com/", depth=0, lease_token="lease-1"))
+    engine = CrawlerEngine(
+        start_url="https://example.com/",
+        max_pages=1,
+        max_depth=1,
+        frontier=frontier,
+        domain_manager=_FakeDomainManager(),
+    )
+    engine.fetcher = _FakeFetcher()
+    storage = _SlowStorage()
+    engine.pg_storage = storage
+
+    await engine.crawl()
+
+    result = storage.saved[0]
+    assert result.timings.publish_queue_wait_ms >= 0
+    assert result.timings.publish_queue_depth >= 0
