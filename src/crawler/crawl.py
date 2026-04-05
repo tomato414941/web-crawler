@@ -122,6 +122,7 @@ class CrawlerEngine:
         self.concurrency = concurrency
         self.output_writer = output_writer
         self.pg_storage = pg_storage
+        self.parser_workers = max(1, min(concurrency, 4))
 
         self.start_domain = urlparse(start_url).netloc if start_url else ""
         self.seed_hosts = seed_hosts_from_urls(seed_urls or [])
@@ -186,6 +187,7 @@ class CrawlerEngine:
             "claimed_pages": self._claimed_pages,
             "max_pages": self.max_pages,
             "concurrency": self.concurrency,
+            "parser_workers": self.parser_workers,
             "parse_queue_size": self._parse_queue.qsize() if self._parse_queue is not None else 0,
             "publish_queue_size": self._publish_queue.qsize()
             if self._publish_queue is not None
@@ -475,13 +477,12 @@ class CrawlerEngine:
                         _format_timings(parsed.timings),
                     )
 
-    async def _parse_fetched_page(self, fetched: _FetchedPage) -> CrawlResult:
-        """Parse fetched content and apply frontier updates outside fetch workers."""
-        task = fetched.task
-        response = fetched.response
-        timings = fetched.timings
-
-        parse_started = time.perf_counter()
+    def _prepare_parsed_payload(
+        self,
+        task: CrawlTask,
+        response: Response,
+    ) -> tuple[str, list[str], list[CrawlTask]]:
+        """Prepare parsed content and discovered tasks away from the event loop."""
         content = (
             response.text
             if should_store_text_content(
@@ -491,6 +492,7 @@ class CrawlerEngine:
             else ""
         )
         outlinks: list[str] = []
+        new_tasks: list[CrawlTask] = []
 
         if task.depth < self.max_depth and should_extract_links(
             response.headers.get("content-type"),
@@ -505,11 +507,28 @@ class CrawlerEngine:
                 task.depth + 1,
                 parent_signals=page_signals,
             )
+
+        return content, outlinks, new_tasks
+
+    async def _parse_fetched_page(self, fetched: _FetchedPage) -> CrawlResult:
+        """Parse fetched content and apply frontier updates outside fetch workers."""
+        task = fetched.task
+        response = fetched.response
+        timings = fetched.timings
+
+        parse_started = time.perf_counter()
+        content, outlinks, new_tasks = await asyncio.to_thread(
+            self._prepare_parsed_payload,
+            task,
+            response,
+        )
+        timings.parse_ms = _elapsed_ms(parse_started)
+
+        if new_tasks:
             frontier_started = time.perf_counter()
             self.frontier.add_many(new_tasks)
             timings.frontier_ms += _elapsed_ms(frontier_started)
 
-        timings.parse_ms = _elapsed_ms(parse_started)
         self.domain_manager.record_success(task.url)
         frontier_started = time.perf_counter()
         self.frontier.mark_done(task.url, lease_token=task.lease_token)
@@ -677,16 +696,17 @@ class CrawlerEngine:
 
         self._parse_queue = asyncio.Queue()
         self._publish_queue = asyncio.Queue()
-        parser = asyncio.create_task(self._parser())
+        parsers = [asyncio.create_task(self._parser()) for _ in range(self.parser_workers)]
         publisher = asyncio.create_task(self._publisher())
 
         workers = [asyncio.create_task(self._worker(i)) for i in range(self.concurrency)]
 
         try:
             await asyncio.gather(*workers)
-            await self._parse_queue.put(_PARSER_SENTINEL)
+            for _ in range(self.parser_workers):
+                await self._parse_queue.put(_PARSER_SENTINEL)
             await self._parse_queue.join()
-            await parser
+            await asyncio.gather(*parsers)
             await self._publish_queue.put(_PUBLISHER_SENTINEL)
             await self._publish_queue.join()
             await publisher
