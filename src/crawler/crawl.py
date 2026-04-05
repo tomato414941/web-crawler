@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections import Counter
+from dataclasses import dataclass
 import logging
 import re
 import time
@@ -15,7 +16,7 @@ import typer
 
 from .config import settings
 from .content_policy import should_extract_links, should_store_text_content
-from .core import HttpFetcher
+from .core import HttpFetcher, Response
 from .discovery import PageSignals, rank_discovered_url, rank_seed_url, seed_hosts_from_urls
 from .domain_manager import DomainManager
 from .domain_store import DomainStore
@@ -34,6 +35,7 @@ if TYPE_CHECKING:
 _WORKER_PATIENCE = 50
 _EXPLORATION_EVERY = 4
 _PUBLISHER_SENTINEL = object()
+_PARSER_SENTINEL = object()
 _TITLE_PATTERN = re.compile(r"<title[^>]*>(.*?)</title>", re.IGNORECASE | re.DOTALL)
 _META_ROBOTS_PATTERN = re.compile(
     r'<meta[^>]+name=["\']robots["\'][^>]+content=["\']([^"\']+)["\']',
@@ -64,6 +66,16 @@ def _format_timings(timings: CrawlStageTimings | None) -> str:
         timings.process_ms,
         timings.slot_ms,
     )
+
+
+@dataclass(slots=True)
+class _FetchedPage:
+    """Fetched page handed from fetch workers to parse workers."""
+
+    task: CrawlTask
+    response: Response
+    timings: CrawlStageTimings
+    process_started: float
 
 
 class CrawlerEngine:
@@ -140,6 +152,7 @@ class CrawlerEngine:
         self._lease_lock = asyncio.Lock()
         self._leases_issued = 0
         self._failure_counts: Counter[str] = Counter()
+        self._parse_queue: asyncio.Queue[_FetchedPage | object] | None = None
         self._publish_queue: asyncio.Queue[CrawlResult | object] | None = None
 
     async def __aenter__(self) -> "CrawlerEngine":
@@ -222,7 +235,7 @@ class CrawlerEngine:
             )
         return tasks
 
-    async def _process_url(self, task: CrawlTask) -> CrawlResult | CrawlFailure | None:
+    async def _process_url(self, task: CrawlTask) -> _FetchedPage | CrawlFailure | None:
         """Process a single URL."""
         url = task.url
         timings = CrawlStageTimings()
@@ -268,53 +281,12 @@ class CrawlerEngine:
                     timings=timings,
                 )
 
-            parse_started = time.perf_counter()
-            content = (
-                response.text
-                if should_store_text_content(
-                    response.headers.get("content-type"),
-                    response.content,
-                )
-                else ""
-            )
-            outlinks: list[str] = []
-
-            if task.depth < self.max_depth and should_extract_links(
-                response.headers.get("content-type"),
-                response.content,
-            ):
-                links = extract_links(response.text, response.url)
-                outlinks = links
-                page_signals = self._build_page_signals(response)
-                new_tasks = self._build_discovered_tasks(
-                    url,
-                    links,
-                    task.depth + 1,
-                    parent_signals=page_signals,
-                )
-                frontier_started = time.perf_counter()
-                self.frontier.add_many(new_tasks)
-                timings.frontier_ms += _elapsed_ms(frontier_started)
-
-            timings.parse_ms = _elapsed_ms(parse_started)
-            result = CrawlResult(
-                url=response.url,
-                status=response.status,
-                content_length=len(response.content),
-                depth=task.depth,
-                source_url=task.source_url,
-                timestamp=time.time(),
-                content=content,
-                outlinks=outlinks,
+            return _FetchedPage(
+                task=task,
+                response=response,
                 timings=timings,
+                process_started=process_started,
             )
-
-            self.domain_manager.record_success(url)
-            frontier_started = time.perf_counter()
-            self.frontier.mark_done(url, lease_token=task.lease_token)
-            timings.frontier_ms += _elapsed_ms(frontier_started)
-            timings.process_ms = _elapsed_ms(process_started)
-            return result
 
         except httpx.TimeoutException:
             timings.fetch_ms = _elapsed_ms(fetch_started)
@@ -436,7 +408,88 @@ class CrawlerEngine:
                 )
             else:
                 await self._release_page_slot(success=True)
+                result.timings.lease_ms = lease_ms
                 result.timings.slot_ms = _elapsed_ms(slot_started)
+                if self._parse_queue is not None:
+                    await self._parse_queue.put(result)
+                else:
+                    parsed = await self._parse_fetched_page(result)
+                    await self._publish_result(parsed)
+                    logger.info(
+                        "[%d/%d] %s (%s)",
+                        self.pages_crawled,
+                        self.max_pages,
+                        parsed.url,
+                        _format_timings(parsed.timings),
+                    )
+
+    async def _parse_fetched_page(self, fetched: _FetchedPage) -> CrawlResult:
+        """Parse fetched content and apply frontier updates outside fetch workers."""
+        task = fetched.task
+        response = fetched.response
+        timings = fetched.timings
+
+        parse_started = time.perf_counter()
+        content = (
+            response.text
+            if should_store_text_content(
+                response.headers.get("content-type"),
+                response.content,
+            )
+            else ""
+        )
+        outlinks: list[str] = []
+
+        if task.depth < self.max_depth and should_extract_links(
+            response.headers.get("content-type"),
+            response.content,
+        ):
+            links = extract_links(response.text, response.url)
+            outlinks = links
+            page_signals = self._build_page_signals(response)
+            new_tasks = self._build_discovered_tasks(
+                task.url,
+                links,
+                task.depth + 1,
+                parent_signals=page_signals,
+            )
+            frontier_started = time.perf_counter()
+            self.frontier.add_many(new_tasks)
+            timings.frontier_ms += _elapsed_ms(frontier_started)
+
+        timings.parse_ms = _elapsed_ms(parse_started)
+        self.domain_manager.record_success(task.url)
+        frontier_started = time.perf_counter()
+        self.frontier.mark_done(task.url, lease_token=task.lease_token)
+        timings.frontier_ms += _elapsed_ms(frontier_started)
+        timings.process_ms = _elapsed_ms(fetched.process_started)
+
+        return CrawlResult(
+            url=response.url,
+            status=response.status,
+            content_length=len(response.content),
+            depth=task.depth,
+            source_url=task.source_url,
+            timestamp=time.time(),
+            content=content,
+            outlinks=outlinks,
+            timings=timings,
+        )
+
+    async def _parser(self):
+        """Drain fetched pages and parse them into crawl results."""
+        if self._parse_queue is None:
+            return
+
+        while True:
+            item = await self._parse_queue.get()
+            if item is _PARSER_SENTINEL:
+                self._parse_queue.task_done()
+                break
+
+            fetched = item
+            try:
+                result = await self._parse_fetched_page(fetched)
                 if self._publish_queue is not None:
                     await self._publish_queue.put(result)
                 else:
@@ -448,6 +501,25 @@ class CrawlerEngine:
                         result.url,
                         _format_timings(result.timings),
                     )
+            except Exception as exc:
+                self.domain_manager.record_error(fetched.task.url)
+                self.frontier.mark_failed(
+                    fetched.task.url,
+                    retryable=self.domain_manager.should_retry(fetched.task.url),
+                    error=str(exc),
+                    lease_token=fetched.task.lease_token,
+                )
+                category = categorize_crawl_error(str(exc))
+                if category:
+                    self._failure_counts[category] += 1
+                logger.warning(
+                    "Failed %s during parse: %s (%s)",
+                    fetched.task.url,
+                    exc,
+                    _format_timings(fetched.timings),
+                )
+            finally:
+                self._parse_queue.task_done()
 
     async def _publish_result(self, result: CrawlResult):
         """Persist crawl output outside the fetch worker hot path."""
@@ -509,13 +581,18 @@ class CrawlerEngine:
         if self.start_url and self.frontier.pending_count() == 0:
             self.frontier.add(self._build_seed_task(self.start_url))
 
+        self._parse_queue = asyncio.Queue()
         self._publish_queue = asyncio.Queue()
+        parser = asyncio.create_task(self._parser())
         publisher = asyncio.create_task(self._publisher())
 
         workers = [asyncio.create_task(self._worker(i)) for i in range(self.concurrency)]
 
         try:
             await asyncio.gather(*workers)
+            await self._parse_queue.put(_PARSER_SENTINEL)
+            await self._parse_queue.join()
+            await parser
             await self._publish_queue.put(_PUBLISHER_SENTINEL)
             await self._publish_queue.join()
             await publisher
