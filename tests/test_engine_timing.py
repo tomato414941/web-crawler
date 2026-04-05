@@ -98,6 +98,8 @@ async def test_crawler_engine_records_stage_timings():
     assert result.timings.lease_ms >= 0
     assert result.timings.precheck_ms >= 0
     assert result.timings.fetch_ms >= 0
+    assert result.timings.fetch_request_ms >= 0
+    assert result.timings.fetch_body_read_ms >= 0
     assert result.timings.parse_ms >= 0
     assert result.timings.frontier_ms >= 0
     assert result.timings.persist_ms >= 0

@@ -1,6 +1,7 @@
 """Browser-based fetcher using Playwright."""
 
 import asyncio
+import time
 
 from playwright.async_api import async_playwright, Browser, BrowserContext, Page
 
@@ -92,9 +93,13 @@ class BrowserFetcher:
         """Fetch a URL using a pooled browser page."""
         page = await self._pool.acquire()
         try:
+            request_started = time.perf_counter()
             response = await page.goto(url, timeout=self.timeout, wait_until="networkidle")
+            fetch_request_ms = round((time.perf_counter() - request_started) * 1000, 1)
 
+            body_started = time.perf_counter()
             content = await page.content()
+            fetch_body_read_ms = round((time.perf_counter() - body_started) * 1000, 1)
             final_url = page.url
 
             headers = {}
@@ -108,6 +113,8 @@ class BrowserFetcher:
                 status=status,
                 content=content.encode("utf-8"),
                 headers=headers,
+                fetch_request_ms=fetch_request_ms,
+                fetch_body_read_ms=fetch_body_read_ms,
             )
         finally:
             await self._pool.release(page)
@@ -116,9 +123,13 @@ class BrowserFetcher:
         """Fetch URL and return accessibility tree snapshot for AI agents."""
         page = await self._pool.acquire()
         try:
+            request_started = time.perf_counter()
             response = await page.goto(url, timeout=self.timeout, wait_until="networkidle")
+            fetch_request_ms = round((time.perf_counter() - request_started) * 1000, 1)
 
+            body_started = time.perf_counter()
             content = await page.content()
+            fetch_body_read_ms = round((time.perf_counter() - body_started) * 1000, 1)
             final_url = page.url
 
             # Get accessibility tree snapshot
@@ -135,6 +146,8 @@ class BrowserFetcher:
                 status=status,
                 content=content.encode("utf-8"),
                 headers=headers,
+                fetch_request_ms=fetch_request_ms,
+                fetch_body_read_ms=fetch_body_read_ms,
             )
 
             return resp, _format_a11y_tree(snapshot) if snapshot else ""

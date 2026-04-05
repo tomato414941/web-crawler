@@ -12,6 +12,8 @@ class Response:
     status: int
     content: bytes
     headers: dict[str, str]
+    fetch_request_ms: float = 0.0
+    fetch_body_read_ms: float = 0.0
 
     @property
     def text(self) -> str:
