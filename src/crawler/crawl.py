@@ -53,7 +53,7 @@ def _format_timings(timings: CrawlStageTimings | None) -> str:
     if timings is None:
         return ""
     return (
-        "lease=%0.1fms precheck=%0.1fms fetch=%0.1fms parse=%0.1fms "
+        "lease=%0.1fms precheck=%0.1fms fetch=%0.1fms request=%0.1fms body=%0.1fms parse=%0.1fms "
         "frontier=%0.1fms persist=%0.1fms output=%0.1fms "
         "parse_q_wait=%0.1fms publish_q_wait=%0.1fms process=%0.1fms slot=%0.1fms "
         "parse_q_depth=%d publish_q_depth=%d"
@@ -61,6 +61,8 @@ def _format_timings(timings: CrawlStageTimings | None) -> str:
         timings.lease_ms,
         timings.precheck_ms,
         timings.fetch_ms,
+        timings.fetch_request_ms,
+        timings.fetch_body_read_ms,
         timings.parse_ms,
         timings.frontier_ms,
         timings.persist_ms,
@@ -303,6 +305,8 @@ class CrawlerEngine:
         try:
             response = await self.fetcher.fetch(url)
             timings.fetch_ms = _elapsed_ms(fetch_started)
+            timings.fetch_request_ms = getattr(response, "fetch_request_ms", 0.0)
+            timings.fetch_body_read_ms = getattr(response, "fetch_body_read_ms", 0.0)
 
             if response.status >= 400:
                 frontier_started = time.perf_counter()

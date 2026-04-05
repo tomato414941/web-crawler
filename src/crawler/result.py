@@ -13,6 +13,8 @@ class CrawlStageTimings:
     lease_ms: float = 0.0
     precheck_ms: float = 0.0
     fetch_ms: float = 0.0
+    fetch_request_ms: float = 0.0
+    fetch_body_read_ms: float = 0.0
     parse_ms: float = 0.0
     frontier_ms: float = 0.0
     persist_ms: float = 0.0
