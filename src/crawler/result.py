@@ -7,6 +7,21 @@ from typing import Any, Mapping
 
 
 @dataclass(slots=True)
+class CrawlStageTimings:
+    """Per-stage crawler timings in milliseconds."""
+
+    lease_ms: float = 0.0
+    precheck_ms: float = 0.0
+    fetch_ms: float = 0.0
+    parse_ms: float = 0.0
+    frontier_ms: float = 0.0
+    persist_ms: float = 0.0
+    output_ms: float = 0.0
+    process_ms: float = 0.0
+    slot_ms: float = 0.0
+
+
+@dataclass(slots=True)
 class CrawlResult:
     """Successful crawl result."""
 
@@ -18,6 +33,7 @@ class CrawlResult:
     timestamp: float
     content: str
     outlinks: list[str]
+    timings: CrawlStageTimings | None = None
 
     def to_dict(self, include_content: bool = True) -> dict[str, Any]:
         """Convert result to a plain dict."""
@@ -35,6 +51,7 @@ class CrawlFailure:
     error: str
     depth: int
     retryable: bool
+    timings: CrawlStageTimings | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Convert failure to a plain dict."""
@@ -148,7 +165,9 @@ class LinkCheckResult:
         }
 
 
-def result_to_dict(result: object | Mapping[str, Any], include_content: bool = True) -> dict[str, Any]:
+def result_to_dict(
+    result: object | Mapping[str, Any], include_content: bool = True
+) -> dict[str, Any]:
     """Normalize crawl results to a plain dict."""
     if hasattr(result, "to_dict"):
         try:
