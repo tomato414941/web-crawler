@@ -171,6 +171,33 @@ class CrawlerEngine:
         self._failure_counts: Counter[str] = Counter()
         self._parse_queue: asyncio.Queue[_FetchedPage | object] | None = None
         self._publish_queue: asyncio.Queue[_PublishItem | object] | None = None
+        self._parse_queue_wait_last_ms = 0.0
+        self._publish_queue_wait_last_ms = 0.0
+        self._parse_queue_wait_max_ms = 0.0
+        self._publish_queue_wait_max_ms = 0.0
+        self._parse_queue_depth_max = 0
+        self._publish_queue_depth_max = 0
+
+    def snapshot_runtime_stats(self) -> dict[str, object]:
+        """Return live queue/backpressure stats for external observers."""
+        return {
+            "running": self._running,
+            "pages_crawled": self.pages_crawled,
+            "claimed_pages": self._claimed_pages,
+            "max_pages": self.max_pages,
+            "concurrency": self.concurrency,
+            "parse_queue_size": self._parse_queue.qsize() if self._parse_queue is not None else 0,
+            "publish_queue_size": self._publish_queue.qsize()
+            if self._publish_queue is not None
+            else 0,
+            "parse_queue_wait_last_ms": self._parse_queue_wait_last_ms,
+            "publish_queue_wait_last_ms": self._publish_queue_wait_last_ms,
+            "parse_queue_wait_max_ms": self._parse_queue_wait_max_ms,
+            "publish_queue_wait_max_ms": self._publish_queue_wait_max_ms,
+            "parse_queue_depth_max": self._parse_queue_depth_max,
+            "publish_queue_depth_max": self._publish_queue_depth_max,
+            "failure_breakdown": dict(self._failure_counts),
+        }
 
     async def __aenter__(self) -> "CrawlerEngine":
         return self
@@ -429,6 +456,10 @@ class CrawlerEngine:
                 result.timings.slot_ms = _elapsed_ms(slot_started)
                 if self._parse_queue is not None:
                     result.queue_depth = self._parse_queue.qsize()
+                    self._parse_queue_depth_max = max(
+                        self._parse_queue_depth_max,
+                        result.queue_depth,
+                    )
                     result.enqueued_at = time.perf_counter()
                     await self._parse_queue.put(result)
                 else:
@@ -513,6 +544,15 @@ class CrawlerEngine:
                 _elapsed_ms(fetched.enqueued_at) if fetched.enqueued_at else 0.0
             )
             fetched.timings.parse_queue_depth = fetched.queue_depth
+            self._parse_queue_wait_last_ms = fetched.timings.parse_queue_wait_ms
+            self._parse_queue_wait_max_ms = max(
+                self._parse_queue_wait_max_ms,
+                fetched.timings.parse_queue_wait_ms,
+            )
+            self._parse_queue_depth_max = max(
+                self._parse_queue_depth_max,
+                fetched.queue_depth,
+            )
             try:
                 result = await self._parse_fetched_page(fetched)
                 if self._publish_queue is not None:
@@ -520,6 +560,10 @@ class CrawlerEngine:
                         result=result,
                         enqueued_at=time.perf_counter(),
                         queue_depth=self._publish_queue.qsize(),
+                    )
+                    self._publish_queue_depth_max = max(
+                        self._publish_queue_depth_max,
+                        queue_item.queue_depth,
                     )
                     await self._publish_queue.put(queue_item)
                 else:
@@ -581,6 +625,15 @@ class CrawlerEngine:
                 _elapsed_ms(queue_item.enqueued_at) if queue_item.enqueued_at else 0.0
             )
             result.timings.publish_queue_depth = queue_item.queue_depth
+            self._publish_queue_wait_last_ms = result.timings.publish_queue_wait_ms
+            self._publish_queue_wait_max_ms = max(
+                self._publish_queue_wait_max_ms,
+                result.timings.publish_queue_wait_ms,
+            )
+            self._publish_queue_depth_max = max(
+                self._publish_queue_depth_max,
+                queue_item.queue_depth,
+            )
             try:
                 await self._publish_result(result)
                 logger.info(
@@ -612,6 +665,12 @@ class CrawlerEngine:
         self._failure_counts = Counter()
         self._claimed_pages = 0
         self._leases_issued = 0
+        self._parse_queue_wait_last_ms = 0.0
+        self._publish_queue_wait_last_ms = 0.0
+        self._parse_queue_wait_max_ms = 0.0
+        self._publish_queue_wait_max_ms = 0.0
+        self._parse_queue_depth_max = 0
+        self._publish_queue_depth_max = 0
 
         if self.start_url and self.frontier.pending_count() == 0:
             self.frontier.add(self._build_seed_task(self.start_url))
