@@ -1,6 +1,7 @@
 """HTTP fetcher implementation using httpx."""
 
 import asyncio
+import time
 
 import httpx
 
@@ -46,13 +47,20 @@ class HttpFetcher:
     async def fetch(self, url: str) -> Response:
         """Fetch a URL and return the response."""
         client = await self._get_client()
-        resp = await client.get(url)
-        return Response(
-            url=str(resp.url),
-            status=resp.status_code,
-            content=resp.content,
-            headers=dict(resp.headers),
-        )
+        request_started = time.perf_counter()
+        async with client.stream("GET", url) as resp:
+            fetch_request_ms = round((time.perf_counter() - request_started) * 1000, 1)
+            body_started = time.perf_counter()
+            content = await resp.aread()
+            fetch_body_read_ms = round((time.perf_counter() - body_started) * 1000, 1)
+            return Response(
+                url=str(resp.url),
+                status=resp.status_code,
+                content=content,
+                headers=dict(resp.headers),
+                fetch_request_ms=fetch_request_ms,
+                fetch_body_read_ms=fetch_body_read_ms,
+            )
 
     async def close(self):
         """Close the HTTP client."""
