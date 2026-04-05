@@ -1,5 +1,6 @@
 """Timing instrumentation tests for crawler engine."""
 
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -101,6 +102,33 @@ async def test_crawler_engine_records_stage_timings():
     assert result.timings.frontier_ms >= 0
     assert result.timings.persist_ms >= 0
     assert result.timings.process_ms >= result.timings.fetch_ms
-    assert result.timings.slot_ms >= result.timings.process_ms
+    assert result.timings.process_ms >= result.timings.slot_ms
     assert frontier.done == [("https://example.com/", "lease-1")]
     assert frontier.added
+
+
+class _SlowFrontier(_FakeFrontier):
+    def add_many(self, tasks):
+        time.sleep(0.25)
+        super().add_many(tasks)
+
+
+@pytest.mark.asyncio
+async def test_parse_frontier_delay_does_not_extend_fetch_slot():
+    frontier = _SlowFrontier(CrawlTask(url="https://example.com/", depth=0, lease_token="lease-1"))
+    engine = CrawlerEngine(
+        start_url="https://example.com/",
+        max_pages=1,
+        max_depth=1,
+        frontier=frontier,
+        domain_manager=_FakeDomainManager(),
+    )
+    engine.fetcher = _FakeFetcher()
+    storage = _FakeStorage()
+    engine.pg_storage = storage
+
+    await engine.crawl()
+
+    result = storage.saved[0]
+    assert result.timings.frontier_ms >= 200
+    assert result.timings.slot_ms < result.timings.frontier_ms
