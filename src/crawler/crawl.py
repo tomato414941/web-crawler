@@ -33,6 +33,7 @@ if TYPE_CHECKING:
 # Workers wait this many idle ticks (× 0.1s) before giving up
 _WORKER_PATIENCE = 50
 _EXPLORATION_EVERY = 4
+_PUBLISHER_SENTINEL = object()
 _TITLE_PATTERN = re.compile(r"<title[^>]*>(.*?)</title>", re.IGNORECASE | re.DOTALL)
 _META_ROBOTS_PATTERN = re.compile(
     r'<meta[^>]+name=["\']robots["\'][^>]+content=["\']([^"\']+)["\']',
@@ -139,6 +140,7 @@ class CrawlerEngine:
         self._lease_lock = asyncio.Lock()
         self._leases_issued = 0
         self._failure_counts: Counter[str] = Counter()
+        self._publish_queue: asyncio.Queue[CrawlResult | object] | None = None
 
     async def __aenter__(self) -> "CrawlerEngine":
         return self
@@ -434,19 +436,46 @@ class CrawlerEngine:
                 )
             else:
                 await self._release_page_slot(success=True)
-                if self.pg_storage:
-                    persist_started = time.perf_counter()
-                    self.pg_storage.save(result)
-                    result.timings.persist_ms = _elapsed_ms(persist_started)
-                if self.output_writer:
-                    output_started = time.perf_counter()
-                    self.output_writer.write_one(result)
-                    result.timings.output_ms = _elapsed_ms(output_started)
-                elif not self.pg_storage:
-                    result.timings.slot_ms = _elapsed_ms(slot_started)
-                    self.results.append(result.to_dict())
-
                 result.timings.slot_ms = _elapsed_ms(slot_started)
+                if self._publish_queue is not None:
+                    await self._publish_queue.put(result)
+                else:
+                    await self._publish_result(result)
+                    logger.info(
+                        "[%d/%d] %s (%s)",
+                        self.pages_crawled,
+                        self.max_pages,
+                        result.url,
+                        _format_timings(result.timings),
+                    )
+
+    async def _publish_result(self, result: CrawlResult):
+        """Persist crawl output outside the fetch worker hot path."""
+        if self.pg_storage:
+            persist_started = time.perf_counter()
+            await asyncio.to_thread(self.pg_storage.save, result)
+            result.timings.persist_ms = _elapsed_ms(persist_started)
+        if self.output_writer:
+            output_started = time.perf_counter()
+            await asyncio.to_thread(self.output_writer.write_one, result)
+            result.timings.output_ms = _elapsed_ms(output_started)
+        elif not self.pg_storage:
+            self.results.append(result.to_dict())
+
+    async def _publisher(self):
+        """Drain processed crawl results and perform blocking writes."""
+        if self._publish_queue is None:
+            return
+
+        while True:
+            item = await self._publish_queue.get()
+            if item is _PUBLISHER_SENTINEL:
+                self._publish_queue.task_done()
+                break
+
+            result = item
+            try:
+                await self._publish_result(result)
                 logger.info(
                     "[%d/%d] %s (%s)",
                     self.pages_crawled,
@@ -454,6 +483,8 @@ class CrawlerEngine:
                     result.url,
                     _format_timings(result.timings),
                 )
+            finally:
+                self._publish_queue.task_done()
 
     async def _lease_task(self) -> CrawlTask | None:
         """Alternate between best-first and breadth-first leases."""
@@ -478,12 +509,19 @@ class CrawlerEngine:
         if self.start_url and self.frontier.pending_count() == 0:
             self.frontier.add(self._build_seed_task(self.start_url))
 
-        # Start workers
+        self._publish_queue = asyncio.Queue()
+        publisher = asyncio.create_task(self._publisher())
+
         workers = [asyncio.create_task(self._worker(i)) for i in range(self.concurrency)]
 
-        await asyncio.gather(*workers)
-        self._running = False
-        self.failure_breakdown = dict(self._failure_counts)
+        try:
+            await asyncio.gather(*workers)
+            await self._publish_queue.put(_PUBLISHER_SENTINEL)
+            await self._publish_queue.join()
+            await publisher
+        finally:
+            self._running = False
+            self.failure_breakdown = dict(self._failure_counts)
 
         return self.results
 
