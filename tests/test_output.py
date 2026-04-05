@@ -5,7 +5,7 @@ import json
 import pytest
 
 from crawler.output import StreamingOutputWriter
-from crawler.result import CrawlResult
+from crawler.result import CrawlResult, CrawlStageTimings
 
 
 class TestStreamingOutputWriter:
@@ -125,6 +125,7 @@ class TestStreamingOutputWriter:
             timestamp=123.0,
             content="Hello",
             outlinks=[],
+            timings=CrawlStageTimings(fetch_ms=12.5, slot_ms=20.0),
         )
 
         with StreamingOutputWriter(output_file, include_content=False) as writer:
@@ -132,4 +133,6 @@ class TestStreamingOutputWriter:
 
         content = json.loads(output_file.read_text().strip())
         assert content["url"] == "http://example.com"
+        assert content["timings"]["fetch_ms"] == 12.5
+        assert content["timings"]["slot_ms"] == 20.0
         assert "content" not in content
