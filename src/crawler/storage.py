@@ -3,6 +3,7 @@
 from collections import Counter
 from collections.abc import Mapping
 import hashlib
+import json
 import logging
 import re
 import time
@@ -167,6 +168,61 @@ class PgStorage:
             self._conn.rollback()
             raise
 
+    def upsert_runtime_stats(self, component: str, payload: Mapping[str, object]) -> None:
+        """Store runtime crawler stats for API consumption."""
+        try:
+            with self._conn.cursor() as cur:
+                cur.execute(
+                    """INSERT INTO crawler_runtime_stats (component, payload, updated_at)
+                       VALUES (%s, %s::jsonb, %s)
+                       ON CONFLICT (component) DO UPDATE SET
+                           payload = EXCLUDED.payload,
+                           updated_at = EXCLUDED.updated_at""",
+                    (component, json.dumps(dict(payload)), time.time()),
+                )
+            self._conn.commit()
+        except Exception:
+            self._conn.rollback()
+            logger.exception("Failed to update runtime stats for %s", component)
+
+    def get_runtime_stats(self, component: str | None = None) -> dict[str, object]:
+        """Fetch runtime crawler stats snapshots."""
+        try:
+            with self._conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute("SELECT to_regclass('public.crawler_runtime_stats')")
+                exists = cur.fetchone()[0] is not None
+                if not exists:
+                    self._finish_read()
+                    return {}
+
+                if component is None:
+                    cur.execute("SELECT component, payload, updated_at FROM crawler_runtime_stats")
+                    rows = cur.fetchall()
+                    self._finish_read()
+                    return {
+                        row["component"]: {
+                            "payload": row["payload"],
+                            "updated_at": row["updated_at"],
+                        }
+                        for row in rows
+                    }
+
+                cur.execute(
+                    "SELECT payload, updated_at FROM crawler_runtime_stats WHERE component = %s",
+                    (component,),
+                )
+                row = cur.fetchone()
+            self._finish_read()
+            if not row:
+                return {}
+            return {
+                "payload": row["payload"],
+                "updated_at": row["updated_at"],
+            }
+        except Exception:
+            self._conn.rollback()
+            raise
+
     def get_page(self, url_hash: str) -> dict | None:
         """Get a single page with full content."""
         try:
@@ -208,6 +264,20 @@ class PgStorage:
                 top_pending_domains: list[dict[str, object]] = []
                 active_error_breakdown: dict[str, int] = {}
                 top_error_domains: list[dict[str, object]] = []
+                runtime: dict[str, object] = {}
+                cur.execute("SELECT to_regclass('public.crawler_runtime_stats')")
+                runtime_exists = cur.fetchone()[0] is not None
+                if runtime_exists:
+                    cur.execute(
+                        "SELECT payload, updated_at FROM crawler_runtime_stats WHERE component = 'crawler'"
+                    )
+                    runtime_row = cur.fetchone()
+                    if runtime_row:
+                        runtime = {
+                            "payload": runtime_row[0],
+                            "updated_at": runtime_row[1],
+                        }
+
                 if frontier_exists:
                     assert_public_table_columns(
                         self._conn,
@@ -241,8 +311,7 @@ class PgStorage:
                            LIMIT 10"""
                     )
                     top_pending_domains = [
-                        {"domain": domain, "count": count}
-                        for domain, count in cur.fetchall()
+                        {"domain": domain, "count": count} for domain, count in cur.fetchall()
                     ]
 
                     cur.execute(
@@ -280,8 +349,7 @@ class PgStorage:
                            LIMIT 10"""
                     )
                     top_error_domains = [
-                        {"domain": domain, "count": count}
-                        for domain, count in cur.fetchall()
+                        {"domain": domain, "count": count} for domain, count in cur.fetchall()
                     ]
 
                 cur.execute(
@@ -292,8 +360,7 @@ class PgStorage:
                        LIMIT 10"""
                 )
                 top_page_domains = [
-                    {"domain": domain, "count": count}
-                    for domain, count in cur.fetchall()
+                    {"domain": domain, "count": count} for domain, count in cur.fetchall()
                 ]
             self._finish_read()
         except Exception:
@@ -313,6 +380,7 @@ class PgStorage:
             "top_pending_domains": top_pending_domains,
             "active_error_breakdown": active_error_breakdown,
             "top_error_domains": top_error_domains,
+            "runtime": runtime,
         }
 
     def close(self):

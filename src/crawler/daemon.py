@@ -1,6 +1,7 @@
 """Continuous web crawling daemon."""
 
 import asyncio
+import contextlib
 import logging
 import signal
 import time
@@ -66,17 +67,22 @@ class CrawlDaemon:
         self._idle_sleep = idle_sleep
         self._backlog_ready_per_domain = (
             settings.daemon_keep_ready_per_domain
-            if backlog_ready_per_domain is None else backlog_ready_per_domain
+            if backlog_ready_per_domain is None
+            else backlog_ready_per_domain
         )
         self._backlog_low_priority = (
             settings.daemon_backlog_low_priority
-            if backlog_low_priority is None else backlog_low_priority
+            if backlog_low_priority is None
+            else backlog_low_priority
         )
         self._backlog_defer_seconds = (
             settings.daemon_backlog_defer_seconds
-            if backlog_defer_seconds is None else backlog_defer_seconds
+            if backlog_defer_seconds is None
+            else backlog_defer_seconds
         )
-        self._min_ready_sleep = settings.daemon_min_ready_sleep if min_ready_sleep is None else min_ready_sleep
+        self._min_ready_sleep = (
+            settings.daemon_min_ready_sleep if min_ready_sleep is None else min_ready_sleep
+        )
         self._shutdown = False
         self._engine: CrawlerEngine | None = None
         self._domain_store: DomainStore | None = None
@@ -90,7 +96,9 @@ class CrawlDaemon:
         self._install_signals()
         logger.info(
             "Daemon starting: seeds=%s, cycle_pages=%d, recrawl_ttl=%ds",
-            self._seeds, self._cycle_pages, self._recrawl_ttl,
+            self._seeds,
+            self._cycle_pages,
+            self._recrawl_ttl,
         )
 
         storage = None
@@ -172,6 +180,16 @@ class CrawlDaemon:
 
         logger.info("Daemon shutdown complete")
 
+    async def _report_runtime_stats(self, storage: PgStorage, engine: CrawlerEngine) -> None:
+        """Persist crawler runtime stats for API consumers."""
+        while engine._running:
+            storage.upsert_runtime_stats("crawler", engine.snapshot_runtime_stats())
+            await asyncio.sleep(1.0)
+
+    def _flush_runtime_stats(self, storage: PgStorage, engine: CrawlerEngine) -> None:
+        """Store one last runtime snapshot on cycle boundaries."""
+        storage.upsert_runtime_stats("crawler", engine.snapshot_runtime_stats())
+
     async def _connect(self) -> tuple[PgStorage | None, Frontier | None]:
         """Connect to Postgres and initialize frontier."""
         for attempt in range(1, _MAX_RECONNECT_ATTEMPTS + 1):
@@ -194,7 +212,9 @@ class CrawlDaemon:
                 logger.info("Database connected (attempt %d)", attempt)
                 return storage, frontier
             except psycopg2.OperationalError as e:
-                logger.error("Connection attempt %d/%d failed: %s", attempt, _MAX_RECONNECT_ATTEMPTS, e)
+                logger.error(
+                    "Connection attempt %d/%d failed: %s", attempt, _MAX_RECONNECT_ATTEMPTS, e
+                )
                 if attempt < _MAX_RECONNECT_ATTEMPTS:
                     await self._interruptible_sleep(_RECONNECT_DELAY)
         logger.error("All %d connection attempts failed", _MAX_RECONNECT_ATTEMPTS)
@@ -208,24 +228,38 @@ class CrawlDaemon:
                 pass
         return None
 
-    async def _run_cycle(self, storage: PgStorage, frontier: Frontier) -> tuple[int, dict[str, int]]:
+    async def _run_cycle(
+        self, storage: PgStorage, frontier: Frontier
+    ) -> tuple[int, dict[str, int]]:
         """Run one crawl cycle."""
-        async with CrawlerEngine(
-            max_pages=self._cycle_pages,
-            max_depth=self._max_depth,
-            same_domain=False,
-            delay=self._delay,
-            concurrency=self._concurrency,
-            pg_storage=storage,
-            frontier=frontier,
-            domain_manager=self._domain_manager,
-            domain_store=self._domain_store,
-            seed_urls=self._seeds,
-        ) as engine:
-            self._engine = engine
-            await engine.crawl()
-            self._engine = None
-            return engine.pages_crawled, engine.failure_breakdown
+        runtime_storage = PgStorage(self._postgres_dsn)
+        try:
+            async with CrawlerEngine(
+                max_pages=self._cycle_pages,
+                max_depth=self._max_depth,
+                same_domain=False,
+                delay=self._delay,
+                concurrency=self._concurrency,
+                pg_storage=storage,
+                frontier=frontier,
+                domain_manager=self._domain_manager,
+                domain_store=self._domain_store,
+                seed_urls=self._seeds,
+            ) as engine:
+                self._engine = engine
+                self._flush_runtime_stats(runtime_storage, engine)
+                reporter = asyncio.create_task(self._report_runtime_stats(runtime_storage, engine))
+                try:
+                    await engine.crawl()
+                finally:
+                    self._flush_runtime_stats(runtime_storage, engine)
+                    reporter.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await reporter
+                    self._engine = None
+                return engine.pages_crawled, engine.failure_breakdown
+        finally:
+            runtime_storage.close()
 
     def _ensure_seeds(self, frontier: Frontier):
         """Re-seed frontier when empty."""

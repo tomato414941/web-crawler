@@ -26,6 +26,7 @@ def _reset_schema(dsn: str) -> None:
             cur.execute("DROP TABLE IF EXISTS public.schema_migrations")
             cur.execute("DROP TABLE IF EXISTS public.domain_state")
             cur.execute("DROP TABLE IF EXISTS public.frontier")
+            cur.execute("DROP TABLE IF EXISTS public.crawler_runtime_stats")
             cur.execute("DROP TABLE IF EXISTS public.pages")
         conn.commit()
     finally:
@@ -67,7 +68,9 @@ def test_recrawl_stale_skips_when_pending_queue_is_full(pg_resources):
     now = time.time()
 
     for idx in range(3):
-        frontier.add(CrawlTask(url=f"https://example.com/pending-{idx}", depth=0, added_at=now + idx))
+        frontier.add(
+            CrawlTask(url=f"https://example.com/pending-{idx}", depth=0, added_at=now + idx)
+        )
 
     stale_url = "https://example.com/stale"
     frontier.add(CrawlTask(url=stale_url, depth=0, added_at=now - 100))

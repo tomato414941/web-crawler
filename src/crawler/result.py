@@ -17,6 +17,8 @@ class CrawlStageTimings:
     frontier_ms: float = 0.0
     persist_ms: float = 0.0
     output_ms: float = 0.0
+    # Queue backpressure is part of the steady-state observability surface,
+    # not temporary debug data.
     parse_queue_wait_ms: float = 0.0
     publish_queue_wait_ms: float = 0.0
     process_ms: float = 0.0

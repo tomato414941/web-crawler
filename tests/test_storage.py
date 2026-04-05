@@ -23,6 +23,7 @@ def _reset_schema(dsn: str) -> None:
             cur.execute("DROP TABLE IF EXISTS public.schema_migrations")
             cur.execute("DROP TABLE IF EXISTS public.domain_state")
             cur.execute("DROP TABLE IF EXISTS public.frontier")
+            cur.execute("DROP TABLE IF EXISTS public.crawler_runtime_stats")
             cur.execute("DROP TABLE IF EXISTS public.pages")
         conn.commit()
     finally:
@@ -102,7 +103,9 @@ def test_save_drops_nul_content_to_metadata_only(pg_storage):
     assert pg_storage.save(result) is True
 
     with pg_storage._conn.cursor() as cur:
-        cur.execute("SELECT title, content FROM pages WHERE url = %s", ("https://example.com/file.pdf",))
+        cur.execute(
+            "SELECT title, content FROM pages WHERE url = %s", ("https://example.com/file.pdf",)
+        )
         title, content = cur.fetchone()
 
     assert title is None
@@ -181,6 +184,28 @@ def test_get_stats_includes_frontier_breakdown(pg_storage):
     ]
     assert stats["active_error_breakdown"] == {}
     assert stats["top_error_domains"] == []
+
+
+def test_get_stats_includes_runtime_snapshot(pg_storage):
+    pg_storage.upsert_runtime_stats(
+        "crawler",
+        {
+            "running": True,
+            "parse_queue_size": 2,
+            "publish_queue_size": 1,
+            "parse_queue_wait_max_ms": 12.5,
+        },
+    )
+
+    stats = pg_storage.get_stats()
+
+    assert stats["runtime"]["payload"] == {
+        "running": True,
+        "parse_queue_size": 2,
+        "publish_queue_size": 1,
+        "parse_queue_wait_max_ms": 12.5,
+    }
+    assert stats["runtime"]["updated_at"] > 0
 
 
 def test_get_stats_includes_active_error_breakdown(pg_storage):
