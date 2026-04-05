@@ -129,6 +129,15 @@ class CrawlDaemon:
                     pending = readiness.pending
                     if pending == 0:
                         logger.info("No URLs to crawl, sleeping %ds", self._idle_sleep)
+                        self._persist_runtime_payload(
+                            storage,
+                            self._idle_runtime_payload(
+                                state="idle_no_pending",
+                                pending=pending,
+                                ready=0,
+                                cycle=cycle,
+                            ),
+                        )
                         await self._interruptible_sleep(self._idle_sleep)
                         continue
 
@@ -145,6 +154,15 @@ class CrawlDaemon:
                             "No ready URLs (pending=%d), sleeping %.1fs",
                             pending,
                             sleep_seconds,
+                        )
+                        self._persist_runtime_payload(
+                            storage,
+                            self._idle_runtime_payload(
+                                state="idle_waiting_ready",
+                                pending=pending,
+                                ready=ready,
+                                cycle=cycle,
+                            ),
                         )
                         await self._interruptible_sleep(sleep_seconds)
                         continue
@@ -164,6 +182,22 @@ class CrawlDaemon:
                         _format_error_breakdown(error_breakdown),
                         frontier.stats(),
                     )
+                    self._persist_runtime_payload(
+                        storage,
+                        {
+                            "running": False,
+                            "state": "cycle_complete",
+                            "cycle": cycle,
+                            "pages": pages,
+                            "elapsed_seconds": round(elapsed, 3),
+                            "pages_per_second": round(rate, 3),
+                            "errors": error_breakdown,
+                            "pending": pending,
+                            "ready": ready,
+                            "concurrency": self._concurrency,
+                            "cycle_pages": self._cycle_pages,
+                        },
+                    )
 
                     if not self._shutdown:
                         await self._interruptible_sleep(self._cycle_pause)
@@ -180,15 +214,39 @@ class CrawlDaemon:
 
         logger.info("Daemon shutdown complete")
 
+    def _persist_runtime_payload(self, storage: object, payload: dict[str, object]) -> None:
+        """Persist runtime snapshots when the storage backend supports it."""
+        if hasattr(storage, "upsert_runtime_stats"):
+            storage.upsert_runtime_stats("crawler", payload)
+
+    def _idle_runtime_payload(
+        self,
+        *,
+        state: str,
+        pending: int,
+        ready: int,
+        cycle: int,
+    ) -> dict[str, object]:
+        """Build daemon-level runtime stats outside active crawl cycles."""
+        return {
+            "running": False,
+            "state": state,
+            "cycle": cycle,
+            "pending": pending,
+            "ready": ready,
+            "concurrency": self._concurrency,
+            "cycle_pages": self._cycle_pages,
+        }
+
     async def _report_runtime_stats(self, storage: PgStorage, engine: CrawlerEngine) -> None:
         """Persist crawler runtime stats for API consumers."""
         while engine._running:
-            storage.upsert_runtime_stats("crawler", engine.snapshot_runtime_stats())
+            self._persist_runtime_payload(storage, engine.snapshot_runtime_stats())
             await asyncio.sleep(1.0)
 
     def _flush_runtime_stats(self, storage: PgStorage, engine: CrawlerEngine) -> None:
         """Store one last runtime snapshot on cycle boundaries."""
-        storage.upsert_runtime_stats("crawler", engine.snapshot_runtime_stats())
+        self._persist_runtime_payload(storage, engine.snapshot_runtime_stats())
 
     async def _connect(self) -> tuple[PgStorage | None, Frontier | None]:
         """Connect to Postgres and initialize frontier."""
