@@ -85,6 +85,7 @@ class CrawlDaemon:
         )
         self._shutdown = False
         self._engine: CrawlerEngine | None = None
+        self._last_runtime_snapshot: dict[str, object] = {}
         self._domain_store: DomainStore | None = None
         self._domain_manager = DomainManager(
             user_agent=settings.user_agent,
@@ -182,22 +183,21 @@ class CrawlDaemon:
                         _format_error_breakdown(error_breakdown),
                         frontier.stats(),
                     )
-                    self._persist_runtime_payload(
-                        storage,
+                    cycle_payload = self._idle_runtime_payload(
+                        state="cycle_complete",
+                        pending=pending,
+                        ready=ready,
+                        cycle=cycle,
+                    )
+                    cycle_payload.update(
                         {
-                            "running": False,
-                            "state": "cycle_complete",
-                            "cycle": cycle,
                             "pages": pages,
                             "elapsed_seconds": round(elapsed, 3),
                             "pages_per_second": round(rate, 3),
                             "errors": error_breakdown,
-                            "pending": pending,
-                            "ready": ready,
-                            "concurrency": self._concurrency,
-                            "cycle_pages": self._cycle_pages,
-                        },
+                        }
                     )
+                    self._persist_runtime_payload(storage, cycle_payload)
 
                     if not self._shutdown:
                         await self._interruptible_sleep(self._cycle_pause)
@@ -216,8 +216,9 @@ class CrawlDaemon:
 
     def _persist_runtime_payload(self, storage: object, payload: dict[str, object]) -> None:
         """Persist runtime snapshots when the storage backend supports it."""
+        self._last_runtime_snapshot.update(payload)
         if hasattr(storage, "upsert_runtime_stats"):
-            storage.upsert_runtime_stats("crawler", payload)
+            storage.upsert_runtime_stats("crawler", dict(self._last_runtime_snapshot))
 
     def _idle_runtime_payload(
         self,
@@ -228,7 +229,7 @@ class CrawlDaemon:
         cycle: int,
     ) -> dict[str, object]:
         """Build daemon-level runtime stats outside active crawl cycles."""
-        return {
+        payload = {
             "running": False,
             "state": state,
             "cycle": cycle,
@@ -236,7 +237,24 @@ class CrawlDaemon:
             "ready": ready,
             "concurrency": self._concurrency,
             "cycle_pages": self._cycle_pages,
+            "parse_queue_size": 0,
+            "publish_queue_size": 0,
         }
+        for key in (
+            "pages_crawled",
+            "claimed_pages",
+            "max_pages",
+            "parse_queue_wait_last_ms",
+            "publish_queue_wait_last_ms",
+            "parse_queue_wait_max_ms",
+            "publish_queue_wait_max_ms",
+            "parse_queue_depth_max",
+            "publish_queue_depth_max",
+            "failure_breakdown",
+        ):
+            if key in self._last_runtime_snapshot:
+                payload[key] = self._last_runtime_snapshot[key]
+        return payload
 
     async def _report_runtime_stats(self, storage: PgStorage, engine: CrawlerEngine) -> None:
         """Persist crawler runtime stats for API consumers."""
