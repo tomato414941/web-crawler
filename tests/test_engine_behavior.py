@@ -18,8 +18,9 @@ from crawler.frontier import CrawlTask
 
 
 class FakeFrontier:
-    def __init__(self, tasks: list[CrawlTask]):
+    def __init__(self, tasks: list[CrawlTask], known_counts: dict[str, int] | None = None):
         self.tasks = list(tasks)
+        self.known_counts = known_counts or {}
         self.done: list[str] = []
         self.failed: list[str] = []
         self.failures: list[dict] = []
@@ -40,6 +41,44 @@ class FakeFrontier:
                 continue
             return self.tasks.pop(index)
         return None
+
+    def get_domain_known_counts(self, domains: set[str]):
+        return {domain: self.known_counts.get(domain, 0) for domain in domains}
+
+    def preview_tasks(self, tasks: list[CrawlTask]):
+        prepared = []
+        domain_counts = {task.url.split('/')[2]: self.known_counts.get(task.url.split('/')[2], 0) for task in tasks}
+        batch_counts = {}
+        for task in tasks:
+            domain = task.url.split('/')[2]
+            known_count = domain_counts.get(domain, 0) + batch_counts.get(domain, 0)
+            queue_class = task.queue_class
+            if queue_class is None:
+                if task.discovery_kind == "seed":
+                    queue_class = "exploration"
+                elif task.archetype in {"registry_listing", "redirect_hub"}:
+                    queue_class = "backlog"
+                elif known_count >= 8:
+                    queue_class = "backlog"
+                elif task.discovery_kind == "same_host":
+                    queue_class = "exploration" if task.depth <= 2 else "backlog"
+                elif task.discovery_kind in {"seed_host", "external"}:
+                    queue_class = "exploration" if task.depth <= 3 else "backlog"
+                else:
+                    queue_class = "backlog"
+            prepared.append(CrawlTask(
+                url=task.url,
+                depth=task.depth,
+                priority=task.priority,
+                queue_class=queue_class,
+                discovery_kind=task.discovery_kind,
+                archetype=task.archetype,
+                source_url=task.source_url,
+                added_at=task.added_at,
+                next_fetch_at=task.next_fetch_at,
+            ))
+            batch_counts[domain] = batch_counts.get(domain, 0) + 1
+        return prepared
 
     def add(self, task: CrawlTask):
         self.tasks.append(task)
@@ -285,9 +324,44 @@ async def test_crawler_assigns_discovery_metadata_to_outlinks():
     ].priority
     assert by_url["https://external.example.net/project"].discovery_kind == DISCOVERY_EXTERNAL
     assert by_url["https://external.example.net/project"].archetype == ARCHETYPE_GENERIC_PAGE
+    assert by_url["https://docs.example.com/guide"].queue_class == "exploration"
+    assert by_url["https://external.example.net/project"].queue_class == "exploration"
 
 
 @pytest.mark.asyncio
+@pytest.mark.asyncio
+async def test_crawler_assigns_known_hosts_to_backlog_queue():
+    frontier = FakeFrontier(
+        [CrawlTask(url="https://example.com/", depth=0)],
+        known_counts={"example.com": 8},
+    )
+    domain_manager = FakeDomainManager()
+    fetcher = FakeFetcher(
+        [
+            Response(
+                url="https://example.com/",
+                status=200,
+                content=(b'<a href="https://example.com/guide">same host</a>'),
+                headers={},
+            )
+        ]
+    )
+
+    async with CrawlerEngine(
+        max_pages=1,
+        max_depth=1,
+        same_domain=False,
+        frontier=frontier,
+        domain_manager=domain_manager,
+        seed_urls=["https://example.com/"],
+    ) as engine:
+        engine.fetcher = fetcher
+        await engine.crawl()
+
+    added = frontier.added_batches[0]
+    assert added[0].queue_class == "backlog"
+
+
 async def test_crawler_assigns_page_archetypes_to_outlinks():
     frontier = FakeFrontier([CrawlTask(url="https://example.com/", depth=0)])
     domain_manager = FakeDomainManager()
