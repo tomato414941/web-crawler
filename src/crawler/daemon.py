@@ -4,6 +4,7 @@ import asyncio
 import contextlib
 import logging
 import signal
+import threading
 import time
 
 import psycopg2
@@ -256,23 +257,22 @@ class CrawlDaemon:
                 payload[key] = self._last_runtime_snapshot[key]
         return payload
 
-    async def _report_runtime_stats(
-        self,
-        storage: PgStorage,
-        engine: CrawlerEngine,
-        crawl_task: asyncio.Task[object] | None = None,
-    ) -> None:
+    def _report_runtime_stats(self, stop_event: threading.Event, engine: CrawlerEngine) -> None:
         """Persist crawler runtime stats for API consumers.
 
-        The reporter stays alive for the full crawl task lifetime so stats continue to flow
-        even if the task starts before ``engine.crawl()`` flips ``_running`` to True.
+        Run outside the main event loop so long synchronous frontier/DB work inside crawl
+        workers does not stall runtime visibility.
         """
-        while True:
-            if engine._running:
+        storage = PgStorage(self._postgres_dsn)
+        try:
+            while not stop_event.is_set():
+                if engine._running:
+                    self._persist_runtime_payload(storage, engine.snapshot_runtime_stats())
+                stop_event.wait(1.0)
+        finally:
+            with contextlib.suppress(Exception):
                 self._persist_runtime_payload(storage, engine.snapshot_runtime_stats())
-            if crawl_task is not None and crawl_task.done():
-                break
-            await asyncio.sleep(1.0)
+            storage.close()
 
     def _flush_runtime_stats(self, storage: PgStorage, engine: CrawlerEngine) -> None:
         """Store one last runtime snapshot on cycle boundaries."""
@@ -336,19 +336,19 @@ class CrawlDaemon:
             ) as engine:
                 self._engine = engine
                 self._flush_runtime_stats(runtime_storage, engine)
-                crawl_task = asyncio.create_task(engine.crawl())
-                reporter = asyncio.create_task(
-                    self._report_runtime_stats(runtime_storage, engine, crawl_task)
+                reporter_stop = threading.Event()
+                reporter = threading.Thread(
+                    target=self._report_runtime_stats,
+                    args=(reporter_stop, engine),
+                    daemon=True,
                 )
+                reporter.start()
                 try:
-                    await crawl_task
-                    await reporter
+                    await engine.crawl()
                 finally:
+                    reporter_stop.set()
+                    reporter.join(timeout=2.0)
                     self._flush_runtime_stats(runtime_storage, engine)
-                    if not reporter.done():
-                        reporter.cancel()
-                        with contextlib.suppress(asyncio.CancelledError):
-                            await reporter
                     self._engine = None
                 return engine.pages_crawled, engine.failure_breakdown
         finally:
