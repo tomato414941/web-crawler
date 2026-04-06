@@ -20,6 +20,9 @@ def _reset_schema(dsn: str) -> None:
         with conn.cursor() as cur:
             cur.execute("DROP TABLE IF EXISTS public.schema_migrations")
             cur.execute("DROP TABLE IF EXISTS public.domain_state")
+            cur.execute("DROP TABLE IF EXISTS public.frontier_queue_exploration")
+            cur.execute("DROP TABLE IF EXISTS public.frontier_queue_backlog")
+            cur.execute("DROP TABLE IF EXISTS public.frontier_queue_recrawl")
             cur.execute("DROP TABLE IF EXISTS public.frontier")
             cur.execute("DROP TABLE IF EXISTS public.crawler_runtime_stats")
             cur.execute("DROP TABLE IF EXISTS public.pages")
@@ -39,7 +42,15 @@ def migrated_dsn():
 def test_apply_migrations_creates_expected_tables(migrated_dsn):
     applied = apply_migrations(migrated_dsn)
 
-    assert applied == ["001_initial_schema.sql", "002_runtime_stats.sql", "003_frontier_queue_classes.sql"]
+    assert applied == [
+        "001_initial_schema.sql",
+        "002_runtime_stats.sql",
+        "003_frontier_queue_classes.sql",
+        "004_reclassify_frontier_queue_classes.sql",
+        "005_rebalance_exploration_queue_classes.sql",
+        "006_reclassify_queue_by_domain_novelty.sql",
+        "007_frontier_pending_queue_tables.sql",
+    ]
 
     conn = psycopg2.connect(migrated_dsn)
     try:
@@ -50,7 +61,10 @@ def test_apply_migrations_creates_expected_tables(migrated_dsn):
                        to_regclass('public.frontier'),
                        to_regclass('public.domain_state'),
                        to_regclass('public.schema_migrations'),
-                       to_regclass('public.crawler_runtime_stats')
+                       to_regclass('public.crawler_runtime_stats'),
+                       to_regclass('public.frontier_queue_exploration'),
+                       to_regclass('public.frontier_queue_backlog'),
+                       to_regclass('public.frontier_queue_recrawl')
                 """
             )
             assert cur.fetchone() == (
@@ -59,6 +73,9 @@ def test_apply_migrations_creates_expected_tables(migrated_dsn):
                 "domain_state",
                 "schema_migrations",
                 "crawler_runtime_stats",
+                "frontier_queue_exploration",
+                "frontier_queue_backlog",
+                "frontier_queue_recrawl",
             )
     finally:
         conn.close()

@@ -74,6 +74,12 @@ FRONTIER_ALLOWED_QUEUE_CLASSES = {
     QUEUE_BACKLOG,
     QUEUE_RECRAWL,
 }
+QUEUE_TABLE_BY_CLASS = {
+    QUEUE_EXPLORATION: "frontier_queue_exploration",
+    QUEUE_BACKLOG: "frontier_queue_backlog",
+    QUEUE_RECRAWL: "frontier_queue_recrawl",
+}
+QUEUE_TABLES = tuple(QUEUE_TABLE_BY_CLASS.values())
 
 @dataclass
 class CrawlTask:
@@ -242,13 +248,22 @@ class Frontier:
                     SET status = '{PENDING_STATUS}',
                         lease_token = NULL,
                         lease_expires_at = NULL
-                    WHERE {where}""",
+                    WHERE {where}
+                    RETURNING url""",
                 params,
             )
-            return cur.rowcount
+            rows = cur.fetchall()
+            self._sync_queue_entries(cur, [row[0] for row in rows])
+            return len(rows)
 
     def _assert_current_schema(self) -> None:
         assert_public_table_columns(self._conn, "frontier", FRONTIER_REQUIRED_COLUMNS)
+
+        with self._conn.cursor() as cur:
+            for table_name in QUEUE_TABLES:
+                cur.execute("SELECT to_regclass(%s)", (f"public.{table_name}",))
+                if cur.fetchone()[0] is None:
+                    raise RuntimeError(f"missing frontier queue table: {table_name}")
 
         with self._conn.cursor() as cur:
             cur.execute("SELECT DISTINCT status FROM frontier")
@@ -412,6 +427,36 @@ class Frontier:
             f"{alias}.added_at ASC"
         )
 
+    def _queue_table_sql(self, queue_class: str) -> str:
+        """Return the physical queue table name for a queue class."""
+        return QUEUE_TABLE_BY_CLASS[self._normalize_queue_class(queue_class)]
+
+    def _delete_queue_entries(self, cur, urls: list[str]) -> None:
+        """Remove URLs from all physical pending queue tables."""
+        if not urls:
+            return
+        for table_name in QUEUE_TABLES:
+            cur.execute(f"DELETE FROM {table_name} WHERE url = ANY(%s)", (urls,))
+
+    def _sync_queue_entries(self, cur, urls: list[str]) -> None:
+        """Rebuild physical pending queue rows for canonical frontier URLs."""
+        normalized_urls = sorted({normalize_url(url) for url in urls if url})
+        if not normalized_urls:
+            return
+        self._delete_queue_entries(cur, normalized_urls)
+        for queue_class, table_name in QUEUE_TABLE_BY_CLASS.items():
+            cur.execute(
+                f"""INSERT INTO {table_name} (url, domain)
+                    SELECT url, domain
+                    FROM frontier
+                    WHERE url = ANY(%s)
+                      AND status = '{PENDING_STATUS}'
+                      AND queue_class = %s
+                    ON CONFLICT (url) DO UPDATE
+                    SET domain = EXCLUDED.domain""",
+                (normalized_urls, queue_class),
+            )
+
     def _upsert_tasks(self, tasks: list[CrawlTask]) -> int:
         """Insert new tasks and promote existing metadata when a better discovery wins."""
         if not tasks:
@@ -482,6 +527,7 @@ class Frontier:
                     rows,
                     page_size=200,
                 )
+                self._sync_queue_entries(cur, [task.url for task in tasks])
                 return cur.rowcount
         except Exception:
             self._conn.rollback()
@@ -521,6 +567,12 @@ class Frontier:
             queue_classes=queue_classes,
         )
         order_by = self._lease_order_by_sql("candidate", prioritize_breadth=prioritize_breadth)
+        queue_join = ""
+        if queue_classes and len(queue_classes) == 1:
+            queue_join = (
+                f"JOIN {self._queue_table_sql(queue_classes[0])} AS queue_candidate "
+                "ON queue_candidate.url = candidate.url "
+            )
         params: list[object] = [lease_token, lease_expires_at, *ready_sql.params]
 
         try:
@@ -534,6 +586,7 @@ class Frontier:
                         WHERE url = (
                             SELECT candidate.url
                             FROM frontier AS candidate
+                            {queue_join}
                             WHERE {ready_sql.where}
                             ORDER BY {order_by}
                             LIMIT 1
@@ -548,11 +601,14 @@ class Frontier:
                             source_url,
                             added_at,
                             next_fetch_at,
+                            queue_class,
                             lease_token,
                             lease_expires_at""",
                     params,
                 )
                 row = cur.fetchone()
+                if row:
+                    self._delete_queue_entries(cur, [row[0]])
             self._conn.commit()
         except Exception:
             self._conn.rollback()
@@ -569,6 +625,7 @@ class Frontier:
                 source_url,
                 added_at,
                 next_fetch_at,
+                _queue_class,
                 lease_token,
                 lease_expires_at,
             ) = row
@@ -604,6 +661,12 @@ class Frontier:
             queue_classes=queue_classes,
         )
         order_by = self._lease_order_by_sql("candidate", prioritize_breadth=prioritize_breadth)
+        queue_join = ""
+        if queue_classes and len(queue_classes) == 1:
+            queue_join = (
+                f"JOIN {self._queue_table_sql(queue_classes[0])} AS queue_candidate "
+                "ON queue_candidate.url = candidate.url "
+            )
         params: list[object] = [lease_token, lease_expires_at, *ready_sql.params, count]
 
         try:
@@ -617,6 +680,7 @@ class Frontier:
                         WHERE url IN (
                             SELECT candidate.url
                             FROM frontier AS candidate
+                            {queue_join}
                             WHERE {ready_sql.where}
                             ORDER BY {order_by}
                             LIMIT %s
@@ -631,11 +695,14 @@ class Frontier:
                             source_url,
                             added_at,
                             next_fetch_at,
+                            queue_class,
                             lease_token,
                             lease_expires_at""",
                     params,
                 )
                 rows = cur.fetchall()
+                if rows:
+                    self._delete_queue_entries(cur, [row[0] for row in rows])
             self._conn.commit()
         except Exception:
             self._conn.rollback()
@@ -664,6 +731,7 @@ class Frontier:
                 source_url,
                 added_at,
                 next_fetch_at,
+                _queue_class,
                 row_lease_token,
                 row_lease_expires_at,
             ) in rows
@@ -685,10 +753,13 @@ class Frontier:
                         lease_token = NULL,
                         lease_expires_at = NULL,
                         last_error = NULL
-                    WHERE url = %s{lease_sql}""",
+                    WHERE url = %s{lease_sql}
+                    RETURNING url""",
                 (now, now, normalized, *lease_params),
             )
-            updated = cur.rowcount > 0
+            rows = cur.fetchall()
+            self._delete_queue_entries(cur, [row[0] for row in rows])
+            updated = bool(rows)
         self._conn.commit()
         return updated
 
@@ -732,7 +803,8 @@ class Frontier:
                         last_error = %s,
                         lease_token = NULL,
                         lease_expires_at = NULL
-                    WHERE url = %s{lease_sql}""",
+                    WHERE url = %s{lease_sql}
+                    RETURNING url""",
                 (
                     status,
                     next_fetch_at,
@@ -743,7 +815,9 @@ class Frontier:
                     *lease_params,
                 ),
             )
-            updated = cur.rowcount > 0
+            rows = cur.fetchall()
+            self._sync_queue_entries(cur, [row[0] for row in rows])
+            updated = bool(rows)
         self._conn.commit()
         return updated
 
@@ -757,10 +831,13 @@ class Frontier:
                        next_fetch_at = %s,
                        lease_token = NULL,
                        lease_expires_at = NULL
-                   WHERE status = %s""",
+                   WHERE status = %s
+                   RETURNING url""",
                 (PENDING_STATUS, now, FAILED_STATUS),
             )
-            count = cur.rowcount
+            rows = cur.fetchall()
+            self._sync_queue_entries(cur, [row[0] for row in rows])
+            count = len(rows)
         self._conn.commit()
         return count
 
@@ -848,10 +925,13 @@ class Frontier:
                         SELECT url
                         FROM ranked
                         WHERE rownum <= %s
-                    )""",
+                    )
+                    RETURNING url""",
                 (seed_hosts, max_depth, QUEUE_EXPLORATION, now, per_host),
             )
-            count = cur.rowcount
+            rows = cur.fetchall()
+            self._sync_queue_entries(cur, [row[0] for row in rows])
+            count = len(rows)
         self._conn.commit()
         return count
 
@@ -898,6 +978,7 @@ class Frontier:
                 template="(%s, %s, %s, %s, %s, %s, %s, NULL, %s, %s, 'pending')",
                 page_size=200,
             )
+            self._sync_queue_entries(cur, [row[0] for row in rows])
             affected = cur.rowcount
         self._conn.commit()
         return affected
@@ -907,16 +988,34 @@ class Frontier:
         with self._conn.cursor() as cur:
             cur.execute("SELECT status, COUNT(*) FROM frontier GROUP BY status")
             stats = dict(cur.fetchall())
-        stats["total"] = sum(stats.values())
+            cur.execute(
+                """SELECT queue_class, count(*)
+                   FROM (
+                       SELECT %s AS queue_class, url FROM frontier_queue_exploration
+                       UNION ALL
+                       SELECT %s AS queue_class, url FROM frontier_queue_backlog
+                       UNION ALL
+                       SELECT %s AS queue_class, url FROM frontier_queue_recrawl
+                   ) AS pending_queues
+                   GROUP BY queue_class""",
+                (QUEUE_EXPLORATION, QUEUE_BACKLOG, QUEUE_RECRAWL),
+            )
+            stats["pending_queue_tables"] = dict(cur.fetchall())
+        stats["total"] = sum(value for value in stats.values() if isinstance(value, int))
         return stats
 
     def pending_count(self, queue_classes: list[str] | None = None) -> int:
         """Get count of pending URLs, optionally filtered by queue class."""
+        if queue_classes:
+            with self._conn.cursor() as cur:
+                total = 0
+                for queue_class in queue_classes:
+                    cur.execute(f"SELECT COUNT(*) FROM {self._queue_table_sql(queue_class)}")
+                    total += cur.fetchone()[0]
+                return total
+
         params: list[object] = [PENDING_STATUS]
         sql = "SELECT COUNT(*) FROM frontier WHERE status = %s"
-        if queue_classes:
-            sql += " AND queue_class = ANY(%s)"
-            params.append(queue_classes)
         with self._conn.cursor() as cur:
             cur.execute(sql, params)
             return cur.fetchone()[0]
