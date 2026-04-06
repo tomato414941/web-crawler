@@ -620,6 +620,32 @@ class TestFrontier:
 
         assert queue_class == QUEUE_EXPLORATION
 
+    def test_promote_seed_host_exploration_requeues_shallow_seed_host_pages(self, frontier):
+        frontier.add(
+            CrawlTask(
+                url="http://docs.example.com/guide",
+                depth=1,
+                discovery_kind=DISCOVERY_SEED_HOST,
+                source_url="http://example.com/",
+            )
+        )
+        leased = frontier.lease_next()
+        assert leased is not None
+        frontier.mark_done(leased.url, lease_token=leased.lease_token)
+
+        promoted = frontier.promote_seed_host_exploration(["docs.example.com"], per_host=1, max_depth=2)
+
+        assert promoted == 1
+        with frontier._conn.cursor() as cur:
+            cur.execute(
+                "SELECT status, queue_class FROM frontier WHERE url = %s",
+                ("http://docs.example.com/guide",),
+            )
+            status, queue_class = cur.fetchone()
+
+        assert status == "pending"
+        assert queue_class == QUEUE_EXPLORATION
+
     def test_recrawl_queue_class_can_be_leased_separately(self, frontier):
         frontier.add(CrawlTask(url="http://example.com", depth=0))
         leased = frontier.lease_next()
