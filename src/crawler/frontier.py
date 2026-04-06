@@ -309,11 +309,11 @@ class Frontier:
                         lease_token = NULL,
                         lease_expires_at = NULL
                     WHERE {where}
-                    RETURNING url""",
+                    RETURNING url, domain, priority, next_fetch_at, added_at, queue_class, status""",
                 params,
             )
             rows = cur.fetchall()
-            self._sync_queue_entries(cur, [row[0] for row in rows])
+            self._replace_pending_queue_rows(cur, rows)
             return len(rows)
 
     def _assert_current_schema(self) -> None:
@@ -499,32 +499,70 @@ class Frontier:
         for table_name in QUEUE_TABLES:
             cur.execute(f"DELETE FROM {table_name} WHERE url = ANY(%s)", (urls,))
 
-    def _sync_queue_entries(self, cur, urls: list[str]) -> None:
-        """Rebuild physical pending queue rows for canonical frontier URLs."""
-        normalized_urls = sorted({normalize_url(url) for url in urls if url})
+    def _replace_pending_queue_rows(
+        self,
+        cur,
+        rows: list[tuple[str, str, float, float, float, str, str]],
+    ) -> None:
+        """Replace physical pending queue rows using returned frontier state."""
+        normalized_urls = sorted({normalize_url(url) for url, *_ in rows if url})
         if not normalized_urls:
             return
         self._delete_queue_entries(cur, normalized_urls)
-        for queue_class, table_name in QUEUE_TABLE_BY_CLASS.items():
-            cur.execute(
-                f"""INSERT INTO {table_name} (url, domain, priority, next_fetch_at, added_at)
-                    SELECT url, domain, priority, next_fetch_at, added_at
-                    FROM frontier
-                    WHERE url = ANY(%s)
-                      AND status = '{PENDING_STATUS}'
-                      AND queue_class = %s
+
+        grouped: dict[str, list[tuple[str, str, float, float, float]]] = {
+            queue_class: [] for queue_class in FRONTIER_ALLOWED_QUEUE_CLASSES
+        }
+        for url, domain, priority, next_fetch_at, added_at, queue_class, status in rows:
+            if status != PENDING_STATUS:
+                continue
+            grouped[self._normalize_queue_class(queue_class)].append(
+                (normalize_url(url), domain, priority, next_fetch_at, added_at)
+            )
+
+        for queue_class, pending_rows in grouped.items():
+            if not pending_rows:
+                continue
+            psycopg2.extras.execute_values(
+                cur,
+                f"""INSERT INTO {self._queue_table_sql(queue_class)}
+                        (url, domain, priority, next_fetch_at, added_at)
+                    VALUES %s
                     ON CONFLICT (url) DO UPDATE
                     SET domain = EXCLUDED.domain,
                         priority = EXCLUDED.priority,
                         next_fetch_at = EXCLUDED.next_fetch_at,
                         added_at = EXCLUDED.added_at""",
-                (normalized_urls, queue_class),
+                pending_rows,
+                page_size=200,
             )
+
+    def _sync_queue_entries(self, cur, urls: list[str]) -> None:
+        """Rebuild physical pending queue rows for canonical frontier URLs."""
+        normalized_urls = sorted({normalize_url(url) for url in urls if url})
+        if not normalized_urls:
+            return
+        cur.execute(
+            """SELECT url, domain, priority, next_fetch_at, added_at, queue_class, status
+                FROM frontier
+                WHERE url = ANY(%s)""",
+            (normalized_urls,),
+        )
+        self._replace_pending_queue_rows(cur, cur.fetchall())
 
     def sync_pending_queues(self, urls: list[str]) -> None:
         """Synchronize physical pending queue tables for the given URLs."""
         with self._conn.cursor() as cur:
             self._sync_queue_entries(cur, urls)
+        self._conn.commit()
+
+    def sync_pending_queue_rows(
+        self,
+        rows: list[tuple[str, str, float, float, float, str, str]],
+    ) -> None:
+        """Synchronize queue tables directly from returned frontier rows."""
+        with self._conn.cursor() as cur:
+            self._replace_pending_queue_rows(cur, rows)
         self._conn.commit()
 
     def _upsert_tasks(self, tasks: list[CrawlTask]) -> int:
@@ -593,12 +631,14 @@ class Frontier:
                            OR {new_rank} > {existing_rank}
                            OR EXCLUDED.depth < frontier.depth
                            OR (frontier.source_url IS NULL AND EXCLUDED.source_url IS NOT NULL)
-                           OR EXCLUDED.next_fetch_at < frontier.next_fetch_at""",
+                           OR EXCLUDED.next_fetch_at < frontier.next_fetch_at
+                       RETURNING url, domain, priority, next_fetch_at, added_at, queue_class, status""",
                     rows,
                     page_size=200,
                 )
-                self._sync_queue_entries(cur, [task.url for task in tasks])
-                return cur.rowcount
+                frontier_rows = cur.fetchall()
+                self._replace_pending_queue_rows(cur, frontier_rows)
+                return len(frontier_rows)
         except Exception:
             self._conn.rollback()
             logger.exception("Failed to upsert batch of %d URLs", len(tasks))
@@ -880,7 +920,7 @@ class Frontier:
                         lease_token = NULL,
                         lease_expires_at = NULL
                     WHERE url = %s{lease_sql}
-                    RETURNING url""",
+                    RETURNING url, domain, priority, next_fetch_at, added_at, queue_class, status""",
                 (
                     status,
                     next_fetch_at,
@@ -892,7 +932,7 @@ class Frontier:
                 ),
             )
             rows = cur.fetchall()
-            self._sync_queue_entries(cur, [row[0] for row in rows])
+            self._replace_pending_queue_rows(cur, rows)
             updated = bool(rows)
         self._conn.commit()
         return updated
@@ -908,11 +948,11 @@ class Frontier:
                        lease_token = NULL,
                        lease_expires_at = NULL
                    WHERE status = %s
-                   RETURNING url""",
+                   RETURNING url, domain, priority, next_fetch_at, added_at, queue_class, status""",
                 (PENDING_STATUS, now, FAILED_STATUS),
             )
             rows = cur.fetchall()
-            self._sync_queue_entries(cur, [row[0] for row in rows])
+            self._replace_pending_queue_rows(cur, rows)
             count = len(rows)
         self._conn.commit()
         return count
@@ -958,11 +998,11 @@ class Frontier:
                         FROM ranked
                         WHERE rownum > %s
                     )
-                    RETURNING url""",
+                    RETURNING url, domain, priority, next_fetch_at, added_at, queue_class, status""",
                 (now, low_priority_threshold, deferred_until, keep_ready_per_domain),
             )
             rows = cur.fetchall()
-            self._sync_queue_entries(cur, [row[0] for row in rows])
+            self._replace_pending_queue_rows(cur, rows)
             count = len(rows)
         self._conn.commit()
         return count
@@ -1005,11 +1045,11 @@ class Frontier:
                         FROM ranked
                         WHERE rownum <= %s
                     )
-                    RETURNING url""",
+                    RETURNING url, domain, priority, next_fetch_at, added_at, queue_class, status""",
                 (seed_hosts, max_depth, QUEUE_EXPLORATION, now, per_host),
             )
             rows = cur.fetchall()
-            self._sync_queue_entries(cur, [row[0] for row in rows])
+            self._replace_pending_queue_rows(cur, rows)
             count = len(rows)
         self._conn.commit()
         return count
@@ -1052,13 +1092,15 @@ class Frontier:
                        fail_streak = 0,
                        last_error = NULL,
                        lease_token = NULL,
-                       lease_expires_at = NULL""",
+                       lease_expires_at = NULL
+                   RETURNING url, domain, priority, next_fetch_at, added_at, queue_class, status""",
                 rows,
                 template="(%s, %s, %s, %s, %s, %s, %s, NULL, %s, %s, 'pending')",
                 page_size=200,
             )
-            self._sync_queue_entries(cur, [row[0] for row in rows])
-            affected = cur.rowcount
+            frontier_rows = cur.fetchall()
+            self._replace_pending_queue_rows(cur, frontier_rows)
+            affected = len(frontier_rows)
         self._conn.commit()
         return affected
 

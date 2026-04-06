@@ -410,14 +410,14 @@ class CrawlDaemon:
                        lease_token = NULL,
                        lease_expires_at = NULL
                    WHERE url IN (SELECT url FROM candidates)
-                   RETURNING url""",
+                   RETURNING url, domain, priority, next_fetch_at, added_at, queue_class, status""",
                 (cutoff, batch_size, now),
             )
-            rows = [url for (url,) in cur.fetchall()]
+            rows = cur.fetchall()
             count = len(rows)
         storage.conn.commit()
         if rows:
-            frontier.sync_pending_queues(rows)
+            frontier.sync_pending_queue_rows(rows)
         if count:
             logger.info(
                 "Re-queued %d stale pages (TTL=%ds, pending=%d, target=%d)",
