@@ -297,6 +297,8 @@ class CrawlerEngine:
                     source_url=parent_url,
                 )
             )
+        if hasattr(self.frontier, "preview_tasks"):
+            return self.frontier.preview_tasks(tasks)
         return tasks
 
     async def _process_url(self, task: CrawlTask) -> _FetchedPage | CrawlFailure | None:
