@@ -256,15 +256,22 @@ class CrawlDaemon:
                 payload[key] = self._last_runtime_snapshot[key]
         return payload
 
-    async def _report_runtime_stats(self, storage: PgStorage, engine: CrawlerEngine) -> None:
+    async def _report_runtime_stats(
+        self,
+        storage: PgStorage,
+        engine: CrawlerEngine,
+        crawl_task: asyncio.Task[object] | None = None,
+    ) -> None:
         """Persist crawler runtime stats for API consumers.
 
-        This remains active for the whole cycle so stats still start flowing even if the
-        reporter task is created just before ``engine.crawl()`` flips ``_running`` to True.
+        The reporter stays alive for the full crawl task lifetime so stats continue to flow
+        even if the task starts before ``engine.crawl()`` flips ``_running`` to True.
         """
         while True:
             if engine._running:
                 self._persist_runtime_payload(storage, engine.snapshot_runtime_stats())
+            if crawl_task is not None and crawl_task.done():
+                break
             await asyncio.sleep(1.0)
 
     def _flush_runtime_stats(self, storage: PgStorage, engine: CrawlerEngine) -> None:
@@ -329,14 +336,19 @@ class CrawlDaemon:
             ) as engine:
                 self._engine = engine
                 self._flush_runtime_stats(runtime_storage, engine)
-                reporter = asyncio.create_task(self._report_runtime_stats(runtime_storage, engine))
+                crawl_task = asyncio.create_task(engine.crawl())
+                reporter = asyncio.create_task(
+                    self._report_runtime_stats(runtime_storage, engine, crawl_task)
+                )
                 try:
-                    await engine.crawl()
+                    await crawl_task
+                    await reporter
                 finally:
                     self._flush_runtime_stats(runtime_storage, engine)
-                    reporter.cancel()
-                    with contextlib.suppress(asyncio.CancelledError):
-                        await reporter
+                    if not reporter.done():
+                        reporter.cancel()
+                        with contextlib.suppress(asyncio.CancelledError):
+                            await reporter
                     self._engine = None
                 return engine.pages_crawled, engine.failure_breakdown
         finally:
