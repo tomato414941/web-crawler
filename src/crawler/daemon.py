@@ -13,6 +13,7 @@ from .config import settings
 from .crawl import CrawlerEngine
 from .domain_manager import DomainManager
 from .domain_store import DomainStore
+from .discovery import seed_hosts_from_urls
 from .frontier import Frontier
 from .storage import PgStorage
 
@@ -58,6 +59,7 @@ class CrawlDaemon:
         min_ready_sleep: float | None = None,
     ):
         self._seeds = seeds
+        self._seed_hosts = sorted(seed_hosts_from_urls(seeds))
         self._postgres_dsn = postgres_dsn
         self._cycle_pages = cycle_pages
         self._recrawl_ttl = recrawl_ttl
@@ -367,9 +369,13 @@ class CrawlDaemon:
             return
 
         count = frontier.upsert_seeds(self._seeds, priority=2.0)
+        promoted = 0
+        if hasattr(frontier, "promote_seed_host_exploration") and self._seed_hosts:
+            promoted = frontier.promote_seed_host_exploration(self._seed_hosts, per_host=1, max_depth=2)
         logger.info(
-            "Topped up exploration seeds: added=%d pending_exploration=%d target=%d",
+            "Topped up exploration seeds: added=%d promoted=%d pending_exploration=%d target=%d",
             count,
+            promoted,
             exploration_pending,
             self._min_exploration_pending,
         )
