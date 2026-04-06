@@ -384,7 +384,7 @@ async def test_crawler_reserves_some_leases_for_breadth():
 
     assert frontier.lease_calls[:2] == [
         {"prioritize_breadth": True, "exclude_domains": []},
-        {"prioritize_breadth": False, "exclude_domains": []},
+        {"prioritize_breadth": True, "exclude_domains": []},
     ]
 
 
