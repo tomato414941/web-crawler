@@ -261,6 +261,7 @@ class PgStorage:
 
                 frontier_status: dict[str, int] = {}
                 queue_classes: dict[str, int] = {}
+                pending_queue_classes: dict[str, int] = {}
                 discovery_kinds: dict[str, int] = {}
                 archetypes: dict[str, int] = {}
                 top_pending_domains: list[dict[str, object]] = []
@@ -296,6 +297,14 @@ class PgStorage:
                            GROUP BY queue_class"""
                     )
                     queue_classes = {queue_class: count for queue_class, count in cur.fetchall()}
+
+                    cur.execute(
+                        """SELECT queue_class, COUNT(*)
+                           FROM public.frontier
+                           WHERE status = 'pending'
+                           GROUP BY queue_class"""
+                    )
+                    pending_queue_classes = {queue_class: count for queue_class, count in cur.fetchall()}
 
                     cur.execute(
                         """SELECT discovery_kind, COUNT(*)
@@ -384,6 +393,7 @@ class PgStorage:
             "total_bytes": row[4],
             "frontier_status": frontier_status,
             "queue_classes": queue_classes,
+            "pending_queue_classes": pending_queue_classes,
             "discovery_kinds": discovery_kinds,
             "archetypes": archetypes,
             "top_page_domains": top_page_domains,

@@ -14,6 +14,8 @@ import psycopg2.extras
 from .config import settings
 from .discovery import (
     ARCHETYPE_GENERIC_PAGE,
+    ARCHETYPE_REDIRECT_HUB,
+    ARCHETYPE_REGISTRY_LISTING,
     DISCOVERY_EXTERNAL,
     DISCOVERY_SAME_HOST,
     DISCOVERY_SEED,
@@ -280,10 +282,12 @@ class Frontier:
             return task.queue_class
         if task.discovery_kind == DISCOVERY_SEED:
             return QUEUE_EXPLORATION
+        if task.archetype in {ARCHETYPE_REGISTRY_LISTING, ARCHETYPE_REDIRECT_HUB}:
+            return QUEUE_BACKLOG
         if task.discovery_kind == DISCOVERY_SAME_HOST:
-            return QUEUE_EXPLORATION if task.depth <= 1 else QUEUE_BACKLOG
-        if task.discovery_kind in {DISCOVERY_SEED_HOST, DISCOVERY_EXTERNAL}:
             return QUEUE_EXPLORATION if task.depth <= 2 else QUEUE_BACKLOG
+        if task.discovery_kind in {DISCOVERY_SEED_HOST, DISCOVERY_EXTERNAL}:
+            return QUEUE_EXPLORATION if task.depth <= 3 else QUEUE_BACKLOG
         if task.depth <= 1:
             return QUEUE_EXPLORATION
         return QUEUE_BACKLOG
