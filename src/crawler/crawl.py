@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 from collections import Counter
 from dataclasses import dataclass
 import logging
@@ -126,6 +127,8 @@ class CrawlerEngine:
         self.pg_storage = pg_storage
         self.parser_workers = max(1, min(concurrency, 4))
         self.max_inflight_requests_per_host = max(1, settings.max_inflight_requests_per_host)
+        self._publisher_executor: concurrent.futures.ThreadPoolExecutor | None = None
+        self._publisher_storage = None
 
         self.start_domain = urlparse(start_url).netloc if start_url else ""
         self.seed_hosts = seed_hosts_from_urls(seed_urls or [])
@@ -214,6 +217,12 @@ class CrawlerEngine:
 
     async def close(self):
         """Close all resources."""
+        if self._publisher_executor is not None:
+            self._publisher_executor.shutdown(wait=True, cancel_futures=False)
+            self._publisher_executor = None
+        if self._publisher_storage is not None:
+            self._publisher_storage.close()
+            self._publisher_storage = None
         if hasattr(self.fetcher, "close"):
             await self.fetcher.close()
         if self._owns_domain_manager:
@@ -640,15 +649,24 @@ class CrawlerEngine:
 
     async def _publish_result(self, result: CrawlResult):
         """Persist crawl output outside the fetch worker hot path."""
-        if self.pg_storage:
+        loop = asyncio.get_running_loop()
+        storage = self._publisher_storage or self.pg_storage
+        executor = self._publisher_executor
+        if storage:
             persist_started = time.perf_counter()
-            await asyncio.to_thread(self.pg_storage.save, result)
+            if executor is not None:
+                await loop.run_in_executor(executor, storage.save, result)
+            else:
+                await asyncio.to_thread(storage.save, result)
             result.timings.persist_ms = _elapsed_ms(persist_started)
         if self.output_writer:
             output_started = time.perf_counter()
-            await asyncio.to_thread(self.output_writer.write_one, result)
+            if executor is not None:
+                await loop.run_in_executor(executor, self.output_writer.write_one, result)
+            else:
+                await asyncio.to_thread(self.output_writer.write_one, result)
             result.timings.output_ms = _elapsed_ms(output_started)
-        elif not self.pg_storage:
+        elif not storage:
             self.results.append(result.to_dict())
 
     async def _publisher(self):
@@ -730,6 +748,16 @@ class CrawlerEngine:
 
         self._parse_queue = asyncio.Queue()
         self._publish_queue = asyncio.Queue()
+        publisher_dsn = getattr(self.pg_storage, "_dsn", None) if self.pg_storage is not None else None
+        if publisher_dsn and self._publisher_storage is None:
+            from .storage import PgStorage
+
+            self._publisher_storage = PgStorage(publisher_dsn)
+        if publisher_dsn and self._publisher_executor is None:
+            self._publisher_executor = concurrent.futures.ThreadPoolExecutor(
+                max_workers=1,
+                thread_name_prefix="crawler-publisher",
+            )
         parsers = [asyncio.create_task(self._parser()) for _ in range(self.parser_workers)]
         publisher = asyncio.create_task(self._publisher())
 
