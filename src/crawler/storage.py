@@ -258,6 +258,8 @@ class PgStorage:
 
                 cur.execute("SELECT to_regclass('public.frontier')")
                 frontier_exists = cur.fetchone()[0] is not None
+                cur.execute("SELECT to_regclass('public.frontier_lease_active')")
+                lease_table_exists = cur.fetchone()[0] is not None
 
                 frontier_status: dict[str, int] = {}
                 queue_classes: dict[str, int] = {}
@@ -297,6 +299,9 @@ class PgStorage:
 
                     cur.execute("SELECT status, COUNT(*) FROM public.frontier GROUP BY status")
                     frontier_status = {status: count for status, count in cur.fetchall()}
+                    if lease_table_exists:
+                        cur.execute("SELECT COUNT(*) FROM public.frontier_lease_active")
+                        frontier_status['leased'] = cur.fetchone()[0]
 
                     cur.execute(
                         """SELECT queue_class, COUNT(*)
