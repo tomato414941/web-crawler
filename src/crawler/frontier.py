@@ -80,6 +80,13 @@ QUEUE_TABLE_BY_CLASS = {
     QUEUE_RECRAWL: "frontier_queue_recrawl",
 }
 QUEUE_TABLES = tuple(QUEUE_TABLE_BY_CLASS.values())
+QUEUE_REQUIRED_COLUMNS = {
+    "url",
+    "domain",
+    "priority",
+    "next_fetch_at",
+    "added_at",
+}
 
 @dataclass
 class CrawlTask:
@@ -230,6 +237,59 @@ class Frontier:
             ready_at=f"GREATEST({alias}.next_fetch_at, {next_request_sql}, {backoff_sql})",
         )
 
+    def _queue_ready_sql(
+        self,
+        *,
+        alias: str,
+        now: float,
+        domain: str | None = None,
+        exclude_domains: list[str] | None = None,
+    ) -> _ReadySql:
+        """Build readiness SQL fragments for physical pending queue tables."""
+        next_request_sql = "0"
+        backoff_sql = "0"
+
+        conditions = [f"{alias}.next_fetch_at <= %s"]
+        params: list[object] = [now]
+
+        if self._domain_store is not None:
+            next_request_sql = (
+                "COALESCE(("
+                "SELECT ds.next_request_at "
+                "FROM domain_state AS ds "
+                f"WHERE ds.host_key = {alias}.domain"
+                "), 0)"
+            )
+            backoff_sql = (
+                "COALESCE(("
+                "SELECT ds.backoff_until "
+                "FROM domain_state AS ds "
+                f"WHERE ds.host_key = {alias}.domain"
+                "), 0)"
+            )
+            conditions.append(
+                "NOT EXISTS ("
+                "SELECT 1 FROM domain_state AS gated "
+                f"WHERE gated.host_key = {alias}.domain "
+                "AND (gated.next_request_at > %s OR gated.backoff_until > %s)"
+                ")"
+            )
+            params.extend([now, now])
+
+        if domain:
+            conditions.append(f"{alias}.domain = %s")
+            params.append(domain)
+
+        if exclude_domains:
+            conditions.append(f"NOT ({alias}.domain = ANY(%s))")
+            params.append(exclude_domains)
+
+        return _ReadySql(
+            where=" AND ".join(conditions),
+            params=tuple(params),
+            ready_at=f"GREATEST({alias}.next_fetch_at, {next_request_sql}, {backoff_sql})",
+        )
+
     def _recover_leased_locked(self, now: float, expired_only: bool) -> int:
         """Reset leased URLs back to pending inside an open transaction."""
         if expired_only:
@@ -264,6 +324,7 @@ class Frontier:
                 cur.execute("SELECT to_regclass(%s)", (f"public.{table_name}",))
                 if cur.fetchone()[0] is None:
                     raise RuntimeError(f"missing frontier queue table: {table_name}")
+                assert_public_table_columns(self._conn, table_name, QUEUE_REQUIRED_COLUMNS)
 
         with self._conn.cursor() as cur:
             cur.execute("SELECT DISTINCT status FROM frontier")
@@ -446,16 +507,25 @@ class Frontier:
         self._delete_queue_entries(cur, normalized_urls)
         for queue_class, table_name in QUEUE_TABLE_BY_CLASS.items():
             cur.execute(
-                f"""INSERT INTO {table_name} (url, domain)
-                    SELECT url, domain
+                f"""INSERT INTO {table_name} (url, domain, priority, next_fetch_at, added_at)
+                    SELECT url, domain, priority, next_fetch_at, added_at
                     FROM frontier
                     WHERE url = ANY(%s)
                       AND status = '{PENDING_STATUS}'
                       AND queue_class = %s
                     ON CONFLICT (url) DO UPDATE
-                    SET domain = EXCLUDED.domain""",
+                    SET domain = EXCLUDED.domain,
+                        priority = EXCLUDED.priority,
+                        next_fetch_at = EXCLUDED.next_fetch_at,
+                        added_at = EXCLUDED.added_at""",
                 (normalized_urls, queue_class),
             )
+
+    def sync_pending_queues(self, urls: list[str]) -> None:
+        """Synchronize physical pending queue tables for the given URLs."""
+        with self._conn.cursor() as cur:
+            self._sync_queue_entries(cur, urls)
+        self._conn.commit()
 
     def _upsert_tasks(self, tasks: list[CrawlTask]) -> int:
         """Insert new tasks and promote existing metadata when a better discovery wins."""
@@ -559,20 +629,24 @@ class Frontier:
         lease_token = uuid.uuid4().hex
         duration = self._lease_seconds if lease_seconds is None else lease_seconds
         lease_expires_at = now + duration
-        ready_sql = self._ready_sql(
-            alias="candidate",
-            now=now,
-            domain=domain,
-            exclude_domains=exclude_domains,
-            queue_classes=queue_classes,
-        )
-        order_by = self._lease_order_by_sql("candidate", prioritize_breadth=prioritize_breadth)
-        queue_join = ""
         if queue_classes and len(queue_classes) == 1:
-            queue_join = (
-                f"JOIN {self._queue_table_sql(queue_classes[0])} AS queue_candidate "
-                "ON queue_candidate.url = candidate.url "
+            ready_sql = self._queue_ready_sql(
+                alias="candidate",
+                now=now,
+                domain=domain,
+                exclude_domains=exclude_domains,
             )
+            candidate_from = f"FROM {self._queue_table_sql(queue_classes[0])} AS candidate"
+        else:
+            ready_sql = self._ready_sql(
+                alias="candidate",
+                now=now,
+                domain=domain,
+                exclude_domains=exclude_domains,
+                queue_classes=queue_classes,
+            )
+            candidate_from = "FROM frontier AS candidate"
+        order_by = self._lease_order_by_sql("candidate", prioritize_breadth=prioritize_breadth)
         params: list[object] = [lease_token, lease_expires_at, *ready_sql.params]
 
         try:
@@ -585,8 +659,7 @@ class Frontier:
                             lease_expires_at = %s
                         WHERE url = (
                             SELECT candidate.url
-                            FROM frontier AS candidate
-                            {queue_join}
+                            {candidate_from}
                             WHERE {ready_sql.where}
                             ORDER BY {order_by}
                             LIMIT 1
@@ -653,20 +726,24 @@ class Frontier:
         lease_token = uuid.uuid4().hex
         duration = self._lease_seconds if lease_seconds is None else lease_seconds
         lease_expires_at = now + duration
-        ready_sql = self._ready_sql(
-            alias="candidate",
-            now=now,
-            domain=domain,
-            exclude_domains=exclude_domains,
-            queue_classes=queue_classes,
-        )
-        order_by = self._lease_order_by_sql("candidate", prioritize_breadth=prioritize_breadth)
-        queue_join = ""
         if queue_classes and len(queue_classes) == 1:
-            queue_join = (
-                f"JOIN {self._queue_table_sql(queue_classes[0])} AS queue_candidate "
-                "ON queue_candidate.url = candidate.url "
+            ready_sql = self._queue_ready_sql(
+                alias="candidate",
+                now=now,
+                domain=domain,
+                exclude_domains=exclude_domains,
             )
+            candidate_from = f"FROM {self._queue_table_sql(queue_classes[0])} AS candidate"
+        else:
+            ready_sql = self._ready_sql(
+                alias="candidate",
+                now=now,
+                domain=domain,
+                exclude_domains=exclude_domains,
+                queue_classes=queue_classes,
+            )
+            candidate_from = "FROM frontier AS candidate"
+        order_by = self._lease_order_by_sql("candidate", prioritize_breadth=prioritize_breadth)
         params: list[object] = [lease_token, lease_expires_at, *ready_sql.params, count]
 
         try:
@@ -679,8 +756,7 @@ class Frontier:
                             lease_expires_at = %s
                         WHERE url IN (
                             SELECT candidate.url
-                            FROM frontier AS candidate
-                            {queue_join}
+                            {candidate_from}
                             WHERE {ready_sql.where}
                             ORDER BY {order_by}
                             LIMIT %s
@@ -881,10 +957,13 @@ class Frontier:
                         SELECT url
                         FROM ranked
                         WHERE rownum > %s
-                    )""",
+                    )
+                    RETURNING url""",
                 (now, low_priority_threshold, deferred_until, keep_ready_per_domain),
             )
-            count = cur.rowcount
+            rows = cur.fetchall()
+            self._sync_queue_entries(cur, [row[0] for row in rows])
+            count = len(rows)
         self._conn.commit()
         return count
 
@@ -1014,25 +1093,34 @@ class Frontier:
                     total += cur.fetchone()[0]
                 return total
 
-        params: list[object] = [PENDING_STATUS]
-        sql = "SELECT COUNT(*) FROM frontier WHERE status = %s"
         with self._conn.cursor() as cur:
-            cur.execute(sql, params)
-            return cur.fetchone()[0]
+            total = 0
+            for queue_class in (QUEUE_EXPLORATION, QUEUE_BACKLOG, QUEUE_RECRAWL):
+                cur.execute(f"SELECT COUNT(*) FROM {self._queue_table_sql(queue_class)}")
+                total += cur.fetchone()[0]
+            return total
 
     def readiness(self, now: float | None = None) -> FrontierReadiness:
         """Return a single snapshot of pending and leaseable queue state."""
         now = time.time() if now is None else now
-        ready_sql = self._ready_sql(alias="frontier", now=now)
+        ready_sql = self._queue_ready_sql(alias="queue_entry", now=now)
         with self._conn.cursor() as cur:
             cur.execute(
-                f"""SELECT
-                        COUNT(*) FILTER (WHERE frontier.status = '{PENDING_STATUS}') AS pending,
+                f"""WITH pending_entries AS (
+                        SELECT url, domain, next_fetch_at
+                        FROM frontier_queue_exploration
+                        UNION ALL
+                        SELECT url, domain, next_fetch_at
+                        FROM frontier_queue_backlog
+                        UNION ALL
+                        SELECT url, domain, next_fetch_at
+                        FROM frontier_queue_recrawl
+                    )
+                    SELECT
+                        COUNT(*) AS pending,
                         COUNT(*) FILTER (WHERE {ready_sql.where}) AS ready,
-                        MIN(CASE
-                                WHEN frontier.status = '{PENDING_STATUS}' THEN {ready_sql.ready_at}
-                            END) AS next_ready_at
-                    FROM frontier""",
+                        MIN({ready_sql.ready_at}) AS next_ready_at
+                    FROM pending_entries AS queue_entry""",
                 ready_sql.params,
             )
             pending, ready, next_ready_at = cur.fetchone()

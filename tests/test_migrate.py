@@ -50,6 +50,7 @@ def test_apply_migrations_creates_expected_tables(migrated_dsn):
         "005_rebalance_exploration_queue_classes.sql",
         "006_reclassify_queue_by_domain_novelty.sql",
         "007_frontier_pending_queue_tables.sql",
+        "008_expand_frontier_pending_queue_tables.sql",
     ]
 
     conn = psycopg2.connect(migrated_dsn)
