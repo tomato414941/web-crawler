@@ -268,6 +268,13 @@ class PgStorage:
                 active_error_breakdown: dict[str, int] = {}
                 top_error_domains: list[dict[str, object]] = []
                 runtime: dict[str, object] = {}
+                pending_queue_sql = """SELECT queue_class, url, domain FROM (
+                        SELECT 'exploration' AS queue_class, url, domain FROM public.frontier_queue_exploration
+                        UNION ALL
+                        SELECT 'backlog' AS queue_class, url, domain FROM public.frontier_queue_backlog
+                        UNION ALL
+                        SELECT 'recrawl' AS queue_class, url, domain FROM public.frontier_queue_recrawl
+                    ) AS pending_queue_rows"""
                 cur.execute("SELECT to_regclass('public.crawler_runtime_stats')")
                 runtime_exists = cur.fetchone()[0] is not None
                 if runtime_exists:
@@ -299,12 +306,13 @@ class PgStorage:
                     queue_classes = {queue_class: count for queue_class, count in cur.fetchall()}
 
                     cur.execute(
-                        """SELECT queue_class, COUNT(*)
-                           FROM public.frontier
-                           WHERE status = 'pending'
+                        f"""SELECT queue_class, COUNT(*)
+                           FROM ({pending_queue_sql}) AS pending_queue_rows
                            GROUP BY queue_class"""
                     )
                     pending_queue_classes = {queue_class: count for queue_class, count in cur.fetchall()}
+                    if pending_queue_classes:
+                        frontier_status['pending'] = sum(pending_queue_classes.values())
 
                     cur.execute(
                         """SELECT discovery_kind, COUNT(*)
@@ -321,9 +329,8 @@ class PgStorage:
                     archetypes = {archetype: count for archetype, count in cur.fetchall()}
 
                     cur.execute(
-                        """SELECT domain, COUNT(*)
-                           FROM public.frontier
-                           WHERE status = 'pending'
+                        f"""SELECT domain, COUNT(*)
+                           FROM ({pending_queue_sql}) AS pending_queue_rows
                            GROUP BY domain
                            ORDER BY COUNT(*) DESC, domain ASC
                            LIMIT 10"""
