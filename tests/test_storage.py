@@ -22,6 +22,9 @@ def _reset_schema(dsn: str) -> None:
         with conn.cursor() as cur:
             cur.execute("DROP TABLE IF EXISTS public.schema_migrations")
             cur.execute("DROP TABLE IF EXISTS public.domain_state")
+            cur.execute("DROP TABLE IF EXISTS public.frontier_queue_exploration")
+            cur.execute("DROP TABLE IF EXISTS public.frontier_queue_backlog")
+            cur.execute("DROP TABLE IF EXISTS public.frontier_queue_recrawl")
             cur.execute("DROP TABLE IF EXISTS public.frontier")
             cur.execute("DROP TABLE IF EXISTS public.crawler_runtime_stats")
             cur.execute("DROP TABLE IF EXISTS public.pages")
@@ -166,6 +169,14 @@ def test_get_stats_includes_frontier_breakdown(pg_storage):
                 ('https://example.com/page1', 'example.com', 0, 2.0, 'recrawl', 'seed', 'generic_page', NULL, 1710000000.0, 'done', 1710000000.0),
                 ('https://example.com/page2', 'example.com', 1, 1.25, 'exploration', 'same_host', 'document_page', 'https://example.com/page1', 1710000002.0, 'pending', 1710000002.0),
                 ('https://other.com/page1', 'other.com', 1, 0.8, 'exploration', 'external', 'redirect_hub', 'https://example.com/page1', 1710000003.0, 'pending', 1710000003.0)
+            """
+        )
+        cur.execute(
+            """
+            INSERT INTO frontier_queue_exploration (url, domain, priority, next_fetch_at, added_at)
+            VALUES
+                ('https://example.com/page2', 'example.com', 1.25, 1710000002.0, 1710000002.0),
+                ('https://other.com/page1', 'other.com', 0.8, 1710000003.0, 1710000003.0)
             """
         )
     pg_storage._conn.commit()
