@@ -8,7 +8,14 @@ import pytest
 
 from crawler.domain_store import DomainStore
 from crawler.discovery import DISCOVERY_EXTERNAL, DISCOVERY_SAME_HOST, DISCOVERY_SEED_HOST
-from crawler.frontier import CrawlTask, Frontier, LEASED_STATUS
+from crawler.frontier import (
+    CrawlTask,
+    Frontier,
+    LEASED_STATUS,
+    QUEUE_BACKLOG,
+    QUEUE_EXPLORATION,
+    QUEUE_RECRAWL,
+)
 from crawler.migrate import apply_migrations
 from crawler.urls import normalize_url
 
@@ -182,6 +189,30 @@ class TestFrontier:
             (discovery_kind,) = cur.fetchone()
 
         assert discovery_kind == DISCOVERY_SEED_HOST
+
+    def test_add_classifies_shallow_urls_as_exploration(self, frontier):
+        frontier.add(CrawlTask(url="http://example.com", depth=1, discovery_kind=DISCOVERY_SAME_HOST))
+
+        with frontier._conn.cursor() as cur:
+            cur.execute(
+                "SELECT queue_class FROM frontier WHERE url = %s",
+                ("http://example.com/",),
+            )
+            (queue_class,) = cur.fetchone()
+
+        assert queue_class == QUEUE_EXPLORATION
+
+    def test_add_classifies_deep_urls_as_backlog(self, frontier):
+        frontier.add(CrawlTask(url="http://example.com/deep", depth=3, discovery_kind=DISCOVERY_SAME_HOST))
+
+        with frontier._conn.cursor() as cur:
+            cur.execute(
+                "SELECT queue_class FROM frontier WHERE url = %s",
+                ("http://example.com/deep",),
+            )
+            (queue_class,) = cur.fetchone()
+
+        assert queue_class == QUEUE_BACKLOG
 
     def test_lease_next_returns_task(self, frontier):
         frontier.add(CrawlTask(url="http://example.com", depth=0))
@@ -361,6 +392,15 @@ class TestFrontier:
         assert result is not None
         assert "b.com" in result.url
 
+    def test_lease_next_filters_queue_classes(self, frontier):
+        frontier.add(CrawlTask(url="http://a.com/explore", depth=0))
+        frontier.add(CrawlTask(url="http://a.com/backlog", depth=3))
+
+        result = frontier.lease_next(queue_classes=[QUEUE_BACKLOG])
+
+        assert result is not None
+        assert result.url == "http://a.com/backlog"
+
     def test_lease_next_skips_host_under_backoff(self, frontier):
         self.domain_store.record_failure("a.com", backoff_seconds=60.0, now=time.time())
         frontier.add(CrawlTask(url="http://a.com/page", depth=0, priority=2.0))
@@ -460,6 +500,35 @@ class TestFrontier:
 
         assert next_task is not None
         assert next_task.url == "http://fresh.com/page"
+
+    def test_upsert_seeds_marks_seeds_as_exploration(self, frontier):
+        frontier.upsert_seeds(["http://example.com"])
+
+        with frontier._conn.cursor() as cur:
+            cur.execute(
+                "SELECT queue_class FROM frontier WHERE url = %s",
+                ("http://example.com/",),
+            )
+            (queue_class,) = cur.fetchone()
+
+        assert queue_class == QUEUE_EXPLORATION
+
+    def test_recrawl_queue_class_can_be_leased_separately(self, frontier):
+        frontier.add(CrawlTask(url="http://example.com", depth=0))
+        leased = frontier.lease_next()
+        assert leased is not None
+        frontier.mark_done(leased.url, lease_token=leased.lease_token)
+
+        with frontier._conn.cursor() as cur:
+            cur.execute(
+                "UPDATE frontier SET status = 'pending', queue_class = %s WHERE url = %s",
+                (QUEUE_RECRAWL, leased.url),
+            )
+        frontier._conn.commit()
+
+        recrawl = frontier.lease_next(queue_classes=[QUEUE_RECRAWL])
+        assert recrawl is not None
+        assert recrawl.url == leased.url
 
     def test_mark_done_resets_fail_streak(self, frontier):
         frontier.add(CrawlTask(url="http://example.com", depth=0))

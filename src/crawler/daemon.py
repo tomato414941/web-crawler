@@ -387,6 +387,7 @@ class CrawlDaemon:
                    )
                    UPDATE frontier
                    SET status = 'pending',
+                       queue_class = 'recrawl',
                        next_fetch_at = %s,
                        lease_token = NULL,
                        lease_expires_at = NULL
