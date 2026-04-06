@@ -15,7 +15,7 @@ class _FakeFrontier:
         self.done = []
         self.added = []
 
-    def lease_next(self, prioritize_breadth=False):
+    def lease_next(self, prioritize_breadth=False, **_kwargs):
         task, self._task = self._task, None
         return task
 
