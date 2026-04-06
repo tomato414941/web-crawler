@@ -33,6 +33,7 @@ PAGES_REQUIRED_COLUMNS = {
 }
 FRONTIER_STATS_REQUIRED_COLUMNS = {
     "status",
+    "queue_class",
     "discovery_kind",
     "archetype",
     "domain",
@@ -259,6 +260,7 @@ class PgStorage:
                 frontier_exists = cur.fetchone()[0] is not None
 
                 frontier_status: dict[str, int] = {}
+                queue_classes: dict[str, int] = {}
                 discovery_kinds: dict[str, int] = {}
                 archetypes: dict[str, int] = {}
                 top_pending_domains: list[dict[str, object]] = []
@@ -287,6 +289,13 @@ class PgStorage:
 
                     cur.execute("SELECT status, COUNT(*) FROM public.frontier GROUP BY status")
                     frontier_status = {status: count for status, count in cur.fetchall()}
+
+                    cur.execute(
+                        """SELECT queue_class, COUNT(*)
+                           FROM public.frontier
+                           GROUP BY queue_class"""
+                    )
+                    queue_classes = {queue_class: count for queue_class, count in cur.fetchall()}
 
                     cur.execute(
                         """SELECT discovery_kind, COUNT(*)
@@ -374,6 +383,7 @@ class PgStorage:
             "newest_crawl": row[3],
             "total_bytes": row[4],
             "frontier_status": frontier_status,
+            "queue_classes": queue_classes,
             "discovery_kinds": discovery_kinds,
             "archetypes": archetypes,
             "top_page_domains": top_page_domains,

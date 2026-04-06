@@ -25,6 +25,9 @@ PENDING_STATUS = "pending"
 LEASED_STATUS = "leased"
 DONE_STATUS = "done"
 FAILED_STATUS = "failed"
+QUEUE_EXPLORATION = "exploration"
+QUEUE_BACKLOG = "backlog"
+QUEUE_RECRAWL = "recrawl"
 
 DEFAULT_LEASE_SECONDS = 300.0
 DEFAULT_RETRY_BACKOFF_SECONDS = 30.0
@@ -36,6 +39,7 @@ FRONTIER_REQUIRED_COLUMNS = {
     "domain",
     "depth",
     "priority",
+    "queue_class",
     "discovery_kind",
     "archetype",
     "source_url",
@@ -54,6 +58,11 @@ FRONTIER_ALLOWED_STATUSES = {
     DONE_STATUS,
     FAILED_STATUS,
 }
+FRONTIER_ALLOWED_QUEUE_CLASSES = {
+    QUEUE_EXPLORATION,
+    QUEUE_BACKLOG,
+    QUEUE_RECRAWL,
+}
 
 @dataclass
 class CrawlTask:
@@ -62,6 +71,7 @@ class CrawlTask:
     url: str
     depth: int
     priority: float = 1.0
+    queue_class: str | None = None
     discovery_kind: str = DISCOVERY_SEED
     archetype: str = ARCHETYPE_GENERIC_PAGE
     source_url: str | None = None
@@ -149,6 +159,7 @@ class Frontier:
         now: float,
         domain: str | None = None,
         exclude_domains: list[str] | None = None,
+        queue_classes: list[str] | None = None,
     ) -> _ReadySql:
         """Build readiness SQL fragments for lease and queue inspection."""
         next_request_sql = "0"
@@ -191,6 +202,10 @@ class Frontier:
         if exclude_domains:
             conditions.append(f"NOT ({alias}.domain = ANY(%s))")
             params.append(exclude_domains)
+
+        if queue_classes:
+            conditions.append(f"{alias}.queue_class = ANY(%s)")
+            params.append(queue_classes)
 
         return _ReadySql(
             where=" AND ".join(conditions),
@@ -235,6 +250,43 @@ class Frontier:
             invalid = ", ".join(invalid_statuses)
             raise RuntimeError(f"frontier contains unsupported statuses: {invalid}")
 
+        with self._conn.cursor() as cur:
+            cur.execute("SELECT DISTINCT queue_class FROM frontier")
+            invalid_queue_classes = sorted(
+                queue_class
+                for (queue_class,) in cur.fetchall()
+                if queue_class not in FRONTIER_ALLOWED_QUEUE_CLASSES
+            )
+        if invalid_queue_classes:
+            invalid = ", ".join(invalid_queue_classes)
+            raise RuntimeError(f"frontier contains unsupported queue classes: {invalid}")
+
+    def _normalize_queue_class(self, queue_class: str | None) -> str:
+        """Return a supported frontier queue class."""
+        if queue_class in FRONTIER_ALLOWED_QUEUE_CLASSES:
+            return queue_class
+        return QUEUE_BACKLOG
+
+    def _classify_queue(self, task: CrawlTask) -> str:
+        """Map a task into the queue class used by the scheduler."""
+        if task.queue_class in FRONTIER_ALLOWED_QUEUE_CLASSES:
+            return task.queue_class
+        if task.discovery_kind == DISCOVERY_SEED:
+            return QUEUE_EXPLORATION
+        if task.depth <= 1:
+            return QUEUE_EXPLORATION
+        return QUEUE_BACKLOG
+
+    def _merge_queue_class(self, current: str | None, candidate: str | None) -> str:
+        """Prefer the more urgent queue class when duplicate URLs merge."""
+        current = self._normalize_queue_class(current)
+        candidate = self._normalize_queue_class(candidate)
+        if QUEUE_EXPLORATION in {current, candidate}:
+            return QUEUE_EXPLORATION
+        if QUEUE_BACKLOG in {current, candidate}:
+            return QUEUE_BACKLOG
+        return QUEUE_RECRAWL
+
     def _is_better_task(self, candidate: CrawlTask, current: CrawlTask) -> bool:
         """Return True when candidate should replace current task metadata."""
         if candidate.priority != current.priority:
@@ -248,6 +300,7 @@ class Frontier:
             url=preferred.url,
             depth=min(current.depth, candidate.depth),
             priority=preferred.priority,
+            queue_class=self._merge_queue_class(current.queue_class, candidate.queue_class),
             discovery_kind=preferred.discovery_kind,
             archetype=preferred.archetype,
             source_url=preferred.source_url or current.source_url or candidate.source_url,
@@ -264,6 +317,7 @@ class Frontier:
                 url=normalized_url,
                 depth=task.depth,
                 priority=task.priority,
+                queue_class=self._classify_queue(task),
                 discovery_kind=task.discovery_kind,
                 archetype=task.archetype,
                 source_url=task.source_url,
@@ -318,6 +372,7 @@ class Frontier:
                     domain,
                     task.depth,
                     task.priority,
+                    task.queue_class,
                     task.discovery_kind,
                     task.archetype,
                     task.source_url,
@@ -333,11 +388,20 @@ class Frontier:
                 psycopg2.extras.execute_values(
                     cur,
                     f"""INSERT INTO frontier (
-                           url, domain, depth, priority, discovery_kind, archetype, source_url, added_at, next_fetch_at
+                           url, domain, depth, priority, queue_class, discovery_kind, archetype, source_url, added_at, next_fetch_at
                        )
                        VALUES %s
                        ON CONFLICT (url) DO UPDATE SET
                            priority = GREATEST(frontier.priority, EXCLUDED.priority),
+                           queue_class = CASE
+                               WHEN frontier.queue_class = '{QUEUE_EXPLORATION}'
+                                    OR EXCLUDED.queue_class = '{QUEUE_EXPLORATION}'
+                                   THEN '{QUEUE_EXPLORATION}'
+                               WHEN frontier.queue_class = '{QUEUE_BACKLOG}'
+                                    OR EXCLUDED.queue_class = '{QUEUE_BACKLOG}'
+                                   THEN '{QUEUE_BACKLOG}'
+                               ELSE '{QUEUE_RECRAWL}'
+                           END,
                            discovery_kind = CASE
                                WHEN {new_rank} > {existing_rank}
                                    THEN EXCLUDED.discovery_kind
@@ -383,6 +447,7 @@ class Frontier:
         lease_seconds: float | None = None,
         prioritize_breadth: bool = False,
         exclude_domains: list[str] | None = None,
+        queue_classes: list[str] | None = None,
     ) -> CrawlTask | None:
         """Lease the next ready URL, optionally filtered by domain."""
         now = time.time()
@@ -394,6 +459,7 @@ class Frontier:
             now=now,
             domain=domain,
             exclude_domains=exclude_domains,
+            queue_classes=queue_classes,
         )
         order_by = self._lease_order_by_sql("candidate", prioritize_breadth=prioritize_breadth)
         params: list[object] = [lease_token, lease_expires_at, *ready_sql.params]
@@ -464,6 +530,7 @@ class Frontier:
         lease_seconds: float | None = None,
         prioritize_breadth: bool = False,
         exclude_domains: list[str] | None = None,
+        queue_classes: list[str] | None = None,
     ) -> list[CrawlTask]:
         """Lease a batch of ready URLs."""
         now = time.time()
@@ -475,6 +542,7 @@ class Frontier:
             now=now,
             domain=domain,
             exclude_domains=exclude_domains,
+            queue_classes=queue_classes,
         )
         order_by = self._lease_order_by_sql("candidate", prioritize_breadth=prioritize_breadth)
         params: list[object] = [lease_token, lease_expires_at, *ready_sql.params, count]
@@ -667,6 +735,7 @@ class Frontier:
                             ) AS rownum
                         FROM frontier
                         WHERE status = '{PENDING_STATUS}'
+                          AND queue_class = '{QUEUE_BACKLOG}'
                           AND next_fetch_at <= %s
                           AND priority <= %s
                     )
@@ -693,17 +762,28 @@ class Frontier:
         for url in urls:
             normalized = normalize_url(url)
             domain = urlparse(normalized).netloc
-            rows.append((normalized, domain, 0, priority, DISCOVERY_SEED, ARCHETYPE_GENERIC_PAGE, now, now))
+            rows.append((
+                normalized,
+                domain,
+                0,
+                priority,
+                QUEUE_EXPLORATION,
+                DISCOVERY_SEED,
+                ARCHETYPE_GENERIC_PAGE,
+                now,
+                now,
+            ))
 
         with self._conn.cursor() as cur:
             psycopg2.extras.execute_values(
                 cur,
                 """INSERT INTO frontier (
-                       url, domain, depth, priority, discovery_kind, archetype, source_url, added_at, next_fetch_at, status
+                       url, domain, depth, priority, queue_class, discovery_kind, archetype, source_url, added_at, next_fetch_at, status
                    )
                    VALUES %s
                    ON CONFLICT (url) DO UPDATE SET
                        status = 'pending',
+                       queue_class = EXCLUDED.queue_class,
                        added_at = EXCLUDED.added_at,
                        next_fetch_at = EXCLUDED.next_fetch_at,
                        priority = EXCLUDED.priority,
@@ -712,7 +792,7 @@ class Frontier:
                        lease_token = NULL,
                        lease_expires_at = NULL""",
                 rows,
-                template="(%s, %s, %s, %s, %s, %s, NULL, %s, %s, 'pending')",
+                template="(%s, %s, %s, %s, %s, %s, %s, NULL, %s, %s, 'pending')",
                 page_size=200,
             )
             affected = cur.rowcount

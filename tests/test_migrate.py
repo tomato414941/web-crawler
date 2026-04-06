@@ -39,7 +39,7 @@ def migrated_dsn():
 def test_apply_migrations_creates_expected_tables(migrated_dsn):
     applied = apply_migrations(migrated_dsn)
 
-    assert applied == ["001_initial_schema.sql", "002_runtime_stats.sql"]
+    assert applied == ["001_initial_schema.sql", "002_runtime_stats.sql", "003_frontier_queue_classes.sql"]
 
     conn = psycopg2.connect(migrated_dsn)
     try:
