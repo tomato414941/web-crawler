@@ -176,6 +176,7 @@ def test_get_stats_includes_frontier_breakdown(pg_storage):
     assert stats["domains"] == 2
     assert stats["frontier_status"] == {"done": 1, "pending": 2}
     assert stats["queue_classes"] == {"exploration": 2, "recrawl": 1}
+    assert stats["pending_queue_classes"] == {"exploration": 2}
     assert stats["discovery_kinds"] == {"external": 1, "same_host": 1, "seed": 1}
     assert stats["archetypes"] == {"document_page": 1, "generic_page": 1, "redirect_hub": 1}
     assert stats["top_page_domains"][0] == {"domain": "example.com", "count": 1}
