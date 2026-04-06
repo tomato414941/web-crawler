@@ -351,6 +351,16 @@ class TestFrontier:
         assert result is not None
         assert "a.com" in result.url
 
+    def test_lease_next_excludes_active_domains(self, frontier):
+        frontier.add(CrawlTask(url="http://a.com/1", depth=0, priority=3.0))
+        frontier.add(CrawlTask(url="http://a.com/2", depth=0, priority=2.0))
+        frontier.add(CrawlTask(url="http://b.com/1", depth=0, priority=1.0))
+
+        result = frontier.lease_next(exclude_domains=["a.com"])
+
+        assert result is not None
+        assert "b.com" in result.url
+
     def test_lease_next_skips_host_under_backoff(self, frontier):
         self.domain_store.record_failure("a.com", backoff_seconds=60.0, now=time.time())
         frontier.add(CrawlTask(url="http://a.com/page", depth=0, priority=2.0))

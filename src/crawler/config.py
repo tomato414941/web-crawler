@@ -10,6 +10,7 @@ class CrawlerSettings(BaseSettings):
     user_agent: str = "WebCrawler/0.1 (+https://github.com/web-crawler)"
     max_connections: int = 100
     max_keepalive_connections: int = 20
+    max_inflight_requests_per_host: int = 1
     frontier_lease_seconds: float = 300.0
     frontier_retry_backoff_seconds: float = 30.0
     frontier_max_retry_backoff_seconds: float = 1800.0

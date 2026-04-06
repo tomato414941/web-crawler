@@ -26,10 +26,18 @@ class FakeFrontier:
         self.added_batches: list[list[CrawlTask]] = []
         self.lease_calls: list[dict[str, object]] = []
 
-    def lease_next(self, prioritize_breadth: bool = False, **_: object):
-        self.lease_calls.append({"prioritize_breadth": prioritize_breadth})
-        if self.tasks:
-            return self.tasks.pop(0)
+    def lease_next(self, prioritize_breadth: bool = False, **kwargs: object):
+        exclude_domains = set(kwargs.get("exclude_domains") or [])
+        self.lease_calls.append(
+            {
+                "prioritize_breadth": prioritize_breadth,
+                "exclude_domains": sorted(exclude_domains),
+            }
+        )
+        for index, task in enumerate(self.tasks):
+            if task.url.split('/')[2] in exclude_domains:
+                continue
+            return self.tasks.pop(index)
         return None
 
     def add(self, task: CrawlTask):
@@ -375,6 +383,38 @@ async def test_crawler_reserves_some_leases_for_breadth():
         await engine.crawl()
 
     assert frontier.lease_calls[:2] == [
-        {"prioritize_breadth": True},
-        {"prioritize_breadth": False},
+        {"prioritize_breadth": True, "exclude_domains": []},
+        {"prioritize_breadth": False, "exclude_domains": []},
     ]
+
+
+
+@pytest.mark.asyncio
+async def test_crawler_avoids_leasing_same_host_while_request_in_flight():
+    frontier = FakeFrontier(
+        [
+            CrawlTask(url="https://a.com/1", depth=0),
+            CrawlTask(url="https://a.com/2", depth=0),
+            CrawlTask(url="https://b.com/1", depth=0),
+        ]
+    )
+    domain_manager = FakeDomainManager()
+    fetcher = FakeFetcher(
+        [
+            Response(url="https://a.com/1", status=200, content=b"<html>a1</html>", headers={}),
+            Response(url="https://b.com/1", status=200, content=b"<html>b1</html>", headers={}),
+        ],
+        delay=0.05,
+    )
+
+    async with CrawlerEngine(
+        max_pages=2,
+        concurrency=2,
+        frontier=frontier,
+        domain_manager=domain_manager,
+    ) as engine:
+        engine.fetcher = fetcher
+        await engine.crawl()
+
+    assert fetcher.calls == ["https://a.com/1", "https://b.com/1"]
+    assert frontier.lease_calls[1]["exclude_domains"] == ["a.com"]

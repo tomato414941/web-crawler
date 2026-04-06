@@ -148,6 +148,7 @@ class Frontier:
         alias: str,
         now: float,
         domain: str | None = None,
+        exclude_domains: list[str] | None = None,
     ) -> _ReadySql:
         """Build readiness SQL fragments for lease and queue inspection."""
         next_request_sql = "0"
@@ -186,6 +187,10 @@ class Frontier:
         if domain:
             conditions.append(f"{alias}.domain = %s")
             params.append(domain)
+
+        if exclude_domains:
+            conditions.append(f"NOT ({alias}.domain = ANY(%s))")
+            params.append(exclude_domains)
 
         return _ReadySql(
             where=" AND ".join(conditions),
@@ -395,13 +400,19 @@ class Frontier:
         domain: str | None = None,
         lease_seconds: float | None = None,
         prioritize_breadth: bool = False,
+        exclude_domains: list[str] | None = None,
     ) -> CrawlTask | None:
         """Lease the next ready URL, optionally filtered by domain."""
         now = time.time()
         lease_token = uuid.uuid4().hex
         duration = self._lease_seconds if lease_seconds is None else lease_seconds
         lease_expires_at = now + duration
-        ready_sql = self._ready_sql(alias="candidate", now=now, domain=domain)
+        ready_sql = self._ready_sql(
+            alias="candidate",
+            now=now,
+            domain=domain,
+            exclude_domains=exclude_domains,
+        )
         order_by = self._lease_order_by_sql("candidate", prioritize_breadth=prioritize_breadth)
         params: list[object] = [lease_token, lease_expires_at, *ready_sql.params]
 
@@ -470,13 +481,19 @@ class Frontier:
         domain: str | None = None,
         lease_seconds: float | None = None,
         prioritize_breadth: bool = False,
+        exclude_domains: list[str] | None = None,
     ) -> list[CrawlTask]:
         """Lease a batch of ready URLs."""
         now = time.time()
         lease_token = uuid.uuid4().hex
         duration = self._lease_seconds if lease_seconds is None else lease_seconds
         lease_expires_at = now + duration
-        ready_sql = self._ready_sql(alias="candidate", now=now, domain=domain)
+        ready_sql = self._ready_sql(
+            alias="candidate",
+            now=now,
+            domain=domain,
+            exclude_domains=exclude_domains,
+        )
         order_by = self._lease_order_by_sql("candidate", prioritize_breadth=prioritize_breadth)
         params: list[object] = [lease_token, lease_expires_at, *ready_sql.params, count]
 
