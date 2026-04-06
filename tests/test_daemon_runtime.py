@@ -1,18 +1,22 @@
 """Runtime reporting tests for crawl daemon."""
 
-import asyncio
-
-import pytest
+import threading
+import time
 
 from crawler.daemon import CrawlDaemon
 
 
 class _FakeStorage:
-    def __init__(self):
-        self.payloads = []
+    payloads: list[tuple[str, dict]] = []
+
+    def __init__(self, dsn):
+        self.dsn = dsn
 
     def upsert_runtime_stats(self, component, payload):
         self.payloads.append((component, dict(payload)))
+
+    def close(self):
+        return None
 
 
 class _FakeEngine:
@@ -25,29 +29,34 @@ class _FakeEngine:
         return {"running": self._running, "tick": self.calls}
 
 
-@pytest.mark.asyncio
-async def test_report_runtime_stats_waits_for_engine_to_start():
+def test_report_runtime_stats_waits_for_engine_to_start(monkeypatch):
     daemon = CrawlDaemon(
         seeds=["https://example.com/"],
         postgres_dsn="postgresql://unused",
     )
-    storage = _FakeStorage()
+    _FakeStorage.payloads = []
+    monkeypatch.setattr("crawler.daemon.PgStorage", _FakeStorage)
     engine = _FakeEngine()
+    stop_event = threading.Event()
 
-    task = asyncio.create_task(daemon._report_runtime_stats(storage, engine))
+    reporter = threading.Thread(
+        target=daemon._report_runtime_stats,
+        args=(stop_event, engine),
+        daemon=True,
+    )
+    reporter.start()
     try:
-        await asyncio.sleep(0.05)
-        assert storage.payloads == []
+        time.sleep(0.05)
+        assert _FakeStorage.payloads == []
 
         engine._running = True
-        await asyncio.sleep(1.1)
+        time.sleep(1.1)
 
-        assert storage.payloads
-        component, payload = storage.payloads[-1]
+        assert _FakeStorage.payloads
+        component, payload = _FakeStorage.payloads[-1]
         assert component == "crawler"
         assert payload["running"] is True
         assert payload["tick"] >= 1
     finally:
-        task.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await task
+        stop_event.set()
+        reporter.join(timeout=2.0)
