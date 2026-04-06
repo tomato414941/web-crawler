@@ -290,33 +290,15 @@ class Frontier:
 
     def _lease_order_by_sql(self, alias: str, prioritize_breadth: bool) -> str:
         """Return the ORDER BY clause used for lease selection."""
-        host_pressure = (
-            "COALESCE(("
-            "SELECT COUNT(*) "
-            "FROM frontier AS pressure "
-            f"WHERE pressure.status = '{PENDING_STATUS}' "
-            f"AND pressure.domain = {alias}.domain"
-            "), 0)"
-        )
         if prioritize_breadth:
-            host_inventory = (
-                "COALESCE(("
-                "SELECT COUNT(*) "
-                "FROM frontier AS known "
-                f"WHERE known.domain = {alias}.domain"
-                "), 0)"
-            )
             return (
-                f"{host_inventory} ASC, "
-                f"{host_pressure} ASC, "
-                f"{alias}.priority DESC, "
                 f"{alias}.next_fetch_at ASC, "
-                f"{alias}.added_at ASC"
+                f"{alias}.added_at ASC, "
+                f"{alias}.priority DESC"
             )
 
         return (
             f"{alias}.priority DESC, "
-            f"{host_pressure} ASC, "
             f"{alias}.next_fetch_at ASC, "
             f"{alias}.added_at ASC"
         )
