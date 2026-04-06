@@ -90,7 +90,6 @@ class FrontierReadiness:
 class _ReadySql:
     """SQL fragments for pending URL readiness checks."""
 
-    join: str
     where: str
     params: tuple[object, ...]
     ready_at: str
@@ -150,16 +149,10 @@ class Frontier:
         now: float,
         domain: str | None = None,
         exclude_domains: list[str] | None = None,
-        state_alias: str = "domain_state",
     ) -> _ReadySql:
         """Build readiness SQL fragments for lease and queue inspection."""
-        join = ""
         next_request_sql = "0"
         backoff_sql = "0"
-        if self._domain_store is not None:
-            join = f" LEFT JOIN domain_state AS {state_alias} ON {state_alias}.host_key = {alias}.domain"
-            next_request_sql = f"COALESCE({state_alias}.next_request_at, 0)"
-            backoff_sql = f"COALESCE({state_alias}.backoff_until, 0)"
 
         conditions = [
             f"{alias}.status = '{PENDING_STATUS}'",
@@ -168,11 +161,26 @@ class Frontier:
         params: list[object] = [now]
 
         if self._domain_store is not None:
-            conditions.extend(
-                [
-                    f"{next_request_sql} <= %s",
-                    f"{backoff_sql} <= %s",
-                ]
+            next_request_sql = (
+                "COALESCE(("
+                "SELECT ds.next_request_at "
+                "FROM domain_state AS ds "
+                f"WHERE ds.host_key = {alias}.domain"
+                "), 0)"
+            )
+            backoff_sql = (
+                "COALESCE(("
+                "SELECT ds.backoff_until "
+                "FROM domain_state AS ds "
+                f"WHERE ds.host_key = {alias}.domain"
+                "), 0)"
+            )
+            conditions.append(
+                "NOT EXISTS ("
+                "SELECT 1 FROM domain_state AS gated "
+                f"WHERE gated.host_key = {alias}.domain "
+                "AND (gated.next_request_at > %s OR gated.backoff_until > %s)"
+                ")"
             )
             params.extend([now, now])
 
@@ -185,7 +193,6 @@ class Frontier:
             params.append(exclude_domains)
 
         return _ReadySql(
-            join=join,
             where=" AND ".join(conditions),
             params=tuple(params),
             ready_at=f"GREATEST({alias}.next_fetch_at, {next_request_sql}, {backoff_sql})",
@@ -401,7 +408,7 @@ class Frontier:
                             lease_expires_at = %s
                         WHERE url = (
                             SELECT candidate.url
-                            FROM frontier AS candidate{ready_sql.join}
+                            FROM frontier AS candidate
                             WHERE {ready_sql.where}
                             ORDER BY {order_by}
                             LIMIT 1
@@ -482,7 +489,7 @@ class Frontier:
                             lease_expires_at = %s
                         WHERE url IN (
                             SELECT candidate.url
-                            FROM frontier AS candidate{ready_sql.join}
+                            FROM frontier AS candidate
                             WHERE {ready_sql.where}
                             ORDER BY {order_by}
                             LIMIT %s
@@ -732,7 +739,7 @@ class Frontier:
     def readiness(self, now: float | None = None) -> FrontierReadiness:
         """Return a single snapshot of pending and leaseable queue state."""
         now = time.time() if now is None else now
-        ready_sql = self._ready_sql(alias="frontier", now=now, state_alias="frontier_state")
+        ready_sql = self._ready_sql(alias="frontier", now=now)
         with self._conn.cursor() as cur:
             cur.execute(
                 f"""SELECT
@@ -741,7 +748,7 @@ class Frontier:
                         MIN(CASE
                                 WHEN frontier.status = '{PENDING_STATUS}' THEN {ready_sql.ready_at}
                             END) AS next_ready_at
-                    FROM frontier{ready_sql.join}""",
+                    FROM frontier""",
                 ready_sql.params,
             )
             pending, ready, next_ready_at = cur.fetchone()
