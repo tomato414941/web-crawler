@@ -7,7 +7,13 @@ import psycopg2
 import pytest
 
 from crawler.domain_store import DomainStore
-from crawler.discovery import DISCOVERY_EXTERNAL, DISCOVERY_SAME_HOST, DISCOVERY_SEED_HOST
+from crawler.discovery import (
+    ARCHETYPE_REDIRECT_HUB,
+    ARCHETYPE_REGISTRY_LISTING,
+    DISCOVERY_EXTERNAL,
+    DISCOVERY_SAME_HOST,
+    DISCOVERY_SEED_HOST,
+)
 from crawler.frontier import (
     CrawlTask,
     Frontier,
@@ -202,6 +208,18 @@ class TestFrontier:
 
         assert queue_class == QUEUE_EXPLORATION
 
+    def test_add_classifies_same_host_urls_as_exploration_through_depth_two(self, frontier):
+        frontier.add(CrawlTask(url="http://example.com/guide", depth=2, discovery_kind=DISCOVERY_SAME_HOST))
+
+        with frontier._conn.cursor() as cur:
+            cur.execute(
+                "SELECT queue_class FROM frontier WHERE url = %s",
+                ("http://example.com/guide",),
+            )
+            (queue_class,) = cur.fetchone()
+
+        assert queue_class == QUEUE_EXPLORATION
+
     def test_add_classifies_seed_host_urls_as_exploration_through_depth_two(self, frontier):
         frontier.add(CrawlTask(url="http://docs.example.com/guide", depth=2, discovery_kind=DISCOVERY_SEED_HOST))
 
@@ -213,6 +231,56 @@ class TestFrontier:
             (queue_class,) = cur.fetchone()
 
         assert queue_class == QUEUE_EXPLORATION
+
+    def test_add_classifies_seed_host_urls_as_exploration_through_depth_three(self, frontier):
+        frontier.add(CrawlTask(url="http://docs.example.com/guide", depth=3, discovery_kind=DISCOVERY_SEED_HOST))
+
+        with frontier._conn.cursor() as cur:
+            cur.execute(
+                "SELECT queue_class FROM frontier WHERE url = %s",
+                ("http://docs.example.com/guide",),
+            )
+            (queue_class,) = cur.fetchone()
+
+        assert queue_class == QUEUE_EXPLORATION
+
+    def test_add_classifies_registry_listings_as_backlog_even_when_shallow(self, frontier):
+        frontier.add(
+            CrawlTask(
+                url="http://example.com/index",
+                depth=1,
+                discovery_kind=DISCOVERY_SAME_HOST,
+                archetype=ARCHETYPE_REGISTRY_LISTING,
+            )
+        )
+
+        with frontier._conn.cursor() as cur:
+            cur.execute(
+                "SELECT queue_class FROM frontier WHERE url = %s",
+                ("http://example.com/index",),
+            )
+            (queue_class,) = cur.fetchone()
+
+        assert queue_class == QUEUE_BACKLOG
+
+    def test_add_classifies_redirect_hubs_as_backlog_even_when_shallow(self, frontier):
+        frontier.add(
+            CrawlTask(
+                url="http://example.com/go/rfc",
+                depth=1,
+                discovery_kind=DISCOVERY_EXTERNAL,
+                archetype=ARCHETYPE_REDIRECT_HUB,
+            )
+        )
+
+        with frontier._conn.cursor() as cur:
+            cur.execute(
+                "SELECT queue_class FROM frontier WHERE url = %s",
+                ("http://example.com/go/rfc",),
+            )
+            (queue_class,) = cur.fetchone()
+
+        assert queue_class == QUEUE_BACKLOG
 
     def test_add_classifies_external_deep_urls_as_backlog(self, frontier):
         frontier.add(CrawlTask(url="http://external.example.com/deep", depth=3, discovery_kind=DISCOVERY_EXTERNAL))
