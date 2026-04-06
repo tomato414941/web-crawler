@@ -12,7 +12,14 @@ from urllib.parse import urlparse
 import psycopg2.extras
 
 from .config import settings
-from .discovery import ARCHETYPE_GENERIC_PAGE, DISCOVERY_SEED, discovery_rank
+from .discovery import (
+    ARCHETYPE_GENERIC_PAGE,
+    DISCOVERY_EXTERNAL,
+    DISCOVERY_SAME_HOST,
+    DISCOVERY_SEED,
+    DISCOVERY_SEED_HOST,
+    discovery_rank,
+)
 from .schema import assert_public_table_columns
 from .urls import normalize_url
 
@@ -273,6 +280,10 @@ class Frontier:
             return task.queue_class
         if task.discovery_kind == DISCOVERY_SEED:
             return QUEUE_EXPLORATION
+        if task.discovery_kind == DISCOVERY_SAME_HOST:
+            return QUEUE_EXPLORATION if task.depth <= 1 else QUEUE_BACKLOG
+        if task.discovery_kind in {DISCOVERY_SEED_HOST, DISCOVERY_EXTERNAL}:
+            return QUEUE_EXPLORATION if task.depth <= 2 else QUEUE_BACKLOG
         if task.depth <= 1:
             return QUEUE_EXPLORATION
         return QUEUE_BACKLOG
