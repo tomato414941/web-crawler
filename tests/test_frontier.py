@@ -108,6 +108,10 @@ class TestFrontier:
         conn.autocommit = False
         with conn.cursor() as cur:
             cur.execute("DROP TABLE IF EXISTS schema_migrations")
+            cur.execute("DROP TABLE IF EXISTS frontier_lease_active")
+            cur.execute("DROP TABLE IF EXISTS frontier_queue_exploration")
+            cur.execute("DROP TABLE IF EXISTS frontier_queue_backlog")
+            cur.execute("DROP TABLE IF EXISTS frontier_queue_recrawl")
             cur.execute("DROP TABLE IF EXISTS frontier")
             cur.execute("DROP TABLE IF EXISTS domain_state")
             cur.execute("DROP TABLE IF EXISTS pages")
@@ -374,8 +378,11 @@ class TestFrontier:
         with frontier._conn.cursor() as cur:
             cur.execute("SELECT status FROM frontier WHERE url = %s", ("http://example.com/",))
             (status,) = cur.fetchone()
+            cur.execute("SELECT count(*) FROM frontier_lease_active WHERE url = %s", ("http://example.com/",))
+            (active_count,) = cur.fetchone()
 
         assert status == LEASED_STATUS
+        assert active_count == 1
 
     def test_lease_batch(self, frontier):
         for i in range(5):
@@ -388,6 +395,10 @@ class TestFrontier:
         result = frontier.lease_next()
         frontier.mark_done(result.url, lease_token=result.lease_token)
         assert frontier.stats().get("done", 0) == 1
+        with frontier._conn.cursor() as cur:
+            cur.execute("SELECT count(*) FROM frontier_lease_active WHERE url = %s", (result.url,))
+            (active_count,) = cur.fetchone()
+        assert active_count == 0
 
     def test_mark_failed(self, frontier):
         frontier.add(CrawlTask(url="http://example.com", depth=0))
