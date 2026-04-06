@@ -84,6 +84,7 @@ class CrawlDaemon:
         self._min_ready_sleep = (
             settings.daemon_min_ready_sleep if min_ready_sleep is None else min_ready_sleep
         )
+        self._min_exploration_pending = max(1, min(len(self._seeds), settings.daemon_min_exploration_pending))
         self._shutdown = False
         self._engine: CrawlerEngine | None = None
         self._last_runtime_snapshot: dict[str, object] = {}
@@ -355,12 +356,23 @@ class CrawlDaemon:
             runtime_storage.close()
 
     def _ensure_seeds(self, frontier: Frontier):
-        """Re-seed frontier when empty."""
-        if frontier.pending_count() > 0:
+        """Re-seed when the exploration queue is starved."""
+        if frontier.pending_count() == 0:
+            count = frontier.upsert_seeds(self._seeds, priority=2.0)
+            logger.info("Re-seeded %d URLs", count)
+            return
+
+        exploration_pending = frontier.pending_count(queue_classes=["exploration"])
+        if exploration_pending >= self._min_exploration_pending:
             return
 
         count = frontier.upsert_seeds(self._seeds, priority=2.0)
-        logger.info("Re-seeded %d URLs", count)
+        logger.info(
+            "Topped up exploration seeds: added=%d pending_exploration=%d target=%d",
+            count,
+            exploration_pending,
+            self._min_exploration_pending,
+        )
 
     def _recrawl_stale(self, storage: PgStorage, frontier: Frontier):
         """Re-queue pages older than recrawl_ttl."""

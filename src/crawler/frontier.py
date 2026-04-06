@@ -866,13 +866,15 @@ class Frontier:
         stats["total"] = sum(stats.values())
         return stats
 
-    def pending_count(self) -> int:
-        """Get count of pending URLs."""
+    def pending_count(self, queue_classes: list[str] | None = None) -> int:
+        """Get count of pending URLs, optionally filtered by queue class."""
+        params: list[object] = [PENDING_STATUS]
+        sql = "SELECT COUNT(*) FROM frontier WHERE status = %s"
+        if queue_classes:
+            sql += " AND queue_class = ANY(%s)"
+            params.append(queue_classes)
         with self._conn.cursor() as cur:
-            cur.execute(
-                "SELECT COUNT(*) FROM frontier WHERE status = %s",
-                (PENDING_STATUS,),
-            )
+            cur.execute(sql, params)
             return cur.fetchone()[0]
 
     def readiness(self, now: float | None = None) -> FrontierReadiness:

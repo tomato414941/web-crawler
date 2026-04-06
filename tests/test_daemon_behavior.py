@@ -148,7 +148,7 @@ async def test_daemon_does_not_auto_requeue_failed_urls():
         def __init__(self):
             self.requeue_failed_calls = 0
 
-        def pending_count(self):
+        def pending_count(self, queue_classes=None):
             return 1
 
         def readiness(self):
@@ -216,7 +216,7 @@ async def test_daemon_logs_cycle_error_breakdown(caplog):
             return None
 
     class FakeFrontier:
-        def pending_count(self):
+        def pending_count(self, queue_classes=None):
             return 1
 
         def readiness(self):
@@ -272,7 +272,7 @@ async def test_daemon_uses_configured_backlog_controls():
         def __init__(self):
             self.defer_args = None
 
-        def pending_count(self):
+        def pending_count(self, queue_classes=None):
             return 1
 
         def readiness(self):
@@ -323,3 +323,71 @@ async def test_daemon_uses_configured_backlog_controls():
         "low_priority_threshold": 0.4,
         "defer_seconds": 12.0,
     }
+
+
+def test_ensure_seeds_tops_up_when_exploration_queue_is_starved():
+    class FakeFrontier:
+        def __init__(self):
+            self.upsert_calls = []
+
+        def pending_count(self, queue_classes=None):
+            if queue_classes == ["exploration"]:
+                return 1
+            return 25
+
+        def upsert_seeds(self, urls, priority=2.0):
+            self.upsert_calls.append((list(urls), priority))
+            return len(urls)
+
+    daemon = CrawlDaemon(
+        seeds=[
+            "https://www.iana.org/",
+            "https://datatracker.ietf.org/",
+            "https://www.rfc-editor.org/",
+        ],
+        postgres_dsn="postgresql://unused",
+        cycle_pages=10,
+        recrawl_ttl=3600,
+    )
+    frontier = FakeFrontier()
+
+    daemon._ensure_seeds(frontier)
+
+    assert frontier.upsert_calls == [
+        ([
+            "https://www.iana.org/",
+            "https://datatracker.ietf.org/",
+            "https://www.rfc-editor.org/",
+        ], 2.0)
+    ]
+
+
+def test_ensure_seeds_does_not_top_up_when_exploration_queue_is_healthy():
+    class FakeFrontier:
+        def __init__(self):
+            self.upsert_calls = []
+
+        def pending_count(self, queue_classes=None):
+            if queue_classes == ["exploration"]:
+                return 3
+            return 25
+
+        def upsert_seeds(self, urls, priority=2.0):
+            self.upsert_calls.append((list(urls), priority))
+            return len(urls)
+
+    daemon = CrawlDaemon(
+        seeds=[
+            "https://www.iana.org/",
+            "https://datatracker.ietf.org/",
+            "https://www.rfc-editor.org/",
+        ],
+        postgres_dsn="postgresql://unused",
+        cycle_pages=10,
+        recrawl_ttl=3600,
+    )
+    frontier = FakeFrontier()
+
+    daemon._ensure_seeds(frontier)
+
+    assert frontier.upsert_calls == []
