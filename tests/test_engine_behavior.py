@@ -32,6 +32,7 @@ class FakeFrontier:
             {
                 "prioritize_breadth": prioritize_breadth,
                 "exclude_domains": sorted(exclude_domains),
+                "queue_classes": list(kwargs.get("queue_classes") or []),
             }
         )
         for index, task in enumerate(self.tasks):
@@ -383,10 +384,31 @@ async def test_crawler_reserves_some_leases_for_breadth():
         await engine.crawl()
 
     assert frontier.lease_calls[:2] == [
-        {"prioritize_breadth": True, "exclude_domains": []},
-        {"prioritize_breadth": True, "exclude_domains": []},
+        {"prioritize_breadth": True, "exclude_domains": [], "queue_classes": ["exploration"]},
+        {"prioritize_breadth": True, "exclude_domains": [], "queue_classes": ["exploration"]},
     ]
 
+
+
+@pytest.mark.asyncio
+@pytest.mark.asyncio
+async def test_crawler_prefers_exploration_before_backlog_and_recrawl():
+    frontier = FakeFrontier([CrawlTask(url="https://example.com/page", depth=0)])
+    domain_manager = FakeDomainManager()
+    fetcher = FakeFetcher([
+        Response(url="https://example.com/page", status=200, content=b"<html></html>", headers={}),
+    ])
+
+    async with CrawlerEngine(
+        max_pages=1,
+        concurrency=1,
+        frontier=frontier,
+        domain_manager=domain_manager,
+    ) as engine:
+        engine.fetcher = fetcher
+        await engine.crawl()
+
+    assert frontier.lease_calls[0]["queue_classes"] == ["exploration"]
 
 
 @pytest.mark.asyncio

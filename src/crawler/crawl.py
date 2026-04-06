@@ -22,7 +22,13 @@ from .discovery import PageSignals, rank_discovered_url, rank_seed_url, seed_hos
 from .domain_manager import DomainManager
 from .domain_store import DomainStore
 from .error_stats import categorize_crawl_error
-from .frontier import CrawlTask, Frontier
+from .frontier import (
+    CrawlTask,
+    Frontier,
+    QUEUE_BACKLOG,
+    QUEUE_EXPLORATION,
+    QUEUE_RECRAWL,
+)
 from .output import StreamingOutputWriter
 from .result import CrawlFailure, CrawlResult, CrawlStageTimings
 from .urls import extract_links
@@ -706,17 +712,26 @@ class CrawlerEngine:
                 self._publish_queue.task_done()
 
     async def _lease_task(self) -> CrawlTask | None:
-        """Prefer breadth-first leasing and fall back to best-first selection."""
+        """Lease exploration work first, then backlog, then recrawl."""
         async with self._lease_lock:
             excluded_hosts = [
                 host
                 for host, count in self._active_host_counts.items()
                 if count >= self.max_inflight_requests_per_host
             ]
-            task = self.frontier.lease_next(
-                prioritize_breadth=True,
-                exclude_domains=excluded_hosts or None,
-            )
+            task = None
+            for queue_classes, prioritize_breadth in (
+                ([QUEUE_EXPLORATION], True),
+                ([QUEUE_BACKLOG], True),
+                ([QUEUE_RECRAWL], False),
+            ):
+                task = self.frontier.lease_next(
+                    queue_classes=queue_classes,
+                    prioritize_breadth=prioritize_breadth,
+                    exclude_domains=excluded_hosts or None,
+                )
+                if task is not None:
+                    break
             if task is None:
                 task = self.frontier.lease_next(exclude_domains=excluded_hosts or None)
             if task is not None:
