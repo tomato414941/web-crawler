@@ -87,6 +87,14 @@ QUEUE_REQUIRED_COLUMNS = {
     "next_fetch_at",
     "added_at",
 }
+LEASE_TABLE = "frontier_lease_active"
+LEASE_REQUIRED_COLUMNS = {
+    "url",
+    "domain",
+    "queue_class",
+    "lease_token",
+    "lease_expires_at",
+}
 
 @dataclass
 class CrawlTask:
@@ -309,11 +317,12 @@ class Frontier:
                         lease_token = NULL,
                         lease_expires_at = NULL
                     WHERE {where}
-                    RETURNING url, domain, priority, next_fetch_at, added_at, queue_class, status""",
+                    RETURNING url, domain, priority, next_fetch_at, added_at, queue_class, lease_token, lease_expires_at, status""",
                 params,
             )
             rows = cur.fetchall()
-            self._replace_pending_queue_rows(cur, rows)
+            self._replace_pending_queue_rows(cur, [row[:7] for row in rows])
+            self._replace_active_lease_rows(cur, [(row[0], row[1], row[5], row[6], row[7], row[8]) for row in rows])
             return len(rows)
 
     def _assert_current_schema(self) -> None:
@@ -325,6 +334,10 @@ class Frontier:
                 if cur.fetchone()[0] is None:
                     raise RuntimeError(f"missing frontier queue table: {table_name}")
                 assert_public_table_columns(self._conn, table_name, QUEUE_REQUIRED_COLUMNS)
+            cur.execute("SELECT to_regclass(%s)", (f"public.{LEASE_TABLE}",))
+            if cur.fetchone()[0] is None:
+                raise RuntimeError(f"missing frontier lease table: {LEASE_TABLE}")
+            assert_public_table_columns(self._conn, LEASE_TABLE, LEASE_REQUIRED_COLUMNS)
 
         with self._conn.cursor() as cur:
             cur.execute("SELECT DISTINCT status FROM frontier")
@@ -499,6 +512,51 @@ class Frontier:
         for table_name in QUEUE_TABLES:
             cur.execute(f"DELETE FROM {table_name} WHERE url = ANY(%s)", (urls,))
 
+    def _delete_active_leases(self, cur, urls: list[str]) -> None:
+        """Remove URLs from the physical active lease table."""
+        if not urls:
+            return
+        cur.execute(f"DELETE FROM {LEASE_TABLE} WHERE url = ANY(%s)", (urls,))
+
+    def _replace_active_lease_rows(
+        self,
+        cur,
+        rows: list[tuple[str, str, str, str | None, float | None, str]],
+    ) -> None:
+        """Replace active lease rows using returned frontier state."""
+        normalized_urls = sorted({normalize_url(url) for url, *_ in rows if url})
+        if not normalized_urls:
+            return
+        self._delete_active_leases(cur, normalized_urls)
+
+        active_rows: list[tuple[str, str, str, str, float]] = []
+        for url, domain, queue_class, lease_token, lease_expires_at, status in rows:
+            if status != LEASED_STATUS or not lease_token or lease_expires_at is None:
+                continue
+            active_rows.append((
+                normalize_url(url),
+                domain,
+                self._normalize_queue_class(queue_class),
+                lease_token,
+                lease_expires_at,
+            ))
+
+        if not active_rows:
+            return
+        psycopg2.extras.execute_values(
+            cur,
+            f"""INSERT INTO {LEASE_TABLE}
+                    (url, domain, queue_class, lease_token, lease_expires_at)
+                VALUES %s
+                ON CONFLICT (url) DO UPDATE
+                SET domain = EXCLUDED.domain,
+                    queue_class = EXCLUDED.queue_class,
+                    lease_token = EXCLUDED.lease_token,
+                    lease_expires_at = EXCLUDED.lease_expires_at""",
+            active_rows,
+            page_size=200,
+        )
+
     def _replace_pending_queue_rows(
         self,
         cur,
@@ -632,12 +690,13 @@ class Frontier:
                            OR EXCLUDED.depth < frontier.depth
                            OR (frontier.source_url IS NULL AND EXCLUDED.source_url IS NOT NULL)
                            OR EXCLUDED.next_fetch_at < frontier.next_fetch_at
-                       RETURNING url, domain, priority, next_fetch_at, added_at, queue_class, status""",
+                       RETURNING url, domain, priority, next_fetch_at, added_at, queue_class, lease_token, lease_expires_at, status""",
                     rows,
                     page_size=200,
                 )
                 frontier_rows = cur.fetchall()
-                self._replace_pending_queue_rows(cur, frontier_rows)
+                self._replace_pending_queue_rows(cur, [row[:7] for row in frontier_rows])
+                self._replace_active_lease_rows(cur, [(row[0], row[1], row[5], row[6], row[7], row[8]) for row in frontier_rows])
                 return len(frontier_rows)
         except Exception:
             self._conn.rollback()
@@ -716,12 +775,14 @@ class Frontier:
                             next_fetch_at,
                             queue_class,
                             lease_token,
-                            lease_expires_at""",
+                            lease_expires_at,
+                            status""",
                     params,
                 )
                 row = cur.fetchone()
                 if row:
                     self._delete_queue_entries(cur, [row[0]])
+                    self._replace_active_lease_rows(cur, [(row[0], row[1], row[8], row[9], row[10], row[11])])
             self._conn.commit()
         except Exception:
             self._conn.rollback()
@@ -741,6 +802,7 @@ class Frontier:
                 _queue_class,
                 lease_token,
                 lease_expires_at,
+                _status,
             ) = row
             return CrawlTask(
                 url=url, depth=depth, priority=priority,
@@ -813,12 +875,14 @@ class Frontier:
                             next_fetch_at,
                             queue_class,
                             lease_token,
-                            lease_expires_at""",
+                            lease_expires_at,
+                            status""",
                     params,
                 )
                 rows = cur.fetchall()
                 if rows:
                     self._delete_queue_entries(cur, [row[0] for row in rows])
+                    self._replace_active_lease_rows(cur, [(row[0], row[1], row[8], row[9], row[10], row[11]) for row in rows])
             self._conn.commit()
         except Exception:
             self._conn.rollback()
@@ -850,6 +914,7 @@ class Frontier:
                 _queue_class,
                 row_lease_token,
                 row_lease_expires_at,
+                _status,
             ) in rows
         ]
 
@@ -870,11 +935,12 @@ class Frontier:
                         lease_expires_at = NULL,
                         last_error = NULL
                     WHERE url = %s{lease_sql}
-                    RETURNING url""",
+                    RETURNING url, domain, queue_class, lease_token, lease_expires_at, status""",
                 (now, now, normalized, *lease_params),
             )
             rows = cur.fetchall()
             self._delete_queue_entries(cur, [row[0] for row in rows])
+            self._replace_active_lease_rows(cur, rows)
             updated = bool(rows)
         self._conn.commit()
         return updated
@@ -920,7 +986,7 @@ class Frontier:
                         lease_token = NULL,
                         lease_expires_at = NULL
                     WHERE url = %s{lease_sql}
-                    RETURNING url, domain, priority, next_fetch_at, added_at, queue_class, status""",
+                    RETURNING url, domain, priority, next_fetch_at, added_at, queue_class, lease_token, lease_expires_at, status""",
                 (
                     status,
                     next_fetch_at,
@@ -932,7 +998,8 @@ class Frontier:
                 ),
             )
             rows = cur.fetchall()
-            self._replace_pending_queue_rows(cur, rows)
+            self._replace_pending_queue_rows(cur, [row[:7] for row in rows])
+            self._replace_active_lease_rows(cur, [(row[0], row[1], row[5], row[6], row[7], row[8]) for row in rows])
             updated = bool(rows)
         self._conn.commit()
         return updated
@@ -948,11 +1015,12 @@ class Frontier:
                        lease_token = NULL,
                        lease_expires_at = NULL
                    WHERE status = %s
-                   RETURNING url, domain, priority, next_fetch_at, added_at, queue_class, status""",
+                   RETURNING url, domain, priority, next_fetch_at, added_at, queue_class, lease_token, lease_expires_at, status""",
                 (PENDING_STATUS, now, FAILED_STATUS),
             )
             rows = cur.fetchall()
-            self._replace_pending_queue_rows(cur, rows)
+            self._replace_pending_queue_rows(cur, [row[:7] for row in rows])
+            self._replace_active_lease_rows(cur, [(row[0], row[1], row[5], row[6], row[7], row[8]) for row in rows])
             count = len(rows)
         self._conn.commit()
         return count
@@ -998,11 +1066,12 @@ class Frontier:
                         FROM ranked
                         WHERE rownum > %s
                     )
-                    RETURNING url, domain, priority, next_fetch_at, added_at, queue_class, status""",
+                    RETURNING url, domain, priority, next_fetch_at, added_at, queue_class, lease_token, lease_expires_at, status""",
                 (now, low_priority_threshold, deferred_until, keep_ready_per_domain),
             )
             rows = cur.fetchall()
-            self._replace_pending_queue_rows(cur, rows)
+            self._replace_pending_queue_rows(cur, [row[:7] for row in rows])
+            self._replace_active_lease_rows(cur, [(row[0], row[1], row[5], row[6], row[7], row[8]) for row in rows])
             count = len(rows)
         self._conn.commit()
         return count
@@ -1045,11 +1114,12 @@ class Frontier:
                         FROM ranked
                         WHERE rownum <= %s
                     )
-                    RETURNING url, domain, priority, next_fetch_at, added_at, queue_class, status""",
+                    RETURNING url, domain, priority, next_fetch_at, added_at, queue_class, lease_token, lease_expires_at, status""",
                 (seed_hosts, max_depth, QUEUE_EXPLORATION, now, per_host),
             )
             rows = cur.fetchall()
-            self._replace_pending_queue_rows(cur, rows)
+            self._replace_pending_queue_rows(cur, [row[:7] for row in rows])
+            self._replace_active_lease_rows(cur, [(row[0], row[1], row[5], row[6], row[7], row[8]) for row in rows])
             count = len(rows)
         self._conn.commit()
         return count
@@ -1093,13 +1163,14 @@ class Frontier:
                        last_error = NULL,
                        lease_token = NULL,
                        lease_expires_at = NULL
-                   RETURNING url, domain, priority, next_fetch_at, added_at, queue_class, status""",
+                   RETURNING url, domain, priority, next_fetch_at, added_at, queue_class, lease_token, lease_expires_at, status""",
                 rows,
                 template="(%s, %s, %s, %s, %s, %s, %s, NULL, %s, %s, 'pending')",
                 page_size=200,
             )
             frontier_rows = cur.fetchall()
-            self._replace_pending_queue_rows(cur, frontier_rows)
+            self._replace_pending_queue_rows(cur, [row[:7] for row in frontier_rows])
+            self._replace_active_lease_rows(cur, [(row[0], row[1], row[5], row[6], row[7], row[8]) for row in frontier_rows])
             affected = len(frontier_rows)
         self._conn.commit()
         return affected
@@ -1109,6 +1180,8 @@ class Frontier:
         with self._conn.cursor() as cur:
             cur.execute("SELECT status, COUNT(*) FROM frontier GROUP BY status")
             stats = dict(cur.fetchall())
+            cur.execute(f"SELECT COUNT(*) FROM {LEASE_TABLE}")
+            stats[LEASED_STATUS] = cur.fetchone()[0]
             cur.execute(
                 """SELECT queue_class, count(*)
                    FROM (

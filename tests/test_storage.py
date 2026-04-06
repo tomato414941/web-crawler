@@ -25,6 +25,7 @@ def _reset_schema(dsn: str) -> None:
             cur.execute("DROP TABLE IF EXISTS public.frontier_queue_exploration")
             cur.execute("DROP TABLE IF EXISTS public.frontier_queue_backlog")
             cur.execute("DROP TABLE IF EXISTS public.frontier_queue_recrawl")
+            cur.execute("DROP TABLE IF EXISTS public.frontier_lease_active")
             cur.execute("DROP TABLE IF EXISTS public.frontier")
             cur.execute("DROP TABLE IF EXISTS public.crawler_runtime_stats")
             cur.execute("DROP TABLE IF EXISTS public.pages")
