@@ -202,6 +202,30 @@ class TestFrontier:
 
         assert queue_class == QUEUE_EXPLORATION
 
+    def test_add_classifies_seed_host_urls_as_exploration_through_depth_two(self, frontier):
+        frontier.add(CrawlTask(url="http://docs.example.com/guide", depth=2, discovery_kind=DISCOVERY_SEED_HOST))
+
+        with frontier._conn.cursor() as cur:
+            cur.execute(
+                "SELECT queue_class FROM frontier WHERE url = %s",
+                ("http://docs.example.com/guide",),
+            )
+            (queue_class,) = cur.fetchone()
+
+        assert queue_class == QUEUE_EXPLORATION
+
+    def test_add_classifies_external_deep_urls_as_backlog(self, frontier):
+        frontier.add(CrawlTask(url="http://external.example.com/deep", depth=3, discovery_kind=DISCOVERY_EXTERNAL))
+
+        with frontier._conn.cursor() as cur:
+            cur.execute(
+                "SELECT queue_class FROM frontier WHERE url = %s",
+                ("http://external.example.com/deep",),
+            )
+            (queue_class,) = cur.fetchone()
+
+        assert queue_class == QUEUE_BACKLOG
+
     def test_add_classifies_deep_urls_as_backlog(self, frontier):
         frontier.add(CrawlTask(url="http://example.com/deep", depth=3, discovery_kind=DISCOVERY_SAME_HOST))
 
