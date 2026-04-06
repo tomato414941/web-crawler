@@ -125,6 +125,7 @@ class CrawlerEngine:
         self.output_writer = output_writer
         self.pg_storage = pg_storage
         self.parser_workers = max(1, min(concurrency, 4))
+        self.max_inflight_requests_per_host = max(1, settings.max_inflight_requests_per_host)
 
         self.start_domain = urlparse(start_url).netloc if start_url else ""
         self.seed_hosts = seed_hosts_from_urls(seed_urls or [])
@@ -172,6 +173,7 @@ class CrawlerEngine:
         self._lease_lock = asyncio.Lock()
         self._leases_issued = 0
         self._failure_counts: Counter[str] = Counter()
+        self._active_host_counts: Counter[str] = Counter()
         self._parse_queue: asyncio.Queue[_FetchedPage | object] | None = None
         self._publish_queue: asyncio.Queue[_PublishItem | object] | None = None
         self._parse_queue_wait_last_ms = 0.0
@@ -190,6 +192,7 @@ class CrawlerEngine:
             "max_pages": self.max_pages,
             "concurrency": self.concurrency,
             "parser_workers": self.parser_workers,
+            "active_hosts": len(self._active_host_counts),
             "parse_queue_size": self._parse_queue.qsize() if self._parse_queue is not None else 0,
             "publish_queue_size": self._publish_queue.qsize()
             if self._publish_queue is not None
@@ -399,6 +402,20 @@ class CrawlerEngine:
                 timings=timings,
             )
 
+    def _host_key_for_url(self, url: str) -> str:
+        """Return the host key used for in-flight request limiting."""
+        return urlparse(url).netloc.lower()
+
+    async def _release_active_host(self, url: str) -> None:
+        """Release an in-flight host reservation after fetch processing finishes."""
+        host_key = self._host_key_for_url(url)
+        async with self._lease_lock:
+            current = self._active_host_counts.get(host_key, 0)
+            if current <= 1:
+                self._active_host_counts.pop(host_key, None)
+            else:
+                self._active_host_counts[host_key] = current - 1
+
     async def _claim_page_slot(self) -> bool:
         """Reserve capacity so concurrent workers do not exceed max_pages."""
         async with self._page_lock:
@@ -435,7 +452,10 @@ class CrawlerEngine:
                 continue
 
             idle_ticks = 0
-            result = await self._process_url(task)
+            try:
+                result = await self._process_url(task)
+            finally:
+                await self._release_active_host(task.url)
             if not result:
                 await self._release_page_slot(success=False)
                 continue
@@ -674,11 +694,21 @@ class CrawlerEngine:
         async with self._lease_lock:
             prioritize_breadth = self._leases_issued % _EXPLORATION_EVERY == 0
             self._leases_issued += 1
-
-        task = self.frontier.lease_next(prioritize_breadth=prioritize_breadth)
-        if task is None and prioritize_breadth:
-            return self.frontier.lease_next()
-        return task
+            excluded_hosts = [
+                host
+                for host, count in self._active_host_counts.items()
+                if count >= self.max_inflight_requests_per_host
+            ]
+            task = self.frontier.lease_next(
+                prioritize_breadth=prioritize_breadth,
+                exclude_domains=excluded_hosts or None,
+            )
+            if task is None and prioritize_breadth:
+                task = self.frontier.lease_next(exclude_domains=excluded_hosts or None)
+            if task is not None:
+                host_key = self._host_key_for_url(task.url)
+                self._active_host_counts[host_key] += 1
+            return task
 
     async def crawl(self) -> list[dict]:
         """Run the crawler and return results."""
