@@ -257,9 +257,14 @@ class CrawlDaemon:
         return payload
 
     async def _report_runtime_stats(self, storage: PgStorage, engine: CrawlerEngine) -> None:
-        """Persist crawler runtime stats for API consumers."""
-        while engine._running:
-            self._persist_runtime_payload(storage, engine.snapshot_runtime_stats())
+        """Persist crawler runtime stats for API consumers.
+
+        This remains active for the whole cycle so stats still start flowing even if the
+        reporter task is created just before ``engine.crawl()`` flips ``_running`` to True.
+        """
+        while True:
+            if engine._running:
+                self._persist_runtime_payload(storage, engine.snapshot_runtime_stats())
             await asyncio.sleep(1.0)
 
     def _flush_runtime_stats(self, storage: PgStorage, engine: CrawlerEngine) -> None:
