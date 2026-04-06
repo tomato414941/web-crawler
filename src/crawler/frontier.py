@@ -811,6 +811,50 @@ class Frontier:
         self._conn.commit()
         return count
 
+    def promote_seed_host_exploration(
+        self,
+        seed_hosts: list[str],
+        per_host: int = 1,
+        max_depth: int = 2,
+    ) -> int:
+        """Promote a small number of shallow seed-host pages back into exploration."""
+        if not seed_hosts or per_host <= 0:
+            return 0
+
+        now = time.time()
+        with self._conn.cursor() as cur:
+            cur.execute(
+                f"""WITH ranked AS (
+                        SELECT url,
+                               ROW_NUMBER() OVER (
+                                   PARTITION BY domain
+                                   ORDER BY COALESCE(last_success_at, added_at) ASC, added_at ASC, url ASC
+                               ) AS rownum
+                        FROM frontier
+                        WHERE domain = ANY(%s)
+                          AND status = '{DONE_STATUS}'
+                          AND depth <= %s
+                          AND discovery_kind IN ('seed_host', 'same_host')
+                    )
+                    UPDATE frontier
+                    SET status = '{PENDING_STATUS}',
+                        queue_class = %s,
+                        next_fetch_at = %s,
+                        fail_streak = 0,
+                        last_error = NULL,
+                        lease_token = NULL,
+                        lease_expires_at = NULL
+                    WHERE url IN (
+                        SELECT url
+                        FROM ranked
+                        WHERE rownum <= %s
+                    )""",
+                (seed_hosts, max_depth, QUEUE_EXPLORATION, now, per_host),
+            )
+            count = cur.rowcount
+        self._conn.commit()
+        return count
+
     def upsert_seeds(self, urls: list[str], priority: float = 2.0) -> int:
         """Insert or requeue seed URLs."""
         if not urls:
