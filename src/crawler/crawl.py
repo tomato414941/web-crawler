@@ -34,7 +34,6 @@ if TYPE_CHECKING:
 
 # Workers wait this many idle ticks (× 0.1s) before giving up
 _WORKER_PATIENCE = 50
-_EXPLORATION_EVERY = 4
 _PUBLISHER_SENTINEL = object()
 _PARSER_SENTINEL = object()
 _TITLE_PATTERN = re.compile(r"<title[^>]*>(.*?)</title>", re.IGNORECASE | re.DOTALL)
@@ -174,7 +173,6 @@ class CrawlerEngine:
         self._claimed_pages = 0
         self._page_lock = asyncio.Lock()
         self._lease_lock = asyncio.Lock()
-        self._leases_issued = 0
         self._failure_counts: Counter[str] = Counter()
         self._active_host_counts: Counter[str] = Counter()
         self._parse_queue: asyncio.Queue[_FetchedPage | object] | None = None
@@ -708,20 +706,18 @@ class CrawlerEngine:
                 self._publish_queue.task_done()
 
     async def _lease_task(self) -> CrawlTask | None:
-        """Alternate between best-first and breadth-first leases."""
+        """Prefer breadth-first leasing and fall back to best-first selection."""
         async with self._lease_lock:
-            prioritize_breadth = self._leases_issued % _EXPLORATION_EVERY == 0
-            self._leases_issued += 1
             excluded_hosts = [
                 host
                 for host, count in self._active_host_counts.items()
                 if count >= self.max_inflight_requests_per_host
             ]
             task = self.frontier.lease_next(
-                prioritize_breadth=prioritize_breadth,
+                prioritize_breadth=True,
                 exclude_domains=excluded_hosts or None,
             )
-            if task is None and prioritize_breadth:
+            if task is None:
                 task = self.frontier.lease_next(exclude_domains=excluded_hosts or None)
             if task is not None:
                 host_key = self._host_key_for_url(task.url)
@@ -735,7 +731,6 @@ class CrawlerEngine:
         self.failure_breakdown = {}
         self._failure_counts = Counter()
         self._claimed_pages = 0
-        self._leases_issued = 0
         self._parse_queue_wait_last_ms = 0.0
         self._publish_queue_wait_last_ms = 0.0
         self._parse_queue_wait_max_ms = 0.0
