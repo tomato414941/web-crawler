@@ -263,6 +263,21 @@ class TestFrontier:
 
         assert queue_class == QUEUE_BACKLOG
 
+    def test_add_classifies_known_domains_as_backlog_even_when_shallow(self, frontier):
+        for i in range(8):
+            frontier.add(CrawlTask(url=f"http://example.com/known-{i}", depth=0, discovery_kind=DISCOVERY_SAME_HOST))
+
+        frontier.add(CrawlTask(url="http://example.com/new-branch", depth=1, discovery_kind=DISCOVERY_SAME_HOST))
+
+        with frontier._conn.cursor() as cur:
+            cur.execute(
+                "SELECT queue_class FROM frontier WHERE url = %s",
+                ("http://example.com/new-branch",),
+            )
+            (queue_class,) = cur.fetchone()
+
+        assert queue_class == QUEUE_BACKLOG
+
     def test_add_classifies_redirect_hubs_as_backlog_even_when_shallow(self, frontier):
         frontier.add(
             CrawlTask(

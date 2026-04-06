@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import time
 import uuid
+from collections import Counter
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 from urllib.parse import urlparse
@@ -38,6 +39,7 @@ QUEUE_EXPLORATION = "exploration"
 QUEUE_BACKLOG = "backlog"
 QUEUE_RECRAWL = "recrawl"
 
+EXPLORATION_DOMAIN_BUDGET = 8
 DEFAULT_LEASE_SECONDS = 300.0
 DEFAULT_RETRY_BACKOFF_SECONDS = 30.0
 MAX_RETRY_BACKOFF_SECONDS = 1800.0
@@ -276,13 +278,15 @@ class Frontier:
             return queue_class
         return QUEUE_BACKLOG
 
-    def _classify_queue(self, task: CrawlTask) -> str:
+    def _classify_queue(self, task: CrawlTask, *, known_count: int = 0) -> str:
         """Map a task into the queue class used by the scheduler."""
         if task.queue_class in FRONTIER_ALLOWED_QUEUE_CLASSES:
             return task.queue_class
         if task.discovery_kind == DISCOVERY_SEED:
             return QUEUE_EXPLORATION
         if task.archetype in {ARCHETYPE_REGISTRY_LISTING, ARCHETYPE_REDIRECT_HUB}:
+            return QUEUE_BACKLOG
+        if known_count >= EXPLORATION_DOMAIN_BUDGET:
             return QUEUE_BACKLOG
         if task.discovery_kind == DISCOVERY_SAME_HOST:
             return QUEUE_EXPLORATION if task.depth <= 2 else QUEUE_BACKLOG
@@ -332,7 +336,7 @@ class Frontier:
                 url=normalized_url,
                 depth=task.depth,
                 priority=task.priority,
-                queue_class=self._classify_queue(task),
+                queue_class=task.queue_class,
                 discovery_kind=task.discovery_kind,
                 archetype=task.archetype,
                 source_url=task.source_url,
@@ -344,7 +348,28 @@ class Frontier:
                 merged[normalized.url] = normalized
             else:
                 merged[normalized.url] = self._merge_task(existing, normalized)
-        return list(merged.values())
+
+        domain_counts = self.get_domain_known_counts({urlparse(task.url).netloc for task in merged.values()})
+        batch_counts: Counter[str] = Counter()
+        prepared: list[CrawlTask] = []
+        for task in merged.values():
+            domain = urlparse(task.url).netloc
+            known_count = domain_counts.get(domain, 0) + batch_counts[domain]
+            prepared.append(
+                CrawlTask(
+                    url=task.url,
+                    depth=task.depth,
+                    priority=task.priority,
+                    queue_class=self._classify_queue(task, known_count=known_count),
+                    discovery_kind=task.discovery_kind,
+                    archetype=task.archetype,
+                    source_url=task.source_url,
+                    added_at=task.added_at,
+                    next_fetch_at=task.next_fetch_at,
+                )
+            )
+            batch_counts[domain] += 1
+        return prepared
 
     def _discovery_rank_sql(self, column: str) -> str:
         """Return SQL that maps discovery kind to a comparable rank."""
@@ -356,6 +381,21 @@ class Frontier:
             f"WHEN 'seed' THEN 4 "
             f"ELSE 0 END"
         )
+
+    def get_domain_known_counts(self, domains: set[str]) -> dict[str, int]:
+        """Return known URL counts per domain from the frontier."""
+        known_domains = {domain for domain in domains if domain}
+        if not known_domains:
+            return {}
+        with self._conn.cursor() as cur:
+            cur.execute(
+                """SELECT domain, COUNT(*)
+                   FROM frontier
+                   WHERE domain = ANY(%s)
+                   GROUP BY domain""",
+                (sorted(known_domains),),
+            )
+            return {domain: count for domain, count in cur.fetchall()}
 
     def _lease_order_by_sql(self, alias: str, prioritize_breadth: bool) -> str:
         """Return the ORDER BY clause used for lease selection."""
@@ -447,6 +487,10 @@ class Frontier:
             self._conn.rollback()
             logger.exception("Failed to upsert batch of %d URLs", len(tasks))
             return 0
+
+    def preview_tasks(self, tasks: list[CrawlTask]) -> list[CrawlTask]:
+        """Return normalized tasks with queue classes applied without writing them."""
+        return self._prepare_tasks(tasks)
 
     def add(self, task: CrawlTask) -> bool:
         """Add a URL to the frontier. Returns True if inserted or metadata improved."""
