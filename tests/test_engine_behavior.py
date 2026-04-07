@@ -29,15 +29,19 @@ class FakeFrontier:
 
     def lease_next(self, prioritize_breadth: bool = False, **kwargs: object):
         exclude_domains = set(kwargs.get("exclude_domains") or [])
+        queue_classes = list(kwargs.get("queue_classes") or [])
         self.lease_calls.append(
             {
                 "prioritize_breadth": prioritize_breadth,
                 "exclude_domains": sorted(exclude_domains),
-                "queue_classes": list(kwargs.get("queue_classes") or []),
+                "queue_classes": queue_classes,
             }
         )
         for index, task in enumerate(self.tasks):
             if task.url.split('/')[2] in exclude_domains:
+                continue
+            effective_queue = task.queue_class or "exploration"
+            if queue_classes and effective_queue not in queue_classes:
                 continue
             return self.tasks.pop(index)
         return None
@@ -505,7 +509,7 @@ async def test_crawler_avoids_leasing_same_host_while_request_in_flight():
 
     async with CrawlerEngine(
         max_pages=2,
-        concurrency=2,
+        concurrency=3,
         frontier=frontier,
         domain_manager=domain_manager,
     ) as engine:
@@ -514,3 +518,27 @@ async def test_crawler_avoids_leasing_same_host_while_request_in_flight():
 
     assert fetcher.calls == ["https://a.com/1", "https://b.com/1"]
     assert frontier.lease_calls[1]["exclude_domains"] == ["a.com"]
+
+
+@pytest.mark.asyncio
+async def test_crawler_splits_worker_pools_by_queue_class():
+    frontier = FakeFrontier([CrawlTask(url="https://example.com/page", depth=0, queue_class="exploration")])
+    domain_manager = FakeDomainManager()
+    fetcher = FakeFetcher([
+        Response(url="https://example.com/page", status=200, content=b"<html></html>", headers={}),
+    ])
+
+    async with CrawlerEngine(
+        max_pages=1,
+        concurrency=6,
+        frontier=frontier,
+        domain_manager=domain_manager,
+    ) as engine:
+        engine.fetcher = fetcher
+        runtime = engine.snapshot_runtime_stats()
+        assert runtime["exploration_workers"] == 4
+        assert runtime["backlog_workers"] == 1
+        assert runtime["recrawl_workers"] == 1
+        await engine.crawl()
+
+    assert frontier.lease_calls[0]["queue_classes"] == ["exploration"]

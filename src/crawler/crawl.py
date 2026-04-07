@@ -7,6 +7,7 @@ import concurrent.futures
 from collections import Counter
 from dataclasses import dataclass
 import logging
+import math
 import re
 import time
 from typing import TYPE_CHECKING
@@ -47,6 +48,25 @@ _META_ROBOTS_PATTERN = re.compile(
     r'<meta[^>]+name=["\']robots["\'][^>]+content=["\']([^"\']+)["\']',
     re.IGNORECASE | re.DOTALL,
 )
+
+
+def _split_worker_pools(concurrency: int) -> tuple[int, int, int]:
+    """Split worker capacity into exploration, backlog, and recrawl pools."""
+    total = max(1, concurrency)
+    if total == 1:
+        return 1, 0, 0
+    if total == 2:
+        return 1, 1, 0
+    if total == 3:
+        return 2, 1, 0
+    exploration = max(2, math.ceil(total * 0.67))
+    exploration = min(exploration, total - 2)
+    backlog = 1
+    recrawl = total - exploration - backlog
+    if recrawl <= 0:
+        recrawl = 1
+        exploration = total - backlog - recrawl
+    return exploration, backlog, recrawl
 
 
 def _elapsed_ms(started_at: float) -> float:
@@ -132,6 +152,11 @@ class CrawlerEngine:
         self.pg_storage = pg_storage
         self.parser_workers = max(1, min(concurrency, 4))
         self.max_inflight_requests_per_host = max(1, settings.max_inflight_requests_per_host)
+        (
+            self.exploration_workers,
+            self.backlog_workers,
+            self.recrawl_workers,
+        ) = _split_worker_pools(concurrency)
         self._publisher_executor: concurrent.futures.ThreadPoolExecutor | None = None
         self._publisher_storage = None
 
@@ -199,6 +224,9 @@ class CrawlerEngine:
             "max_pages": self.max_pages,
             "concurrency": self.concurrency,
             "parser_workers": self.parser_workers,
+            "exploration_workers": self.exploration_workers,
+            "backlog_workers": self.backlog_workers,
+            "recrawl_workers": self.recrawl_workers,
             "active_hosts": len(self._active_host_counts),
             "parse_queue_size": self._parse_queue.qsize() if self._parse_queue is not None else 0,
             "publish_queue_size": self._publish_queue.qsize()
@@ -446,8 +474,14 @@ class CrawlerEngine:
             if success:
                 self.pages_crawled += 1
 
-    async def _worker(self, worker_id: int):
-        """Worker coroutine that processes URLs from the frontier."""
+    async def _worker(
+        self,
+        worker_id: int,
+        *,
+        queue_classes: list[str],
+        prioritize_breadth: bool,
+    ):
+        """Worker coroutine that processes URLs from a dedicated queue class."""
         idle_ticks = 0
 
         while self._running:
@@ -456,7 +490,10 @@ class CrawlerEngine:
 
             slot_started = time.perf_counter()
             lease_started = time.perf_counter()
-            task = await self._lease_task()
+            task = await self._lease_task(
+                queue_classes=queue_classes,
+                prioritize_breadth=prioritize_breadth,
+            )
             lease_ms = _elapsed_ms(lease_started)
             if not task:
                 await self._release_page_slot(success=False)
@@ -713,29 +750,24 @@ class CrawlerEngine:
             finally:
                 self._publish_queue.task_done()
 
-    async def _lease_task(self) -> CrawlTask | None:
-        """Lease exploration work first, then backlog, then recrawl."""
+    async def _lease_task(
+        self,
+        *,
+        queue_classes: list[str],
+        prioritize_breadth: bool,
+    ) -> CrawlTask | None:
+        """Lease work for a specific queue class worker pool."""
         async with self._lease_lock:
             excluded_hosts = [
                 host
                 for host, count in self._active_host_counts.items()
                 if count >= self.max_inflight_requests_per_host
             ]
-            task = None
-            for queue_classes, prioritize_breadth in (
-                ([QUEUE_EXPLORATION], True),
-                ([QUEUE_BACKLOG], True),
-                ([QUEUE_RECRAWL], False),
-            ):
-                task = self.frontier.lease_next(
-                    queue_classes=queue_classes,
-                    prioritize_breadth=prioritize_breadth,
-                    exclude_domains=excluded_hosts or None,
-                )
-                if task is not None:
-                    break
-            if task is None:
-                task = self.frontier.lease_next(exclude_domains=excluded_hosts or None)
+            task = self.frontier.lease_next(
+                queue_classes=queue_classes,
+                prioritize_breadth=prioritize_breadth,
+                exclude_domains=excluded_hosts or None,
+            )
             if task is not None:
                 host_key = self._host_key_for_url(task.url)
                 self._active_host_counts[host_key] += 1
@@ -773,7 +805,41 @@ class CrawlerEngine:
         parsers = [asyncio.create_task(self._parser()) for _ in range(self.parser_workers)]
         publisher = asyncio.create_task(self._publisher())
 
-        workers = [asyncio.create_task(self._worker(i)) for i in range(self.concurrency)]
+        workers: list[asyncio.Task] = []
+        worker_id = 0
+        for _ in range(self.exploration_workers):
+            workers.append(
+                asyncio.create_task(
+                    self._worker(
+                        worker_id,
+                        queue_classes=[QUEUE_EXPLORATION],
+                        prioritize_breadth=True,
+                    )
+                )
+            )
+            worker_id += 1
+        for _ in range(self.backlog_workers):
+            workers.append(
+                asyncio.create_task(
+                    self._worker(
+                        worker_id,
+                        queue_classes=[QUEUE_BACKLOG],
+                        prioritize_breadth=True,
+                    )
+                )
+            )
+            worker_id += 1
+        for _ in range(self.recrawl_workers):
+            workers.append(
+                asyncio.create_task(
+                    self._worker(
+                        worker_id,
+                        queue_classes=[QUEUE_RECRAWL],
+                        prioritize_breadth=False,
+                    )
+                )
+            )
+            worker_id += 1
 
         try:
             await asyncio.gather(*workers)
