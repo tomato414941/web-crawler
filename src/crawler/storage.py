@@ -316,8 +316,7 @@ class PgStorage:
                            GROUP BY queue_class"""
                     )
                     pending_queue_classes = {queue_class: count for queue_class, count in cur.fetchall()}
-                    if pending_queue_classes:
-                        frontier_status['pending'] = sum(pending_queue_classes.values())
+                    frontier_status['pending'] = sum(pending_queue_classes.values())
 
                     cur.execute(
                         """SELECT discovery_kind, COUNT(*)
