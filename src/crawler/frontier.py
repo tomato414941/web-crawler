@@ -1080,11 +1080,12 @@ class Frontier:
         self,
         *,
         keep_ready_per_domain: int = 128,
+        keep_ready_per_branch: int = 16,
         low_priority_threshold: float = 0.75,
         defer_seconds: float = 1800.0,
     ) -> int:
-        """Delay excess low-priority backlog so one host cannot dominate the ready queue."""
-        if keep_ready_per_domain <= 0:
+        """Delay excess low-priority backlog so one host or branch cannot dominate ready work."""
+        if keep_ready_per_domain <= 0 or keep_ready_per_branch <= 0:
             return 0
 
         now = time.time()
@@ -1093,26 +1094,38 @@ class Frontier:
             cur.execute(
                 f"""WITH ranked AS (
                         SELECT
-                            url,
+                            frontier.url,
                             ROW_NUMBER() OVER (
-                                PARTITION BY domain
-                                ORDER BY priority DESC, next_fetch_at ASC, added_at ASC
-                            ) AS rownum
-                        FROM frontier
-                        WHERE status = '{PENDING_STATUS}'
-                          AND queue_class = '{QUEUE_BACKLOG}'
-                          AND next_fetch_at <= %s
-                          AND priority <= %s
+                                PARTITION BY queue.domain
+                                ORDER BY queue.priority DESC, queue.next_fetch_at ASC, queue.added_at ASC, queue.url ASC
+                            ) AS domain_rownum,
+                            ROW_NUMBER() OVER (
+                                PARTITION BY queue.domain, queue.branch_key
+                                ORDER BY queue.priority DESC, queue.next_fetch_at ASC, queue.added_at ASC, queue.url ASC
+                            ) AS branch_rownum
+                        FROM {self._queue_table_sql(QUEUE_BACKLOG)} AS queue
+                        JOIN frontier ON frontier.url = queue.url
+                        WHERE frontier.status = '{PENDING_STATUS}'
+                          AND frontier.queue_class = '{QUEUE_BACKLOG}'
+                          AND queue.next_fetch_at <= %s
+                          AND queue.priority <= %s
+                    ), deferred AS (
+                        SELECT ranked.url
+                        FROM ranked
+                        WHERE ranked.domain_rownum > %s
+                           OR ranked.branch_rownum > %s
                     )
                     UPDATE frontier
                     SET next_fetch_at = GREATEST(next_fetch_at, %s)
-                    WHERE url IN (
-                        SELECT url
-                        FROM ranked
-                        WHERE rownum > %s
-                    )
+                    WHERE url IN (SELECT url FROM deferred)
                     RETURNING url, domain, priority, next_fetch_at, added_at, queue_class, lease_token, lease_expires_at, status""",
-                (now, low_priority_threshold, deferred_until, keep_ready_per_domain),
+                (
+                    now,
+                    low_priority_threshold,
+                    keep_ready_per_domain,
+                    keep_ready_per_branch,
+                    deferred_until,
+                ),
             )
             rows = cur.fetchall()
             self._replace_pending_queue_rows(cur, self._project_pending_queue_rows(rows))
