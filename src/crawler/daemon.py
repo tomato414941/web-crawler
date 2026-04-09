@@ -358,7 +358,7 @@ class CrawlDaemon:
             runtime_storage.close()
 
     def _ensure_seeds(self, frontier: Frontier):
-        """Re-seed when the exploration queue is starved."""
+        """Bootstrap seeds, then top up exploration from novel backlog branches."""
         if frontier.pending_count() == 0:
             count = frontier.upsert_seeds(self._seeds, priority=2.0)
             logger.info("Re-seeded %d URLs", count)
@@ -368,12 +368,23 @@ class CrawlDaemon:
         if exploration_pending >= self._min_exploration_pending:
             return
 
-        count = frontier.upsert_seeds(self._seeds, priority=2.0)
+        needed = self._min_exploration_pending - exploration_pending
+        branch_promoted = 0
+        if hasattr(frontier, "promote_branch_novelty_exploration"):
+            branch_promoted = frontier.promote_branch_novelty_exploration(
+                self._min_exploration_pending,
+                per_domain=1,
+            )
+
+        count = 0
         promoted = 0
-        if hasattr(frontier, "promote_seed_host_exploration") and self._seed_hosts:
+        if branch_promoted < needed:
+            count = frontier.upsert_seeds(self._seeds, priority=2.0)
+        if branch_promoted < needed and hasattr(frontier, "promote_seed_host_exploration") and self._seed_hosts:
             promoted = frontier.promote_seed_host_exploration(self._seed_hosts, per_host=1, max_depth=2)
         logger.info(
-            "Topped up exploration seeds: added=%d promoted=%d pending_exploration=%d target=%d",
+            "Topped up exploration: branch_promoted=%d added_seeds=%d seed_promoted=%d pending_exploration=%d target=%d",
+            branch_promoted,
             count,
             promoted,
             exploration_pending,

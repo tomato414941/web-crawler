@@ -329,11 +329,16 @@ def test_ensure_seeds_tops_up_when_exploration_queue_is_starved():
     class FakeFrontier:
         def __init__(self):
             self.upsert_calls = []
+            self.branch_promote_calls = []
 
         def pending_count(self, queue_classes=None):
             if queue_classes == ["exploration"]:
                 return 1
             return 25
+
+        def promote_branch_novelty_exploration(self, target_pending, per_domain=1):
+            self.branch_promote_calls.append((target_pending, per_domain))
+            return 2
 
         def upsert_seeds(self, urls, priority=2.0):
             self.upsert_calls.append((list(urls), priority))
@@ -353,12 +358,58 @@ def test_ensure_seeds_tops_up_when_exploration_queue_is_starved():
 
     daemon._ensure_seeds(frontier)
 
+    assert frontier.branch_promote_calls == [(3, 1)]
+    assert frontier.upsert_calls == []
+
+
+def test_ensure_seeds_falls_back_to_seed_reinsertion_when_branch_promotion_is_insufficient():
+    class FakeFrontier:
+        def __init__(self):
+            self.upsert_calls = []
+            self.branch_promote_calls = []
+            self.seed_promote_calls = []
+
+        def pending_count(self, queue_classes=None):
+            if queue_classes == ["exploration"]:
+                return 1
+            return 25
+
+        def promote_branch_novelty_exploration(self, target_pending, per_domain=1):
+            self.branch_promote_calls.append((target_pending, per_domain))
+            return 1
+
+        def upsert_seeds(self, urls, priority=2.0):
+            self.upsert_calls.append((list(urls), priority))
+            return len(urls)
+
+        def promote_seed_host_exploration(self, seed_hosts, per_host=1, max_depth=2):
+            self.seed_promote_calls.append((list(seed_hosts), per_host, max_depth))
+            return 1
+
+    daemon = CrawlDaemon(
+        seeds=[
+            "https://www.iana.org/",
+            "https://datatracker.ietf.org/",
+            "https://www.rfc-editor.org/",
+        ],
+        postgres_dsn="postgresql://unused",
+        cycle_pages=10,
+        recrawl_ttl=3600,
+    )
+    frontier = FakeFrontier()
+
+    daemon._ensure_seeds(frontier)
+
+    assert frontier.branch_promote_calls == [(3, 1)]
     assert frontier.upsert_calls == [
         ([
             "https://www.iana.org/",
             "https://datatracker.ietf.org/",
             "https://www.rfc-editor.org/",
         ], 2.0)
+    ]
+    assert frontier.seed_promote_calls == [
+        (["datatracker.ietf.org", "www.iana.org", "www.rfc-editor.org"], 1, 2)
     ]
 
 

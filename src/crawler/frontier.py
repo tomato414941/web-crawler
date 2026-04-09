@@ -24,7 +24,7 @@ from .discovery import (
     discovery_rank,
 )
 from .schema import assert_public_table_columns
-from .urls import normalize_url
+from .urls import normalize_url, url_branch_key
 
 if TYPE_CHECKING:
     from .domain_store import DomainStore
@@ -1137,6 +1137,73 @@ class Frontier:
             self._replace_pending_queue_rows(cur, self._project_pending_queue_rows(rows))
             self._replace_active_lease_rows(cur, [(row[0], row[1], row[5], row[6], row[7], row[8]) for row in rows])
             count = len(rows)
+        self._conn.commit()
+        return count
+
+    def promote_branch_novelty_exploration(
+        self,
+        target_pending: int,
+        *,
+        per_domain: int = 1,
+        candidate_limit: int = 200,
+    ) -> int:
+        """Promote branch-diverse backlog URLs into exploration."""
+        if target_pending <= 0 or per_domain <= 0 or candidate_limit <= 0:
+            return 0
+
+        current_exploration = self.pending_count(queue_classes=[QUEUE_EXPLORATION])
+        needed = target_pending - current_exploration
+        if needed <= 0:
+            return 0
+
+        with self._conn.cursor() as cur:
+            cur.execute(
+                f"""SELECT url, domain
+                    FROM {self._queue_table_sql(QUEUE_EXPLORATION)}"""
+            )
+            existing_branches = {(domain, url_branch_key(url)) for url, domain in cur.fetchall()}
+
+            cur.execute(
+                f"""SELECT url, domain
+                    FROM {self._queue_table_sql(QUEUE_BACKLOG)}
+                    ORDER BY priority DESC, added_at ASC, url ASC
+                    LIMIT %s""",
+                (max(candidate_limit, needed * 20),),
+            )
+            candidates = cur.fetchall()
+
+            promoted_urls: list[str] = []
+            domain_counts: Counter[str] = Counter()
+            for url, domain in candidates:
+                branch = url_branch_key(url)
+                key = (domain, branch)
+                if key in existing_branches:
+                    continue
+                if domain_counts[domain] >= per_domain:
+                    continue
+                promoted_urls.append(normalize_url(url))
+                existing_branches.add(key)
+                domain_counts[domain] += 1
+                if len(promoted_urls) >= needed:
+                    break
+
+            if not promoted_urls:
+                return 0
+
+            cur.execute(
+                f"""UPDATE frontier
+                    SET queue_class = %s
+                    WHERE url = ANY(%s)
+                      AND status = '{PENDING_STATUS}'
+                      AND queue_class = '{QUEUE_BACKLOG}'
+                    RETURNING url, domain, priority, next_fetch_at, added_at, queue_class, lease_token, lease_expires_at, status""",
+                (QUEUE_EXPLORATION, promoted_urls),
+            )
+            rows = cur.fetchall()
+            self._replace_pending_queue_rows(cur, self._project_pending_queue_rows(rows))
+            self._replace_active_lease_rows(cur, [(row[0], row[1], row[5], row[6], row[7], row[8]) for row in rows])
+            count = len(rows)
+
         self._conn.commit()
         return count
 

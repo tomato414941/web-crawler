@@ -666,6 +666,24 @@ class TestFrontier:
         assert status == "pending"
         assert queue_class == QUEUE_EXPLORATION
 
+    def test_promote_branch_novelty_exploration_promotes_distinct_backlog_branches(self, frontier):
+        frontier.add(CrawlTask(url="http://example.com/docs/a", depth=4, queue_class=QUEUE_BACKLOG))
+        frontier.add(CrawlTask(url="http://example.com/docs/b", depth=4, queue_class=QUEUE_BACKLOG))
+        frontier.add(CrawlTask(url="http://example.com/blog/a", depth=4, queue_class=QUEUE_BACKLOG))
+        frontier.add(CrawlTask(url="http://other.com/news/a", depth=4, queue_class=QUEUE_BACKLOG))
+
+        promoted = frontier.promote_branch_novelty_exploration(target_pending=2, per_domain=1, candidate_limit=10)
+
+        assert promoted == 2
+        with frontier._conn.cursor() as cur:
+            cur.execute("SELECT url FROM frontier_queue_exploration ORDER BY url")
+            promoted_urls = [url for (url,) in cur.fetchall()]
+
+        assert promoted_urls == [
+            "http://example.com/docs/a",
+            "http://other.com/news/a",
+        ]
+
     def test_recrawl_queue_class_can_be_leased_separately(self, frontier):
         frontier.add(CrawlTask(url="http://example.com", depth=0))
         leased = frontier.lease_next()

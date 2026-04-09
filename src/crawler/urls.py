@@ -7,6 +7,16 @@ from selectolax.parser import HTMLParser
 _SKIP_SCHEMES = ('#', 'javascript:', 'mailto:', 'tel:', 'data:')
 
 
+def url_branch_key(url: str, max_segments: int = 2) -> str:
+    """Return a coarse branch key for diversity-aware scheduling."""
+    normalized = normalize_url(url)
+    parsed = urlparse(normalized)
+    segments = [segment for segment in parsed.path.split("/") if segment][:max_segments]
+    if not segments:
+        return "/"
+    return "/" + "/".join(segments)
+
+
 def normalize_url(url: str) -> str:
     """Normalize URL for deduplication (remove fragment, sort query params)."""
     parsed = urlparse(url)
