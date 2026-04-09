@@ -174,10 +174,10 @@ def test_get_stats_includes_frontier_breakdown(pg_storage):
         )
         cur.execute(
             """
-            INSERT INTO frontier_queue_exploration (url, domain, priority, next_fetch_at, added_at)
+            INSERT INTO frontier_queue_exploration (url, domain, priority, next_fetch_at, added_at, branch_key)
             VALUES
-                ('https://example.com/page2', 'example.com', 1.25, 1710000002.0, 1710000002.0),
-                ('https://other.com/page1', 'other.com', 0.8, 1710000003.0, 1710000003.0)
+                ('https://example.com/page2', 'example.com', 1.25, 1710000002.0, 1710000002.0, '/page2'),
+                ('https://other.com/page1', 'other.com', 0.8, 1710000003.0, 1710000003.0, '/page1')
             """
         )
     pg_storage._conn.commit()
@@ -187,6 +187,7 @@ def test_get_stats_includes_frontier_breakdown(pg_storage):
     assert stats["total_pages"] == 2
     assert stats["domains"] == 2
     assert stats["frontier_status"] == {"done": 1, "pending": 2}
+    assert stats["legacy_frontier_status"] == {"done": 1, "pending": 2}
     assert stats["queue_classes"] == {"exploration": 2, "recrawl": 1}
     assert stats["pending_queue_classes"] == {"exploration": 2}
     assert stats["discovery_kinds"] == {"external": 1, "same_host": 1, "seed": 1}
