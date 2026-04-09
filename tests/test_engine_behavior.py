@@ -29,16 +29,26 @@ class FakeFrontier:
 
     def lease_next(self, prioritize_breadth: bool = False, **kwargs: object):
         exclude_domains = set(kwargs.get("exclude_domains") or [])
+        exclude_branch_keys = set(kwargs.get("exclude_branch_keys") or [])
+        exclude_domain_branches = set(kwargs.get("exclude_domain_branches") or [])
         queue_classes = list(kwargs.get("queue_classes") or [])
         self.lease_calls.append(
             {
                 "prioritize_breadth": prioritize_breadth,
                 "exclude_domains": sorted(exclude_domains),
+                "exclude_branch_keys": sorted(exclude_branch_keys),
+                "exclude_domain_branches": sorted(exclude_domain_branches),
                 "queue_classes": queue_classes,
             }
         )
         for index, task in enumerate(self.tasks):
-            if task.url.split('/')[2] in exclude_domains:
+            domain = task.url.split('/')[2]
+            if domain in exclude_domains:
+                continue
+            branch_key = "/" + "/".join([part for part in task.url.split("/", 3)[-1].split("/") if part][:2])
+            if branch_key in exclude_branch_keys:
+                continue
+            if (domain, branch_key) in exclude_domain_branches:
                 continue
             effective_queue = task.queue_class or "exploration"
             if queue_classes and effective_queue not in queue_classes:
@@ -462,8 +472,20 @@ async def test_crawler_reserves_some_leases_for_breadth():
         await engine.crawl()
 
     assert frontier.lease_calls[:2] == [
-        {"prioritize_breadth": True, "exclude_domains": [], "queue_classes": ["exploration"]},
-        {"prioritize_breadth": True, "exclude_domains": [], "queue_classes": ["exploration"]},
+        {
+            "prioritize_breadth": True,
+            "exclude_domains": [],
+            "exclude_branch_keys": [],
+            "exclude_domain_branches": [],
+            "queue_classes": ["exploration"],
+        },
+        {
+            "prioritize_breadth": True,
+            "exclude_domains": [],
+            "exclude_branch_keys": [],
+            "exclude_domain_branches": [],
+            "queue_classes": ["exploration"],
+        },
     ]
 
 
@@ -513,11 +535,13 @@ async def test_crawler_avoids_leasing_same_host_while_request_in_flight():
         frontier=frontier,
         domain_manager=domain_manager,
     ) as engine:
+        engine.max_inflight_requests_per_host = 1
         engine.fetcher = fetcher
         await engine.crawl()
 
     assert fetcher.calls == ["https://a.com/1", "https://b.com/1"]
     assert frontier.lease_calls[1]["exclude_domains"] == ["a.com"]
+    assert frontier.lease_calls[1]["exclude_domain_branches"] == [("a.com", "/1")]
 
 
 @pytest.mark.asyncio

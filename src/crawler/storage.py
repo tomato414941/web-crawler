@@ -262,6 +262,7 @@ class PgStorage:
                 lease_table_exists = cur.fetchone()[0] is not None
 
                 frontier_status: dict[str, int] = {}
+                legacy_frontier_status: dict[str, int] = {}
                 queue_classes: dict[str, int] = {}
                 pending_queue_classes: dict[str, int] = {}
                 discovery_kinds: dict[str, int] = {}
@@ -298,7 +299,12 @@ class PgStorage:
                     )
 
                     cur.execute("SELECT status, COUNT(*) FROM public.frontier GROUP BY status")
-                    frontier_status = {status: count for status, count in cur.fetchall()}
+                    legacy_frontier_status = {status: count for status, count in cur.fetchall()}
+                    frontier_status = {
+                        status: count
+                        for status, count in legacy_frontier_status.items()
+                        if status not in {'pending', 'leased'}
+                    }
                     if lease_table_exists:
                         cur.execute("SELECT COUNT(*) FROM public.frontier_lease_active")
                         frontier_status['leased'] = cur.fetchone()[0]
@@ -403,6 +409,7 @@ class PgStorage:
             "newest_crawl": row[3],
             "total_bytes": row[4],
             "frontier_status": frontier_status,
+            "legacy_frontier_status": legacy_frontier_status,
             "queue_classes": queue_classes,
             "pending_queue_classes": pending_queue_classes,
             "discovery_kinds": discovery_kinds,

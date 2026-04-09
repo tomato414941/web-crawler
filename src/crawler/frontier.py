@@ -86,6 +86,7 @@ QUEUE_REQUIRED_COLUMNS = {
     "priority",
     "next_fetch_at",
     "added_at",
+    "branch_key",
 }
 LEASE_TABLE = "frontier_lease_active"
 LEASE_REQUIRED_COLUMNS = {
@@ -252,6 +253,8 @@ class Frontier:
         now: float,
         domain: str | None = None,
         exclude_domains: list[str] | None = None,
+        exclude_branch_keys: list[str] | None = None,
+        exclude_domain_branches: list[tuple[str, str]] | None = None,
     ) -> _ReadySql:
         """Build readiness SQL fragments for physical pending queue tables."""
         next_request_sql = "0"
@@ -291,6 +294,22 @@ class Frontier:
         if exclude_domains:
             conditions.append(f"NOT ({alias}.domain = ANY(%s))")
             params.append(exclude_domains)
+
+        if exclude_branch_keys:
+            conditions.append(f"NOT ({alias}.branch_key = ANY(%s))")
+            params.append(exclude_branch_keys)
+
+        if exclude_domain_branches:
+            placeholders = ", ".join(["(%s, %s)"] * len(exclude_domain_branches))
+            conditions.append(
+                "NOT EXISTS ("
+                f"SELECT 1 FROM (VALUES {placeholders}) AS active(domain, branch_key) "
+                f"WHERE active.domain = {alias}.domain "
+                f"AND active.branch_key = {alias}.branch_key"
+                ")"
+            )
+            for active_domain, active_branch in exclude_domain_branches:
+                params.extend([active_domain, active_branch])
 
         return _ReadySql(
             where=" AND ".join(conditions),
@@ -568,14 +587,15 @@ class Frontier:
             return
         self._delete_queue_entries(cur, normalized_urls)
 
-        grouped: dict[str, list[tuple[str, str, float, float, float]]] = {
+        grouped: dict[str, list[tuple[str, str, float, float, float, str]]] = {
             queue_class: [] for queue_class in FRONTIER_ALLOWED_QUEUE_CLASSES
         }
         for url, domain, priority, next_fetch_at, added_at, queue_class, status in rows:
             if status != PENDING_STATUS:
                 continue
+            normalized_url = normalize_url(url)
             grouped[self._normalize_queue_class(queue_class)].append(
-                (normalize_url(url), domain, priority, next_fetch_at, added_at)
+                (normalized_url, domain, priority, next_fetch_at, added_at, url_branch_key(normalized_url))
             )
 
         for queue_class, pending_rows in grouped.items():
@@ -584,13 +604,14 @@ class Frontier:
             psycopg2.extras.execute_values(
                 cur,
                 f"""INSERT INTO {self._queue_table_sql(queue_class)}
-                        (url, domain, priority, next_fetch_at, added_at)
+                        (url, domain, priority, next_fetch_at, added_at, branch_key)
                     VALUES %s
                     ON CONFLICT (url) DO UPDATE
                     SET domain = EXCLUDED.domain,
                         priority = EXCLUDED.priority,
                         next_fetch_at = EXCLUDED.next_fetch_at,
-                        added_at = EXCLUDED.added_at""",
+                        added_at = EXCLUDED.added_at,
+                        branch_key = EXCLUDED.branch_key""",
                 pending_rows,
                 page_size=200,
             )
@@ -737,6 +758,8 @@ class Frontier:
         lease_seconds: float | None = None,
         prioritize_breadth: bool = False,
         exclude_domains: list[str] | None = None,
+        exclude_branch_keys: list[str] | None = None,
+        exclude_domain_branches: list[tuple[str, str]] | None = None,
         queue_classes: list[str] | None = None,
     ) -> CrawlTask | None:
         """Lease the next ready URL, optionally filtered by domain."""
@@ -750,6 +773,8 @@ class Frontier:
                 now=now,
                 domain=domain,
                 exclude_domains=exclude_domains,
+                exclude_branch_keys=exclude_branch_keys,
+                exclude_domain_branches=exclude_domain_branches,
             )
             candidate_from = f"FROM {self._queue_table_sql(queue_classes[0])} AS candidate"
         else:
@@ -837,6 +862,8 @@ class Frontier:
         lease_seconds: float | None = None,
         prioritize_breadth: bool = False,
         exclude_domains: list[str] | None = None,
+        exclude_branch_keys: list[str] | None = None,
+        exclude_domain_branches: list[tuple[str, str]] | None = None,
         queue_classes: list[str] | None = None,
     ) -> list[CrawlTask]:
         """Lease a batch of ready URLs."""
@@ -850,6 +877,8 @@ class Frontier:
                 now=now,
                 domain=domain,
                 exclude_domains=exclude_domains,
+                exclude_branch_keys=exclude_branch_keys,
+                exclude_domain_branches=exclude_domain_branches,
             )
             candidate_from = f"FROM {self._queue_table_sql(queue_classes[0])} AS candidate"
         else:
@@ -1158,13 +1187,13 @@ class Frontier:
 
         with self._conn.cursor() as cur:
             cur.execute(
-                f"""SELECT url, domain
+                f"""SELECT domain, branch_key
                     FROM {self._queue_table_sql(QUEUE_EXPLORATION)}"""
             )
-            existing_branches = {(domain, url_branch_key(url)) for url, domain in cur.fetchall()}
+            existing_branches = {(domain, branch_key) for domain, branch_key in cur.fetchall()}
 
             cur.execute(
-                f"""SELECT url, domain
+                f"""SELECT url, domain, branch_key
                     FROM {self._queue_table_sql(QUEUE_BACKLOG)}
                     ORDER BY priority DESC, added_at ASC, url ASC
                     LIMIT %s""",
@@ -1174,8 +1203,7 @@ class Frontier:
 
             promoted_urls: list[str] = []
             domain_counts: Counter[str] = Counter()
-            for url, domain in candidates:
-                branch = url_branch_key(url)
+            for url, domain, branch in candidates:
                 key = (domain, branch)
                 if key in existing_branches:
                     continue
