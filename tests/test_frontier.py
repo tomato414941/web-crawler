@@ -755,3 +755,29 @@ class TestFrontier:
 
         assert ready == ["http://a.com/1"]
         assert deferred == ["http://a.com/2", "http://a.com/3"]
+
+    def test_defer_overcrowded_backlog_delays_excess_low_priority_branch_urls(self, frontier):
+        frontier.add(CrawlTask(url="http://a.com/docs/python/1", depth=1, priority=0.55, added_at=1000))
+        frontier.add(CrawlTask(url="http://a.com/docs/python/2", depth=1, priority=0.55, added_at=1001))
+        frontier.add(CrawlTask(url="http://a.com/docs/rust/1", depth=1, priority=0.55, added_at=1002))
+
+        delayed = frontier.defer_overcrowded_backlog(
+            keep_ready_per_domain=10,
+            keep_ready_per_branch=1,
+            low_priority_threshold=0.75,
+            defer_seconds=60.0,
+        )
+
+        assert delayed == 1
+
+        with frontier._conn.cursor() as cur:
+            cur.execute(
+                "SELECT url, next_fetch_at FROM frontier WHERE domain = 'a.com' ORDER BY url ASC"
+            )
+            rows = cur.fetchall()
+
+        ready = [url for url, next_fetch_at in rows if next_fetch_at <= time.time()]
+        deferred = [url for url, next_fetch_at in rows if next_fetch_at > time.time()]
+
+        assert ready == ["http://a.com/docs/python/1", "http://a.com/docs/rust/1"]
+        assert deferred == ["http://a.com/docs/python/2"]

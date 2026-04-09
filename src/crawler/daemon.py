@@ -54,6 +54,7 @@ class CrawlDaemon:
         cycle_pause: float = 5.0,
         idle_sleep: float = 60.0,
         backlog_ready_per_domain: int | None = None,
+        backlog_ready_per_branch: int | None = None,
         backlog_low_priority: float | None = None,
         backlog_defer_seconds: float | None = None,
         min_ready_sleep: float | None = None,
@@ -72,6 +73,11 @@ class CrawlDaemon:
             settings.daemon_keep_ready_per_domain
             if backlog_ready_per_domain is None
             else backlog_ready_per_domain
+        )
+        self._backlog_ready_per_branch = (
+            settings.daemon_keep_ready_per_branch
+            if backlog_ready_per_branch is None
+            else backlog_ready_per_branch
         )
         self._backlog_low_priority = (
             settings.daemon_backlog_low_priority
@@ -124,6 +130,7 @@ class CrawlDaemon:
                     self._recrawl_stale(storage, frontier)
                     deferred = frontier.defer_overcrowded_backlog(
                         keep_ready_per_domain=self._backlog_ready_per_domain,
+                        keep_ready_per_branch=self._backlog_ready_per_branch,
                         low_priority_threshold=self._backlog_low_priority,
                         defer_seconds=self._backlog_defer_seconds,
                     )
@@ -295,6 +302,7 @@ class CrawlDaemon:
                     logger.info("Recovered %d leased URLs", count)
                 deferred = frontier.defer_overcrowded_backlog(
                     keep_ready_per_domain=self._backlog_ready_per_domain,
+                    keep_ready_per_branch=self._backlog_ready_per_branch,
                     low_priority_threshold=self._backlog_low_priority,
                     defer_seconds=self._backlog_defer_seconds,
                 )
