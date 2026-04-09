@@ -209,8 +209,11 @@ class TestFrontier:
                 ("http://example.com/",),
             )
             (queue_class,) = cur.fetchone()
+            cur.execute("SELECT COUNT(*) FROM frontier_queue_exploration WHERE url = %s", ("http://example.com/",))
+            (queue_count,) = cur.fetchone()
 
         assert queue_class == QUEUE_EXPLORATION
+        assert queue_count == 1
 
     def test_add_classifies_same_host_urls_as_exploration_through_depth_two(self, frontier):
         frontier.add(CrawlTask(url="http://example.com/guide", depth=2, discovery_kind=DISCOVERY_SAME_HOST))
@@ -434,8 +437,11 @@ class TestFrontier:
                 ("http://example.com/",),
             )
             (discovery_kind,) = cur.fetchone()
+            cur.execute("SELECT COUNT(*) FROM frontier_queue_exploration WHERE url = %s", ("http://example.com/",))
+            (queue_count,) = cur.fetchone()
 
         assert discovery_kind == "seed"
+        assert queue_count == 1
 
     def test_stats(self, frontier):
         frontier.add(CrawlTask(url="http://example.com/1", depth=0))
@@ -628,8 +634,11 @@ class TestFrontier:
                 ("http://example.com/",),
             )
             (queue_class,) = cur.fetchone()
+            cur.execute("SELECT COUNT(*) FROM frontier_queue_exploration WHERE url = %s", ("http://example.com/",))
+            (queue_count,) = cur.fetchone()
 
         assert queue_class == QUEUE_EXPLORATION
+        assert queue_count == 1
 
     def test_promote_seed_host_exploration_requeues_shallow_seed_host_pages(self, frontier):
         frontier.add(
