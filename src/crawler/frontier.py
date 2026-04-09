@@ -321,7 +321,7 @@ class Frontier:
                 params,
             )
             rows = cur.fetchall()
-            self._replace_pending_queue_rows(cur, [row[:7] for row in rows])
+            self._replace_pending_queue_rows(cur, self._project_pending_queue_rows(rows))
             self._replace_active_lease_rows(cur, [(row[0], row[1], row[5], row[6], row[7], row[8]) for row in rows])
             return len(rows)
 
@@ -595,6 +595,22 @@ class Frontier:
                 page_size=200,
             )
 
+    def _project_pending_queue_rows(
+        self,
+        rows: list[tuple[object, ...]],
+    ) -> list[tuple[str, str, float, float, float, str, str]]:
+        """Project frontier rows into the queue-table row shape."""
+        projected: list[tuple[str, str, float, float, float, str, str]] = []
+        for row in rows:
+            if len(row) == 7:
+                projected.append(row)  # type: ignore[arg-type]
+                continue
+            if len(row) >= 9:
+                projected.append((row[0], row[1], row[2], row[3], row[4], row[5], row[8]))  # type: ignore[arg-type]
+                continue
+            raise ValueError(f"unexpected frontier row shape: {len(row)}")
+        return projected
+
     def _sync_queue_entries(self, cur, urls: list[str]) -> None:
         """Rebuild physical pending queue rows for canonical frontier URLs."""
         normalized_urls = sorted({normalize_url(url) for url in urls if url})
@@ -695,7 +711,7 @@ class Frontier:
                     page_size=200,
                 )
                 frontier_rows = cur.fetchall()
-                self._replace_pending_queue_rows(cur, [row[:7] for row in frontier_rows])
+                self._replace_pending_queue_rows(cur, self._project_pending_queue_rows(frontier_rows))
                 self._replace_active_lease_rows(cur, [(row[0], row[1], row[5], row[6], row[7], row[8]) for row in frontier_rows])
                 return len(frontier_rows)
         except Exception:
@@ -998,7 +1014,7 @@ class Frontier:
                 ),
             )
             rows = cur.fetchall()
-            self._replace_pending_queue_rows(cur, [row[:7] for row in rows])
+            self._replace_pending_queue_rows(cur, self._project_pending_queue_rows(rows))
             self._replace_active_lease_rows(cur, [(row[0], row[1], row[5], row[6], row[7], row[8]) for row in rows])
             updated = bool(rows)
         self._conn.commit()
@@ -1019,7 +1035,7 @@ class Frontier:
                 (PENDING_STATUS, now, FAILED_STATUS),
             )
             rows = cur.fetchall()
-            self._replace_pending_queue_rows(cur, [row[:7] for row in rows])
+            self._replace_pending_queue_rows(cur, self._project_pending_queue_rows(rows))
             self._replace_active_lease_rows(cur, [(row[0], row[1], row[5], row[6], row[7], row[8]) for row in rows])
             count = len(rows)
         self._conn.commit()
@@ -1070,7 +1086,7 @@ class Frontier:
                 (now, low_priority_threshold, deferred_until, keep_ready_per_domain),
             )
             rows = cur.fetchall()
-            self._replace_pending_queue_rows(cur, [row[:7] for row in rows])
+            self._replace_pending_queue_rows(cur, self._project_pending_queue_rows(rows))
             self._replace_active_lease_rows(cur, [(row[0], row[1], row[5], row[6], row[7], row[8]) for row in rows])
             count = len(rows)
         self._conn.commit()
@@ -1118,7 +1134,7 @@ class Frontier:
                 (seed_hosts, max_depth, QUEUE_EXPLORATION, now, per_host),
             )
             rows = cur.fetchall()
-            self._replace_pending_queue_rows(cur, [row[:7] for row in rows])
+            self._replace_pending_queue_rows(cur, self._project_pending_queue_rows(rows))
             self._replace_active_lease_rows(cur, [(row[0], row[1], row[5], row[6], row[7], row[8]) for row in rows])
             count = len(rows)
         self._conn.commit()
@@ -1169,7 +1185,7 @@ class Frontier:
                 page_size=200,
             )
             frontier_rows = cur.fetchall()
-            self._replace_pending_queue_rows(cur, [row[:7] for row in frontier_rows])
+            self._replace_pending_queue_rows(cur, self._project_pending_queue_rows(frontier_rows))
             self._replace_active_lease_rows(cur, [(row[0], row[1], row[5], row[6], row[7], row[8]) for row in frontier_rows])
             affected = len(frontier_rows)
         self._conn.commit()
