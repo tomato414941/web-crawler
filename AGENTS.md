@@ -1,7 +1,9 @@
 # Repository Guidelines
 
 ## What This Project Is
-A general-purpose async web crawler service. Crawls autonomously, stores results in PostgreSQL, and serves them via REST API. Designed to be consumed by other services (e.g., search engines) but has no knowledge of its consumers.
+A broad-WWW async web crawler service. Crawls autonomously, stores results in PostgreSQL, and serves them via REST API. Designed to be consumed by other services (e.g., search engines) but has no knowledge of its consumers.
+
+The target is the public web as a whole, not any specific topic, standards body, or ecosystem. If existing seeds, pending queues, or stored pages are biased toward one domain community, treat that as an implementation artifact to correct rather than as the intended product scope.
 
 ## Project Structure
 Single Python package with CLI entry point:
@@ -58,6 +60,12 @@ docker compose up -d
 
 ## Commit Messages
 `type: description` format (e.g., `feat:`, `fix:`, `refactor:`, `docs:`, `test:`)
+
+## Scope Guardrails
+- Treat broad WWW crawling as the highest-level product constraint
+- Do not infer product scope from the current corpus, pending queue, or existing seed list
+- Prefer host diversity over same-host branch coverage when choosing bootstrap seeds
+- If a design choice improves one domain ecosystem at the expense of broad-web coverage, reject it unless explicitly requested
 
 ## Key Design Decisions
 - **Frontier uses Postgres** — Postgres stores URL state, lease timing, and retry metadata

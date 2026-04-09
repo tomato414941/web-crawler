@@ -2,8 +2,10 @@
 
 Async web crawler with adaptive rendering, AI agent, and REST API.
 
-This project targets the public web as a whole. Seed URLs are entry points for discovery,
-not an allowlist of the only domains the crawler may visit.
+This project targets the broad public web as a whole. It is not a domain-specific crawler.
+Current crawl coverage may be biased by implementation limits or temporary seed choices; that
+bias is an artifact to correct, not the intended scope of the project. Seed URLs are bootstrap
+entry points for discovery, not an allowlist and not a statement of the crawler's target domain.
 
 ## Features
 
