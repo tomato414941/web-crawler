@@ -520,6 +520,40 @@ class Frontier:
             f"{alias}.added_at ASC"
         )
 
+    def _branch_breadth_candidate_from_sql(
+        self,
+        *,
+        queue_class: str,
+        ranked_ready_sql: _ReadySql,
+    ) -> str:
+        """Return a queue FROM clause with domain/branch breadth ranks attached."""
+        table_name = self._queue_table_sql(queue_class)
+        ranked_order = self._lease_order_by_sql("ranked_source", prioritize_breadth=True)
+        return f"""FROM {table_name} AS candidate
+                    JOIN (
+                        SELECT
+                            ranked_source.url,
+                            ROW_NUMBER() OVER (
+                                PARTITION BY ranked_source.domain
+                                ORDER BY {ranked_order}, ranked_source.url ASC
+                            ) AS domain_rownum,
+                            ROW_NUMBER() OVER (
+                                PARTITION BY ranked_source.domain, ranked_source.branch_key
+                                ORDER BY {ranked_order}, ranked_source.url ASC
+                            ) AS branch_rownum
+                        FROM {table_name} AS ranked_source
+                        WHERE {ranked_ready_sql.where}
+                    ) AS ranked ON ranked.url = candidate.url"""
+
+    def _branch_breadth_order_by_sql(self, alias: str) -> str:
+        """Return ORDER BY that takes the first ready URL from each branch before repeats."""
+        return (
+            "ranked.branch_rownum ASC, "
+            "ranked.domain_rownum ASC, "
+            f"{self._lease_order_by_sql(alias, prioritize_breadth=True)}, "
+            f"{alias}.url ASC"
+        )
+
     def _queue_table_sql(self, queue_class: str) -> str:
         """Return the physical queue table name for a queue class."""
         return QUEUE_TABLE_BY_CLASS[self._normalize_queue_class(queue_class)]
@@ -767,6 +801,7 @@ class Frontier:
         lease_token = uuid.uuid4().hex
         duration = self._lease_seconds if lease_seconds is None else lease_seconds
         lease_expires_at = now + duration
+        candidate_from_params: list[object] = []
         if queue_classes and len(queue_classes) == 1:
             ready_sql = self._queue_ready_sql(
                 alias="candidate",
@@ -776,7 +811,22 @@ class Frontier:
                 exclude_branch_keys=exclude_branch_keys,
                 exclude_domain_branches=exclude_domain_branches,
             )
-            candidate_from = f"FROM {self._queue_table_sql(queue_classes[0])} AS candidate"
+            if prioritize_breadth:
+                ranked_ready_sql = self._queue_ready_sql(
+                    alias="ranked_source",
+                    now=now,
+                    domain=domain,
+                    exclude_domains=exclude_domains,
+                    exclude_branch_keys=exclude_branch_keys,
+                    exclude_domain_branches=exclude_domain_branches,
+                )
+                candidate_from = self._branch_breadth_candidate_from_sql(
+                    queue_class=queue_classes[0],
+                    ranked_ready_sql=ranked_ready_sql,
+                )
+                candidate_from_params = list(ranked_ready_sql.params)
+            else:
+                candidate_from = f"FROM {self._queue_table_sql(queue_classes[0])} AS candidate"
         else:
             ready_sql = self._ready_sql(
                 alias="candidate",
@@ -786,8 +836,11 @@ class Frontier:
                 queue_classes=queue_classes,
             )
             candidate_from = "FROM frontier AS candidate"
-        order_by = self._lease_order_by_sql("candidate", prioritize_breadth=prioritize_breadth)
-        params: list[object] = [lease_token, lease_expires_at, *ready_sql.params]
+        if queue_classes and len(queue_classes) == 1 and prioritize_breadth:
+            order_by = self._branch_breadth_order_by_sql("candidate")
+        else:
+            order_by = self._lease_order_by_sql("candidate", prioritize_breadth=prioritize_breadth)
+        params: list[object] = [lease_token, lease_expires_at, *candidate_from_params, *ready_sql.params]
 
         try:
             self._recover_leased_locked(now, expired_only=True)
@@ -803,7 +856,7 @@ class Frontier:
                             WHERE {ready_sql.where}
                             ORDER BY {order_by}
                             LIMIT 1
-                            FOR UPDATE SKIP LOCKED
+                            FOR UPDATE OF candidate SKIP LOCKED
                         )
                         RETURNING
                             url,
@@ -871,6 +924,7 @@ class Frontier:
         lease_token = uuid.uuid4().hex
         duration = self._lease_seconds if lease_seconds is None else lease_seconds
         lease_expires_at = now + duration
+        candidate_from_params: list[object] = []
         if queue_classes and len(queue_classes) == 1:
             ready_sql = self._queue_ready_sql(
                 alias="candidate",
@@ -880,7 +934,22 @@ class Frontier:
                 exclude_branch_keys=exclude_branch_keys,
                 exclude_domain_branches=exclude_domain_branches,
             )
-            candidate_from = f"FROM {self._queue_table_sql(queue_classes[0])} AS candidate"
+            if prioritize_breadth:
+                ranked_ready_sql = self._queue_ready_sql(
+                    alias="ranked_source",
+                    now=now,
+                    domain=domain,
+                    exclude_domains=exclude_domains,
+                    exclude_branch_keys=exclude_branch_keys,
+                    exclude_domain_branches=exclude_domain_branches,
+                )
+                candidate_from = self._branch_breadth_candidate_from_sql(
+                    queue_class=queue_classes[0],
+                    ranked_ready_sql=ranked_ready_sql,
+                )
+                candidate_from_params = list(ranked_ready_sql.params)
+            else:
+                candidate_from = f"FROM {self._queue_table_sql(queue_classes[0])} AS candidate"
         else:
             ready_sql = self._ready_sql(
                 alias="candidate",
@@ -890,8 +959,11 @@ class Frontier:
                 queue_classes=queue_classes,
             )
             candidate_from = "FROM frontier AS candidate"
-        order_by = self._lease_order_by_sql("candidate", prioritize_breadth=prioritize_breadth)
-        params: list[object] = [lease_token, lease_expires_at, *ready_sql.params, count]
+        if queue_classes and len(queue_classes) == 1 and prioritize_breadth:
+            order_by = self._branch_breadth_order_by_sql("candidate")
+        else:
+            order_by = self._lease_order_by_sql("candidate", prioritize_breadth=prioritize_breadth)
+        params: list[object] = [lease_token, lease_expires_at, *candidate_from_params, *ready_sql.params, count]
 
         try:
             self._recover_leased_locked(now, expired_only=True)
@@ -907,7 +979,7 @@ class Frontier:
                             WHERE {ready_sql.where}
                             ORDER BY {order_by}
                             LIMIT %s
-                            FOR UPDATE SKIP LOCKED
+                            FOR UPDATE OF candidate SKIP LOCKED
                         )
                         RETURNING
                             url,
