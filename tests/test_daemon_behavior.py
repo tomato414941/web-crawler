@@ -353,6 +353,12 @@ async def test_daemon_persists_readiness_breakdown_while_waiting_for_ready():
                     "domain_next_request": 1,
                     "domain_backoff": 0,
                 },
+                state_counts={
+                    "ready": 0,
+                    "scheduled": 0,
+                    "blocked_domain_next_request": 1,
+                    "blocked_domain_backoff": 2,
+                },
             )
 
         def defer_overcrowded_backlog(self, **_kwargs):
@@ -399,6 +405,12 @@ async def test_daemon_persists_readiness_breakdown_while_waiting_for_ready():
         "next_fetch_at": 2,
         "domain_next_request": 1,
         "domain_backoff": 0,
+    }
+    assert storage.payloads[-1][1]["scheduler_state"] == {
+        "ready": 0,
+        "scheduled": 0,
+        "blocked_domain_next_request": 1,
+        "blocked_domain_backoff": 2,
     }
 
 
