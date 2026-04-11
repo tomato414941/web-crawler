@@ -179,11 +179,17 @@ class Frontier:
             return priority
         return max(MIN_RETRY_PRIORITY, round(priority * (RETRY_PRIORITY_DECAY ** fail_streak), 2))
 
-    def _lease_match_sql(self, lease_token: str | None) -> tuple[str, tuple]:
-        """Build an optional lease-token predicate for completion updates."""
+    def _lease_match_sql(self, table_alias: str, lease_token: str | None) -> tuple[str, tuple]:
+        """Build an optional lease-table predicate for completion updates."""
         if lease_token is None:
             return "", ()
-        return " AND lease_token = %s", (lease_token,)
+        return (
+            " AND EXISTS ("
+            f"SELECT 1 FROM {LEASE_TABLE} AS active "
+            f"WHERE active.url = {table_alias}.url AND active.lease_token = %s"
+            ")",
+            (lease_token,),
+        )
 
     def _ready_sql(
         self,
@@ -320,22 +326,24 @@ class Frontier:
     def _recover_leased_locked(self, now: float, expired_only: bool) -> int:
         """Reset leased URLs back to pending inside an open transaction."""
         if expired_only:
-            where = (
-                f"status = '{LEASED_STATUS}' AND "
-                "(lease_expires_at IS NULL OR lease_expires_at <= %s)"
-            )
+            where = "lease_expires_at <= %s"
             params = (now,)
         else:
-            where = f"status = '{LEASED_STATUS}'"
+            where = "TRUE"
             params = ()
 
         with self._conn.cursor() as cur:
             cur.execute(
-                f"""UPDATE frontier
+                f"""WITH active_leases AS (
+                        SELECT url
+                        FROM {LEASE_TABLE}
+                        WHERE {where}
+                    )
+                    UPDATE frontier
                     SET status = '{PENDING_STATUS}',
                         lease_token = NULL,
                         lease_expires_at = NULL
-                    WHERE {where}
+                    WHERE url IN (SELECT url FROM active_leases)
                     RETURNING url, domain, priority, next_fetch_at, added_at, queue_class, lease_token, lease_expires_at, status""",
                 params,
             )
@@ -1048,7 +1056,7 @@ class Frontier:
         """Mark a URL as successfully crawled."""
         normalized = normalize_url(url)
         now = time.time()
-        lease_sql, lease_params = self._lease_match_sql(lease_token)
+        lease_sql, lease_params = self._lease_match_sql("frontier", lease_token)
 
         with self._conn.cursor() as cur:
             cur.execute(
@@ -1082,7 +1090,7 @@ class Frontier:
         """Mark a URL as failed, optionally scheduling a retry."""
         normalized = normalize_url(url)
         now = time.time()
-        lease_sql, lease_params = self._lease_match_sql(lease_token)
+        lease_sql, lease_params = self._lease_match_sql("frontier", lease_token)
 
         with self._conn.cursor() as cur:
             cur.execute(

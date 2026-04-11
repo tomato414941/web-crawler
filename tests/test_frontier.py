@@ -420,6 +420,33 @@ class TestFrontier:
             (active_count,) = cur.fetchone()
         assert active_count == 0
 
+    def test_mark_done_uses_active_lease_table_for_token_validation(self, frontier):
+        frontier.add(CrawlTask(url="http://example.com", depth=0))
+        result = frontier.lease_next()
+
+        with frontier._conn.cursor() as cur:
+            cur.execute(
+                "UPDATE frontier SET lease_token = %s WHERE url = %s",
+                ("tampered", result.url),
+            )
+        frontier._conn.commit()
+
+        assert frontier.mark_done(result.url, lease_token=result.lease_token) is True
+
+    def test_recover_leased_uses_active_lease_table(self, frontier):
+        frontier.add(CrawlTask(url="http://example.com", depth=0))
+        result = frontier.lease_next()
+
+        with frontier._conn.cursor() as cur:
+            cur.execute(
+                "UPDATE frontier SET lease_expires_at = %s WHERE url = %s",
+                (time.time() + 3600, result.url),
+            )
+        frontier._conn.commit()
+
+        assert frontier.recover_leased(expired_only=False) == 1
+        assert frontier.pending_count() == 1
+
     def test_mark_failed(self, frontier):
         frontier.add(CrawlTask(url="http://example.com", depth=0))
         result = frontier.lease_next()
