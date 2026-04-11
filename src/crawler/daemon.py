@@ -413,30 +413,23 @@ class CrawlDaemon:
         now = time.time()
         with storage.conn.cursor() as cur:
             cur.execute(
-                """WITH candidates AS (
-                       SELECT frontier.url
-                       FROM frontier
-                       JOIN pages ON frontier.url = pages.url
-                       WHERE pages.crawled_at < %s
-                         AND frontier.status = 'done'
-                       ORDER BY pages.crawled_at ASC
-                       LIMIT %s
-                   )
-                   UPDATE frontier
-                   SET status = 'pending',
-                       queue_class = 'recrawl',
-                       next_fetch_at = %s,
-                       lease_token = NULL,
-                       lease_expires_at = NULL
-                   WHERE url IN (SELECT url FROM candidates)
-                   RETURNING url, domain, priority, next_fetch_at, added_at, queue_class, status""",
-                (cutoff, batch_size, now),
+                """SELECT frontier.url
+                   FROM frontier
+                   JOIN pages ON frontier.url = pages.url
+                   WHERE pages.crawled_at < %s
+                     AND frontier.status = 'done'
+                   ORDER BY pages.crawled_at ASC
+                   LIMIT %s""",
+                (cutoff, batch_size),
             )
-            rows = cur.fetchall()
-            count = len(rows)
-        storage.conn.commit()
-        if rows:
-            frontier.sync_pending_queue_rows(rows)
+            candidate_urls = [url for (url,) in cur.fetchall()]
+
+        count = frontier.requeue_urls(
+            candidate_urls,
+            queue_class='recrawl',
+            next_fetch_at=now,
+            current_statuses=['done'],
+        )
         if count:
             logger.info(
                 "Re-queued %d stale pages (TTL=%ds, pending=%d, target=%d)",

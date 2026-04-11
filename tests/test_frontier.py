@@ -16,6 +16,7 @@ from crawler.discovery import (
 )
 from crawler.frontier import (
     CrawlTask,
+    DONE_STATUS,
     Frontier,
     LEASED_STATUS,
     QUEUE_BACKLOG,
@@ -706,12 +707,8 @@ class TestFrontier:
         assert leased is not None
         frontier.mark_done(leased.url, lease_token=leased.lease_token)
 
-        with frontier._conn.cursor() as cur:
-            cur.execute(
-                "UPDATE frontier SET status = 'pending', queue_class = %s WHERE url = %s",
-                (QUEUE_RECRAWL, leased.url),
-            )
-        frontier._conn.commit()
+        requeued = frontier.requeue_urls([leased.url], queue_class=QUEUE_RECRAWL, current_statuses=[DONE_STATUS])
+        assert requeued == 1
 
         recrawl = frontier.lease_next(queue_classes=[QUEUE_RECRAWL])
         assert recrawl is not None
