@@ -666,33 +666,42 @@ class Frontier:
             raise ValueError(f"unexpected frontier row shape: {len(row)}")
         return projected
 
-    def _sync_queue_entries(self, cur, urls: list[str]) -> None:
-        """Rebuild physical pending queue rows for canonical frontier URLs."""
+    def requeue_urls(
+        self,
+        urls: list[str],
+        *,
+        queue_class: str,
+        next_fetch_at: float | None = None,
+        current_statuses: list[str] | None = None,
+    ) -> int:
+        """Move known URLs back into a pending queue class and synchronize scheduler state."""
         normalized_urls = sorted({normalize_url(url) for url in urls if url})
         if not normalized_urls:
-            return
-        cur.execute(
-            """SELECT url, domain, priority, next_fetch_at, added_at, queue_class, status
-                FROM frontier
-                WHERE url = ANY(%s)""",
-            (normalized_urls,),
-        )
-        self._replace_pending_queue_rows(cur, cur.fetchall())
+            return 0
 
-    def sync_pending_queues(self, urls: list[str]) -> None:
-        """Synchronize physical pending queue tables for the given URLs."""
-        with self._conn.cursor() as cur:
-            self._sync_queue_entries(cur, urls)
-        self._conn.commit()
+        scheduled_at = time.time() if next_fetch_at is None else next_fetch_at
+        statuses = current_statuses or [DONE_STATUS, FAILED_STATUS]
 
-    def sync_pending_queue_rows(
-        self,
-        rows: list[tuple[str, str, float, float, float, str, str]],
-    ) -> None:
-        """Synchronize queue tables directly from returned frontier rows."""
         with self._conn.cursor() as cur:
-            self._replace_pending_queue_rows(cur, rows)
+            cur.execute(
+                f"""UPDATE frontier
+                    SET status = '{PENDING_STATUS}',
+                        queue_class = %s,
+                        next_fetch_at = %s,
+                        lease_token = NULL,
+                        lease_expires_at = NULL
+                    WHERE url = ANY(%s)
+                      AND status = ANY(%s)
+                    RETURNING url, domain, priority, next_fetch_at, added_at, queue_class, lease_token, lease_expires_at, status""",
+                (queue_class, scheduled_at, normalized_urls, statuses),
+            )
+            rows = cur.fetchall()
+            self._replace_pending_queue_rows(cur, self._project_pending_queue_rows(rows))
+            self._replace_active_lease_rows(cur, [(row[0], row[1], row[5], row[6], row[7], row[8]) for row in rows])
+            count = len(rows)
+
         self._conn.commit()
+        return count
 
     def _upsert_tasks(self, tasks: list[CrawlTask]) -> int:
         """Insert new tasks and promote existing metadata when a better discovery wins."""
