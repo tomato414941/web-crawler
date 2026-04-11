@@ -1,6 +1,7 @@
 """Tests for Postgres storage."""
 
 import os
+import time
 
 import pytest
 import psycopg2
@@ -190,6 +191,16 @@ def test_get_stats_includes_frontier_breakdown(pg_storage):
     assert stats["legacy_frontier_status"] == {"done": 1, "pending": 2}
     assert stats["queue_classes"] == {"exploration": 2, "recrawl": 1}
     assert stats["pending_queue_classes"] == {"exploration": 2}
+    assert stats["readiness"] == {
+        "pending": 2,
+        "ready": 2,
+        "next_ready_delay": 0.0,
+        "blocked": {
+            "next_fetch_at": 0,
+            "domain_next_request": 0,
+            "domain_backoff": 0,
+        },
+    }
     assert stats["discovery_kinds"] == {"external": 1, "same_host": 1, "seed": 1}
     assert stats["archetypes"] == {"document_page": 1, "generic_page": 1, "redirect_hub": 1}
     assert stats["top_page_domains"][0] == {"domain": "example.com", "count": 1}
@@ -221,6 +232,65 @@ def test_get_stats_includes_runtime_snapshot(pg_storage):
         "parse_queue_wait_max_ms": 12.5,
     }
     assert stats["runtime"]["updated_at"] > 0
+
+
+def test_get_stats_includes_readiness_breakdown(pg_storage):
+    now = time.time()
+
+    with pg_storage._conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO frontier (
+                url, domain, depth, priority, queue_class, discovery_kind, archetype,
+                source_url, added_at, status, next_fetch_at
+            )
+            VALUES
+                ('https://ready.example/', 'ready.example', 0, 1.0, 'exploration', 'seed', 'generic_page', NULL, %s, 'pending', %s),
+                ('https://future.example/', 'future.example', 0, 1.0, 'exploration', 'seed', 'generic_page', NULL, %s, 'pending', %s),
+                ('https://backoff.example/', 'backoff.example', 0, 1.0, 'exploration', 'seed', 'generic_page', NULL, %s, 'pending', %s)
+            """,
+            (now, now, now, now + 30.0, now, now),
+        )
+        cur.execute(
+            """
+            INSERT INTO frontier_queue_exploration (url, domain, priority, next_fetch_at, added_at, branch_key)
+            VALUES
+                ('https://ready.example/', 'ready.example', 1.0, %s, %s, '/'),
+                ('https://future.example/', 'future.example', 1.0, %s, %s, '/'),
+                ('https://backoff.example/', 'backoff.example', 1.0, %s, %s, '/')
+            """,
+            (now, now, now + 30.0, now, now, now),
+        )
+        cur.execute(
+            """
+            INSERT INTO domain_state (
+                host_key,
+                crawl_delay_seconds,
+                next_request_at,
+                backoff_until,
+                robots_checked_at,
+                updated_at
+            )
+            VALUES ('backoff.example', 1.0, %s, %s, %s, %s)
+            ON CONFLICT (host_key) DO UPDATE
+            SET next_request_at = EXCLUDED.next_request_at,
+                backoff_until = EXCLUDED.backoff_until,
+                updated_at = EXCLUDED.updated_at
+            """,
+            (now, now + 20.0, now, now),
+        )
+    pg_storage._conn.commit()
+
+    stats = pg_storage.get_stats()
+
+    assert stats["readiness"]["pending"] == 3
+    assert stats["readiness"]["ready"] == 1
+    assert stats["readiness"]["next_ready_delay"] == pytest.approx(20.0, abs=1e-3)
+    assert stats["readiness"]["blocked"] == {
+        "next_fetch_at": 1,
+        "domain_next_request": 1,
+        "domain_backoff": 0,
+    }
 
 
 def test_get_stats_includes_active_error_breakdown(pg_storage):
