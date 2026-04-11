@@ -177,6 +177,7 @@ class CrawlDaemon:
                             ) | {
                                 "next_ready_delay": next_ready_delay,
                                 "readiness_blocked": dict(readiness.blocked),
+                                "scheduler_state": dict(readiness.state_counts),
                             },
                         )
                         await self._interruptible_sleep(sleep_seconds)

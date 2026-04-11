@@ -133,6 +133,7 @@ class FrontierReadiness:
     ready: int
     next_ready_delay: float | None
     blocked: dict[str, int]
+    state_counts: dict[str, int]
 
 
 @dataclass(frozen=True)
@@ -1434,7 +1435,22 @@ class Frontier:
                         MIN(ready_at) AS next_ready_at,
                         COUNT(*) FILTER (WHERE blocked_next_fetch) AS blocked_next_fetch,
                         COUNT(*) FILTER (WHERE blocked_domain_next_request) AS blocked_domain_next_request,
-                        COUNT(*) FILTER (WHERE blocked_domain_backoff) AS blocked_domain_backoff
+                        COUNT(*) FILTER (WHERE blocked_domain_backoff) AS blocked_domain_backoff,
+                        COUNT(*) FILTER (WHERE blocked_domain_backoff) AS state_blocked_domain_backoff,
+                        COUNT(*) FILTER (
+                            WHERE NOT blocked_domain_backoff
+                              AND blocked_domain_next_request
+                        ) AS state_blocked_domain_next_request,
+                        COUNT(*) FILTER (
+                            WHERE NOT blocked_domain_backoff
+                              AND NOT blocked_domain_next_request
+                              AND blocked_next_fetch
+                        ) AS state_scheduled,
+                        COUNT(*) FILTER (
+                            WHERE NOT blocked_domain_backoff
+                              AND NOT blocked_domain_next_request
+                              AND NOT blocked_next_fetch
+                        ) AS state_ready
                     FROM readiness_entries""",
                 {"now": now},
             )
@@ -1445,6 +1461,10 @@ class Frontier:
                 blocked_next_fetch,
                 blocked_domain_next_request,
                 blocked_domain_backoff,
+                state_blocked_domain_backoff,
+                state_blocked_domain_next_request,
+                state_scheduled,
+                state_ready,
             ) = cur.fetchone()
 
         next_ready_delay = None if next_ready_at is None else max(0.0, next_ready_at - now)
@@ -1456,6 +1476,12 @@ class Frontier:
                 "next_fetch_at": blocked_next_fetch or 0,
                 "domain_next_request": blocked_domain_next_request or 0,
                 "domain_backoff": blocked_domain_backoff or 0,
+            },
+            state_counts={
+                "ready": state_ready or 0,
+                "scheduled": state_scheduled or 0,
+                "blocked_domain_next_request": state_blocked_domain_next_request or 0,
+                "blocked_domain_backoff": state_blocked_domain_backoff or 0,
             },
         )
 
