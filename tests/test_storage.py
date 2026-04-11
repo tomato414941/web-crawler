@@ -200,6 +200,12 @@ def test_get_stats_includes_frontier_breakdown(pg_storage):
             "domain_next_request": 0,
             "domain_backoff": 0,
         },
+        "state_counts": {
+            "ready": 2,
+            "scheduled": 0,
+            "blocked_domain_next_request": 0,
+            "blocked_domain_backoff": 0,
+        },
     }
     assert stats["discovery_kinds"] == {"external": 1, "same_host": 1, "seed": 1}
     assert stats["archetypes"] == {"document_page": 1, "generic_page": 1, "redirect_hub": 1}
@@ -290,6 +296,12 @@ def test_get_stats_includes_readiness_breakdown(pg_storage):
         "next_fetch_at": 1,
         "domain_next_request": 1,
         "domain_backoff": 0,
+    }
+    assert stats["readiness"]["state_counts"] == {
+        "ready": 1,
+        "scheduled": 1,
+        "blocked_domain_next_request": 1,
+        "blocked_domain_backoff": 0,
     }
     assert stats["top_blocked_domains"] == [
         {

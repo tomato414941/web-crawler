@@ -547,6 +547,18 @@ class TestFrontier:
             "domain_next_request": 0,
             "domain_backoff": 1,
         }
+        assert readiness.state_counts == {
+            "ready": 0,
+            "scheduled": 1,
+            "blocked_domain_next_request": 0,
+            "blocked_domain_backoff": 1,
+        }
+        assert readiness.state_counts == {
+            "ready": 0,
+            "scheduled": 1,
+            "blocked_domain_next_request": 0,
+            "blocked_domain_backoff": 1,
+        }
 
     def test_domain_filter(self, frontier):
         frontier.add(CrawlTask(url="http://a.com/page", depth=0))
