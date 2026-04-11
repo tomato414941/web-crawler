@@ -132,6 +132,7 @@ class FrontierReadiness:
     pending: int
     ready: int
     next_ready_delay: float | None
+    blocked: dict[str, int]
 
 
 @dataclass(frozen=True)
@@ -1396,10 +1397,9 @@ class Frontier:
     def readiness(self, now: float | None = None) -> FrontierReadiness:
         """Return a single snapshot of pending and leaseable queue state."""
         now = time.time() if now is None else now
-        ready_sql = self._queue_ready_sql(alias="queue_entry", now=now)
         with self._conn.cursor() as cur:
             cur.execute(
-                f"""WITH pending_entries AS (
+                """WITH pending_entries AS (
                         SELECT url, domain, next_fetch_at
                         FROM frontier_queue_exploration
                         UNION ALL
@@ -1408,21 +1408,55 @@ class Frontier:
                         UNION ALL
                         SELECT url, domain, next_fetch_at
                         FROM frontier_queue_recrawl
+                    ), readiness_entries AS (
+                        SELECT
+                            queue_entry.url,
+                            queue_entry.domain,
+                            queue_entry.next_fetch_at,
+                            queue_entry.next_fetch_at > %(now)s AS blocked_next_fetch,
+                            COALESCE(domain_state.next_request_at, 0) > %(now)s AS blocked_domain_next_request,
+                            COALESCE(domain_state.backoff_until, 0) > %(now)s AS blocked_domain_backoff,
+                            GREATEST(
+                                queue_entry.next_fetch_at,
+                                COALESCE(domain_state.next_request_at, 0),
+                                COALESCE(domain_state.backoff_until, 0)
+                            ) AS ready_at
+                        FROM pending_entries AS queue_entry
+                        LEFT JOIN domain_state ON domain_state.host_key = queue_entry.domain
                     )
                     SELECT
                         COUNT(*) AS pending,
-                        COUNT(*) FILTER (WHERE {ready_sql.where}) AS ready,
-                        MIN({ready_sql.ready_at}) AS next_ready_at
-                    FROM pending_entries AS queue_entry""",
-                ready_sql.params,
+                        COUNT(*) FILTER (
+                            WHERE NOT blocked_next_fetch
+                              AND NOT blocked_domain_next_request
+                              AND NOT blocked_domain_backoff
+                        ) AS ready,
+                        MIN(ready_at) AS next_ready_at,
+                        COUNT(*) FILTER (WHERE blocked_next_fetch) AS blocked_next_fetch,
+                        COUNT(*) FILTER (WHERE blocked_domain_next_request) AS blocked_domain_next_request,
+                        COUNT(*) FILTER (WHERE blocked_domain_backoff) AS blocked_domain_backoff
+                    FROM readiness_entries""",
+                {"now": now},
             )
-            pending, ready, next_ready_at = cur.fetchone()
+            (
+                pending,
+                ready,
+                next_ready_at,
+                blocked_next_fetch,
+                blocked_domain_next_request,
+                blocked_domain_backoff,
+            ) = cur.fetchone()
 
         next_ready_delay = None if next_ready_at is None else max(0.0, next_ready_at - now)
         return FrontierReadiness(
             pending=pending or 0,
             ready=ready or 0,
             next_ready_delay=next_ready_delay,
+            blocked={
+                "next_fetch_at": blocked_next_fetch or 0,
+                "domain_next_request": blocked_domain_next_request or 0,
+                "domain_backoff": blocked_domain_backoff or 0,
+            },
         )
 
     def ready_count(self, now: float | None = None) -> int:

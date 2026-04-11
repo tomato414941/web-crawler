@@ -174,7 +174,10 @@ class CrawlDaemon:
                                 pending=pending,
                                 ready=ready,
                                 cycle=cycle,
-                            ),
+                            ) | {
+                                "next_ready_delay": next_ready_delay,
+                                "readiness_blocked": dict(readiness.blocked),
+                            },
                         )
                         await self._interruptible_sleep(sleep_seconds)
                         continue

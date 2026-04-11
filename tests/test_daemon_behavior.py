@@ -327,6 +327,81 @@ async def test_daemon_uses_configured_backlog_controls():
     }
 
 
+@pytest.mark.asyncio
+async def test_daemon_persists_readiness_breakdown_while_waiting_for_ready():
+    class FakeStorage:
+        def __init__(self):
+            self.payloads = []
+
+        def close(self):
+            return None
+
+        def upsert_runtime_stats(self, component, payload):
+            self.payloads.append((component, dict(payload)))
+
+    class FakeFrontier:
+        def pending_count(self, queue_classes=None):
+            return 1
+
+        def readiness(self):
+            return SimpleNamespace(
+                pending=3,
+                ready=0,
+                next_ready_delay=12.0,
+                blocked={
+                    "next_fetch_at": 2,
+                    "domain_next_request": 1,
+                    "domain_backoff": 0,
+                },
+            )
+
+        def defer_overcrowded_backlog(self, **_kwargs):
+            return 0
+
+        def recover_leased(self, expired_only=False):
+            return 0
+
+        def upsert_seeds(self, urls, priority=2.0):
+            return len(urls)
+
+        def stats(self):
+            return {"pending": 3, "total": 3}
+
+    daemon = CrawlDaemon(
+        seeds=["https://example.com/"],
+        postgres_dsn="postgresql://unused",
+        cycle_pages=10,
+        recrawl_ttl=3600,
+        idle_sleep=30.0,
+        min_ready_sleep=1.0,
+    )
+    frontier = FakeFrontier()
+    storage = FakeStorage()
+
+    daemon._install_signals = lambda: None
+    daemon._recrawl_stale = lambda _storage, _frontier: None
+
+    async def fake_connect():
+        return storage, frontier
+
+    async def fake_sleep(seconds):
+        daemon._shutdown = True
+
+    daemon._connect = fake_connect
+    daemon._interruptible_sleep = fake_sleep
+
+    await daemon.run()
+
+    assert storage.payloads[-1][0] == "crawler"
+    assert storage.payloads[-1][1]["state"] == "idle_waiting_ready"
+    assert storage.payloads[-1][1]["next_ready_delay"] == 12.0
+    assert storage.payloads[-1][1]["readiness_blocked"] == {
+        "next_fetch_at": 2,
+        "domain_next_request": 1,
+        "domain_backoff": 0,
+    }
+
+
 def test_ensure_seeds_tops_up_when_exploration_queue_is_starved():
     class FakeFrontier:
         def __init__(self):

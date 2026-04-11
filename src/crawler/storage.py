@@ -265,18 +265,19 @@ class PgStorage:
                 legacy_frontier_status: dict[str, int] = {}
                 queue_classes: dict[str, int] = {}
                 pending_queue_classes: dict[str, int] = {}
+                readiness: dict[str, object] = {}
                 discovery_kinds: dict[str, int] = {}
                 archetypes: dict[str, int] = {}
                 top_pending_domains: list[dict[str, object]] = []
                 active_error_breakdown: dict[str, int] = {}
                 top_error_domains: list[dict[str, object]] = []
                 runtime: dict[str, object] = {}
-                pending_queue_sql = """SELECT queue_class, url, domain FROM (
-                        SELECT 'exploration' AS queue_class, url, domain FROM public.frontier_queue_exploration
+                pending_queue_sql = """SELECT queue_class, url, domain, next_fetch_at FROM (
+                        SELECT 'exploration' AS queue_class, url, domain, next_fetch_at FROM public.frontier_queue_exploration
                         UNION ALL
-                        SELECT 'backlog' AS queue_class, url, domain FROM public.frontier_queue_backlog
+                        SELECT 'backlog' AS queue_class, url, domain, next_fetch_at FROM public.frontier_queue_backlog
                         UNION ALL
-                        SELECT 'recrawl' AS queue_class, url, domain FROM public.frontier_queue_recrawl
+                        SELECT 'recrawl' AS queue_class, url, domain, next_fetch_at FROM public.frontier_queue_recrawl
                     ) AS pending_queue_rows"""
                 cur.execute("SELECT to_regclass('public.crawler_runtime_stats')")
                 runtime_exists = cur.fetchone()[0] is not None
@@ -349,6 +350,58 @@ class PgStorage:
                         {"domain": domain, "count": count} for domain, count in cur.fetchall()
                     ]
 
+                    now = time.time()
+                    cur.execute(
+                        f"""WITH pending_entries AS (
+                                {pending_queue_sql}
+                            ), readiness_entries AS (
+                                SELECT
+                                    pending_queue_rows.next_fetch_at > %(now)s AS blocked_next_fetch,
+                                    COALESCE(domain_state.next_request_at, 0) > %(now)s AS blocked_domain_next_request,
+                                    COALESCE(domain_state.backoff_until, 0) > %(now)s AS blocked_domain_backoff,
+                                    GREATEST(
+                                        pending_queue_rows.next_fetch_at,
+                                        COALESCE(domain_state.next_request_at, 0),
+                                        COALESCE(domain_state.backoff_until, 0)
+                                    ) AS ready_at
+                                FROM pending_entries AS pending_queue_rows
+                                LEFT JOIN public.domain_state ON domain_state.host_key = pending_queue_rows.domain
+                            )
+                            SELECT
+                                COUNT(*) AS pending,
+                                COUNT(*) FILTER (
+                                    WHERE NOT blocked_next_fetch
+                                      AND NOT blocked_domain_next_request
+                                      AND NOT blocked_domain_backoff
+                                ) AS ready,
+                                MIN(ready_at) AS next_ready_at,
+                                COUNT(*) FILTER (WHERE blocked_next_fetch) AS blocked_next_fetch,
+                                COUNT(*) FILTER (WHERE blocked_domain_next_request) AS blocked_domain_next_request,
+                                COUNT(*) FILTER (WHERE blocked_domain_backoff) AS blocked_domain_backoff
+                            FROM readiness_entries""",
+                        {"now": now},
+                    )
+                    (
+                        readiness_pending,
+                        readiness_ready,
+                        next_ready_at,
+                        blocked_next_fetch,
+                        blocked_domain_next_request,
+                        blocked_domain_backoff,
+                    ) = cur.fetchone()
+                    readiness = {
+                        "pending": readiness_pending or 0,
+                        "ready": readiness_ready or 0,
+                        "next_ready_delay": (
+                            None if next_ready_at is None else max(0.0, next_ready_at - now)
+                        ),
+                        "blocked": {
+                            "next_fetch_at": blocked_next_fetch or 0,
+                            "domain_next_request": blocked_domain_next_request or 0,
+                            "domain_backoff": blocked_domain_backoff or 0,
+                        },
+                    }
+
                     cur.execute(
                         """SELECT last_error, COUNT(*)
                            FROM public.frontier
@@ -412,6 +465,7 @@ class PgStorage:
             "legacy_frontier_status": legacy_frontier_status,
             "queue_classes": queue_classes,
             "pending_queue_classes": pending_queue_classes,
+            "readiness": readiness,
             "discovery_kinds": discovery_kinds,
             "archetypes": archetypes,
             "top_page_domains": top_page_domains,
