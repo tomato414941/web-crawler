@@ -291,6 +291,83 @@ def test_get_stats_includes_readiness_breakdown(pg_storage):
         "domain_next_request": 1,
         "domain_backoff": 0,
     }
+    assert stats["top_blocked_domains"] == [
+        {
+            "domain": "backoff.example",
+            "pending_count": 1,
+            "blocked_counts": {
+                "domain_next_request": 1,
+                "domain_backoff": 0,
+            },
+            "wait_seconds": pytest.approx(20.0, abs=1e-3),
+            "dominant_reason": "domain_next_request",
+            "consecutive_failures": 0,
+        }
+    ]
+
+
+def test_get_stats_prioritizes_domains_blocked_by_backoff(pg_storage):
+    now = time.time()
+
+    with pg_storage._conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO frontier (
+                url, domain, depth, priority, queue_class, discovery_kind, archetype,
+                source_url, added_at, status, next_fetch_at
+            )
+            VALUES
+                ('https://backoff.example/a', 'backoff.example', 0, 1.0, 'exploration', 'seed', 'generic_page', NULL, %s, 'pending', %s),
+                ('https://backoff.example/b', 'backoff.example', 0, 1.0, 'exploration', 'seed', 'generic_page', NULL, %s, 'pending', %s),
+                ('https://slot.example/', 'slot.example', 0, 1.0, 'exploration', 'seed', 'generic_page', NULL, %s, 'pending', %s)
+            """,
+            (now, now, now, now, now, now),
+        )
+        cur.execute(
+            """
+            INSERT INTO frontier_queue_exploration (url, domain, priority, next_fetch_at, added_at, branch_key)
+            VALUES
+                ('https://backoff.example/a', 'backoff.example', 1.0, %s, %s, '/a'),
+                ('https://backoff.example/b', 'backoff.example', 1.0, %s, %s, '/b'),
+                ('https://slot.example/', 'slot.example', 1.0, %s, %s, '/')
+            """,
+            (now, now, now, now, now, now),
+        )
+        cur.execute(
+            """
+            INSERT INTO domain_state (
+                host_key,
+                crawl_delay_seconds,
+                next_request_at,
+                backoff_until,
+                consecutive_failures,
+                robots_checked_at,
+                updated_at
+            )
+            VALUES
+                ('backoff.example', 1.0, %s, %s, 3, %s, %s),
+                ('slot.example', 1.0, %s, %s, 0, %s, %s)
+            ON CONFLICT (host_key) DO UPDATE
+            SET next_request_at = EXCLUDED.next_request_at,
+                backoff_until = EXCLUDED.backoff_until,
+                consecutive_failures = EXCLUDED.consecutive_failures,
+                updated_at = EXCLUDED.updated_at
+            """,
+            (now, now + 45.0, now, now, now + 15.0, now, now),
+        )
+    pg_storage._conn.commit()
+
+    stats = pg_storage.get_stats()
+
+    assert stats["top_blocked_domains"][0]["domain"] == "backoff.example"
+    assert stats["top_blocked_domains"][0]["pending_count"] == 2
+    assert stats["top_blocked_domains"][0]["blocked_counts"] == {
+        "domain_next_request": 0,
+        "domain_backoff": 2,
+    }
+    assert stats["top_blocked_domains"][0]["dominant_reason"] == "domain_backoff"
+    assert stats["top_blocked_domains"][0]["wait_seconds"] == pytest.approx(45.0, abs=1e-3)
+    assert stats["top_blocked_domains"][0]["consecutive_failures"] == 3
 
 
 def test_get_stats_includes_active_error_breakdown(pg_storage):

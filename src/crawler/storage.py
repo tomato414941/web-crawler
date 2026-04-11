@@ -269,6 +269,7 @@ class PgStorage:
                 discovery_kinds: dict[str, int] = {}
                 archetypes: dict[str, int] = {}
                 top_pending_domains: list[dict[str, object]] = []
+                top_blocked_domains: list[dict[str, object]] = []
                 active_error_breakdown: dict[str, int] = {}
                 top_error_domains: list[dict[str, object]] = []
                 runtime: dict[str, object] = {}
@@ -403,6 +404,76 @@ class PgStorage:
                     }
 
                     cur.execute(
+                        f"""WITH pending_entries AS (
+                                {pending_queue_sql}
+                            )
+                            SELECT
+                                pending_queue_rows.domain,
+                                COUNT(*) AS pending_count,
+                                COUNT(*) FILTER (
+                                    WHERE COALESCE(domain_state.next_request_at, 0) > %(now)s
+                                ) AS blocked_domain_next_request,
+                                COUNT(*) FILTER (
+                                    WHERE COALESCE(domain_state.backoff_until, 0) > %(now)s
+                                ) AS blocked_domain_backoff,
+                                GREATEST(
+                                    MAX(COALESCE(domain_state.next_request_at, 0)) - %(now)s,
+                                    0
+                                ) AS next_request_wait_seconds,
+                                GREATEST(
+                                    MAX(COALESCE(domain_state.backoff_until, 0)) - %(now)s,
+                                    0
+                                ) AS backoff_wait_seconds,
+                                COALESCE(MAX(domain_state.consecutive_failures), 0) AS consecutive_failures
+                            FROM pending_entries AS pending_queue_rows
+                            LEFT JOIN public.domain_state ON domain_state.host_key = pending_queue_rows.domain
+                            WHERE COALESCE(domain_state.next_request_at, 0) > %(now)s
+                               OR COALESCE(domain_state.backoff_until, 0) > %(now)s
+                            GROUP BY pending_queue_rows.domain
+                            ORDER BY
+                                COUNT(*) FILTER (
+                                    WHERE COALESCE(domain_state.backoff_until, 0) > %(now)s
+                                ) DESC,
+                                GREATEST(
+                                    MAX(COALESCE(domain_state.backoff_until, 0)) - %(now)s,
+                                    0
+                                ) DESC,
+                                COUNT(*) DESC,
+                                pending_queue_rows.domain ASC
+                            LIMIT 10""",
+                        {"now": now},
+                    )
+                    top_blocked_domains = []
+                    for blocked_row in cur.fetchall():
+                        (
+                            domain,
+                            pending_count,
+                            blocked_next_request_count,
+                            blocked_backoff_count,
+                            next_request_wait_seconds,
+                            backoff_wait_seconds,
+                            consecutive_failures,
+                        ) = blocked_row
+                        dominant_reason = "domain_backoff"
+                        wait_seconds = backoff_wait_seconds
+                        if blocked_backoff_count == 0 and blocked_next_request_count > 0:
+                            dominant_reason = "domain_next_request"
+                            wait_seconds = next_request_wait_seconds
+                        top_blocked_domains.append(
+                            {
+                                "domain": domain,
+                                "pending_count": pending_count,
+                                "blocked_counts": {
+                                    "domain_next_request": blocked_next_request_count,
+                                    "domain_backoff": blocked_backoff_count,
+                                },
+                                "wait_seconds": round(wait_seconds, 3),
+                                "dominant_reason": dominant_reason,
+                                "consecutive_failures": consecutive_failures,
+                            }
+                        )
+
+                    cur.execute(
                         """SELECT last_error, COUNT(*)
                            FROM public.frontier
                            WHERE last_error IS NOT NULL
@@ -470,6 +541,7 @@ class PgStorage:
             "archetypes": archetypes,
             "top_page_domains": top_page_domains,
             "top_pending_domains": top_pending_domains,
+            "top_blocked_domains": top_blocked_domains,
             "active_error_breakdown": active_error_breakdown,
             "top_error_domains": top_error_domains,
             "runtime": runtime,
