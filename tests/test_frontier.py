@@ -542,6 +542,11 @@ class TestFrontier:
         assert readiness.pending == 2
         assert readiness.ready == 0
         assert readiness.next_ready_delay == pytest.approx(20.0, abs=1e-3)
+        assert readiness.blocked == {
+            "next_fetch_at": 1,
+            "domain_next_request": 0,
+            "domain_backoff": 1,
+        }
 
     def test_domain_filter(self, frontier):
         frontier.add(CrawlTask(url="http://a.com/page", depth=0))
