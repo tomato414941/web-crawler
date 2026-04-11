@@ -80,6 +80,11 @@ QUEUE_TABLE_BY_CLASS = {
     QUEUE_RECRAWL: "frontier_queue_recrawl",
 }
 QUEUE_TABLES = tuple(QUEUE_TABLE_BY_CLASS.values())
+QUEUE_CLASS_ORDER = (
+    QUEUE_EXPLORATION,
+    QUEUE_BACKLOG,
+    QUEUE_RECRAWL,
+)
 QUEUE_REQUIRED_COLUMNS = {
     "url",
     "domain",
@@ -191,66 +196,12 @@ class Frontier:
             (lease_token,),
         )
 
-    def _ready_sql(
-        self,
-        *,
-        alias: str,
-        now: float,
-        domain: str | None = None,
-        exclude_domains: list[str] | None = None,
-        queue_classes: list[str] | None = None,
-    ) -> _ReadySql:
-        """Build readiness SQL fragments for lease and queue inspection."""
-        next_request_sql = "0"
-        backoff_sql = "0"
-
-        conditions = [
-            f"{alias}.status = '{PENDING_STATUS}'",
-            f"{alias}.next_fetch_at <= %s",
-        ]
-        params: list[object] = [now]
-
-        if self._domain_store is not None:
-            next_request_sql = (
-                "COALESCE(("
-                "SELECT ds.next_request_at "
-                "FROM domain_state AS ds "
-                f"WHERE ds.host_key = {alias}.domain"
-                "), 0)"
-            )
-            backoff_sql = (
-                "COALESCE(("
-                "SELECT ds.backoff_until "
-                "FROM domain_state AS ds "
-                f"WHERE ds.host_key = {alias}.domain"
-                "), 0)"
-            )
-            conditions.append(
-                "NOT EXISTS ("
-                "SELECT 1 FROM domain_state AS gated "
-                f"WHERE gated.host_key = {alias}.domain "
-                "AND (gated.next_request_at > %s OR gated.backoff_until > %s)"
-                ")"
-            )
-            params.extend([now, now])
-
-        if domain:
-            conditions.append(f"{alias}.domain = %s")
-            params.append(domain)
-
-        if exclude_domains:
-            conditions.append(f"NOT ({alias}.domain = ANY(%s))")
-            params.append(exclude_domains)
-
+    def _normalized_queue_classes(self, queue_classes: list[str] | None) -> list[str]:
+        """Return queue classes in stable scheduler order."""
         if queue_classes:
-            conditions.append(f"{alias}.queue_class = ANY(%s)")
-            params.append(queue_classes)
-
-        return _ReadySql(
-            where=" AND ".join(conditions),
-            params=tuple(params),
-            ready_at=f"GREATEST({alias}.next_fetch_at, {next_request_sql}, {backoff_sql})",
-        )
+            allowed = {self._normalize_queue_class(queue_class) for queue_class in queue_classes}
+            return [queue_class for queue_class in QUEUE_CLASS_ORDER if queue_class in allowed]
+        return list(QUEUE_CLASS_ORDER)
 
     def _queue_ready_sql(
         self,
@@ -814,46 +765,52 @@ class Frontier:
         queue_classes: list[str] | None = None,
     ) -> CrawlTask | None:
         """Lease the next ready URL, optionally filtered by domain."""
+        normalized_queue_classes = self._normalized_queue_classes(queue_classes)
+        if len(normalized_queue_classes) != 1:
+            for queue_class in normalized_queue_classes:
+                task = self.lease_next(
+                    domain=domain,
+                    lease_seconds=lease_seconds,
+                    prioritize_breadth=prioritize_breadth,
+                    exclude_domains=exclude_domains,
+                    exclude_branch_keys=exclude_branch_keys,
+                    exclude_domain_branches=exclude_domain_branches,
+                    queue_classes=[queue_class],
+                )
+                if task is not None:
+                    return task
+            return None
+
         now = time.time()
         lease_token = uuid.uuid4().hex
         duration = self._lease_seconds if lease_seconds is None else lease_seconds
         lease_expires_at = now + duration
         candidate_from_params: list[object] = []
-        if queue_classes and len(queue_classes) == 1:
-            ready_sql = self._queue_ready_sql(
-                alias="candidate",
+        ready_sql = self._queue_ready_sql(
+            alias="candidate",
+            now=now,
+            domain=domain,
+            exclude_domains=exclude_domains,
+            exclude_branch_keys=exclude_branch_keys,
+            exclude_domain_branches=exclude_domain_branches,
+        )
+        if prioritize_breadth:
+            ranked_ready_sql = self._queue_ready_sql(
+                alias="ranked_source",
                 now=now,
                 domain=domain,
                 exclude_domains=exclude_domains,
                 exclude_branch_keys=exclude_branch_keys,
                 exclude_domain_branches=exclude_domain_branches,
             )
-            if prioritize_breadth:
-                ranked_ready_sql = self._queue_ready_sql(
-                    alias="ranked_source",
-                    now=now,
-                    domain=domain,
-                    exclude_domains=exclude_domains,
-                    exclude_branch_keys=exclude_branch_keys,
-                    exclude_domain_branches=exclude_domain_branches,
-                )
-                candidate_from = self._branch_breadth_candidate_from_sql(
-                    queue_class=queue_classes[0],
-                    ranked_ready_sql=ranked_ready_sql,
-                )
-                candidate_from_params = list(ranked_ready_sql.params)
-            else:
-                candidate_from = f"FROM {self._queue_table_sql(queue_classes[0])} AS candidate"
-        else:
-            ready_sql = self._ready_sql(
-                alias="candidate",
-                now=now,
-                domain=domain,
-                exclude_domains=exclude_domains,
-                queue_classes=queue_classes,
+            candidate_from = self._branch_breadth_candidate_from_sql(
+                queue_class=normalized_queue_classes[0],
+                ranked_ready_sql=ranked_ready_sql,
             )
-            candidate_from = "FROM frontier AS candidate"
-        if queue_classes and len(queue_classes) == 1 and prioritize_breadth:
+            candidate_from_params = list(ranked_ready_sql.params)
+        else:
+            candidate_from = f"FROM {self._queue_table_sql(normalized_queue_classes[0])} AS candidate"
+        if prioritize_breadth:
             order_by = self._branch_breadth_order_by_sql("candidate")
         else:
             order_by = self._lease_order_by_sql("candidate", prioritize_breadth=prioritize_breadth)
@@ -937,46 +894,54 @@ class Frontier:
         queue_classes: list[str] | None = None,
     ) -> list[CrawlTask]:
         """Lease a batch of ready URLs."""
+        normalized_queue_classes = self._normalized_queue_classes(queue_classes)
+        if len(normalized_queue_classes) != 1:
+            tasks: list[CrawlTask] = []
+            while len(tasks) < count:
+                task = self.lease_next(
+                    domain=domain,
+                    lease_seconds=lease_seconds,
+                    prioritize_breadth=prioritize_breadth,
+                    exclude_domains=exclude_domains,
+                    exclude_branch_keys=exclude_branch_keys,
+                    exclude_domain_branches=exclude_domain_branches,
+                    queue_classes=normalized_queue_classes,
+                )
+                if task is None:
+                    break
+                tasks.append(task)
+            return tasks
+
         now = time.time()
         lease_token = uuid.uuid4().hex
         duration = self._lease_seconds if lease_seconds is None else lease_seconds
         lease_expires_at = now + duration
         candidate_from_params: list[object] = []
-        if queue_classes and len(queue_classes) == 1:
-            ready_sql = self._queue_ready_sql(
-                alias="candidate",
+        ready_sql = self._queue_ready_sql(
+            alias="candidate",
+            now=now,
+            domain=domain,
+            exclude_domains=exclude_domains,
+            exclude_branch_keys=exclude_branch_keys,
+            exclude_domain_branches=exclude_domain_branches,
+        )
+        if prioritize_breadth:
+            ranked_ready_sql = self._queue_ready_sql(
+                alias="ranked_source",
                 now=now,
                 domain=domain,
                 exclude_domains=exclude_domains,
                 exclude_branch_keys=exclude_branch_keys,
                 exclude_domain_branches=exclude_domain_branches,
             )
-            if prioritize_breadth:
-                ranked_ready_sql = self._queue_ready_sql(
-                    alias="ranked_source",
-                    now=now,
-                    domain=domain,
-                    exclude_domains=exclude_domains,
-                    exclude_branch_keys=exclude_branch_keys,
-                    exclude_domain_branches=exclude_domain_branches,
-                )
-                candidate_from = self._branch_breadth_candidate_from_sql(
-                    queue_class=queue_classes[0],
-                    ranked_ready_sql=ranked_ready_sql,
-                )
-                candidate_from_params = list(ranked_ready_sql.params)
-            else:
-                candidate_from = f"FROM {self._queue_table_sql(queue_classes[0])} AS candidate"
-        else:
-            ready_sql = self._ready_sql(
-                alias="candidate",
-                now=now,
-                domain=domain,
-                exclude_domains=exclude_domains,
-                queue_classes=queue_classes,
+            candidate_from = self._branch_breadth_candidate_from_sql(
+                queue_class=normalized_queue_classes[0],
+                ranked_ready_sql=ranked_ready_sql,
             )
-            candidate_from = "FROM frontier AS candidate"
-        if queue_classes and len(queue_classes) == 1 and prioritize_breadth:
+            candidate_from_params = list(ranked_ready_sql.params)
+        else:
+            candidate_from = f"FROM {self._queue_table_sql(normalized_queue_classes[0])} AS candidate"
+        if prioritize_breadth:
             order_by = self._branch_breadth_order_by_sql("candidate")
         else:
             order_by = self._lease_order_by_sql("candidate", prioritize_breadth=prioritize_breadth)
