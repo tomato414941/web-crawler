@@ -556,13 +556,15 @@ class TestFrontier:
         assert readiness.blocked == {
             "next_fetch_at": 1,
             "domain_next_request": 0,
-            "domain_backoff": 1,
+            "host_backoff": 1,
+            "retry_quarantine": 0,
         }
         assert readiness.state_counts == {
             "ready": 0,
             "scheduled": 1,
             "blocked_domain_next_request": 0,
-            "blocked_domain_backoff": 1,
+            "blocked_host_backoff": 1,
+            "retry_quarantine": 0,
         }
 
     def test_rebalance_blocked_domain_backoff_quarantines_urls(self, frontier):
@@ -585,7 +587,8 @@ class TestFrontier:
             "ready": 1,
             "scheduled": 0,
             "blocked_domain_next_request": 0,
-            "blocked_domain_backoff": 1,
+            "blocked_host_backoff": 0,
+            "retry_quarantine": 1,
         }
 
     def test_promote_blocked_domain_backoff_restores_small_cooldown_subset(self, frontier):
@@ -612,7 +615,8 @@ class TestFrontier:
             "ready": 2,
             "scheduled": 0,
             "blocked_domain_next_request": 0,
-            "blocked_domain_backoff": 1,
+            "blocked_host_backoff": 0,
+            "retry_quarantine": 1,
         }
 
     def test_readiness_filters_blocked_queue_by_queue_class(self, frontier):
@@ -626,9 +630,9 @@ class TestFrontier:
         backlog = frontier.readiness(now=now, queue_classes=[QUEUE_BACKLOG])
 
         assert exploration.pending == 1
-        assert exploration.state_counts["blocked_domain_backoff"] == 1
+        assert exploration.state_counts["retry_quarantine"] == 1
         assert backlog.pending == 1
-        assert backlog.state_counts["blocked_domain_backoff"] == 1
+        assert backlog.state_counts["retry_quarantine"] == 1
 
     def test_domain_filter(self, frontier):
         frontier.add(CrawlTask(url="http://a.com/page", depth=0))
