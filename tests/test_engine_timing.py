@@ -104,8 +104,10 @@ async def test_crawler_engine_records_stage_timings():
     assert result.timings.frontier_ms >= 0
     assert result.timings.persist_ms >= 0
     assert result.timings.parse_queue_wait_ms >= 0
+    assert result.timings.finalize_queue_wait_ms >= 0
     assert result.timings.publish_queue_wait_ms >= 0
     assert result.timings.parse_queue_depth >= 0
+    assert result.timings.finalize_queue_depth >= 0
     assert result.timings.publish_queue_depth >= 0
     assert result.timings.process_ms >= result.timings.fetch_ms
     assert result.timings.process_ms >= result.timings.slot_ms
@@ -163,5 +165,7 @@ async def test_queue_wait_metrics_record_backpressure():
     await engine.crawl()
 
     result = storage.saved[0]
+    assert result.timings.finalize_queue_wait_ms >= 0
+    assert result.timings.finalize_queue_depth >= 0
     assert result.timings.publish_queue_wait_ms >= 0
     assert result.timings.publish_queue_depth >= 0

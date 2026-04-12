@@ -290,6 +290,7 @@ class CrawlDaemon:
             "concurrency": self._concurrency,
             "cycle_pages": self._cycle_pages,
             "parse_queue_size": 0,
+            "finalize_queue_size": 0,
             "publish_queue_size": 0,
         }
         for key in (
@@ -297,10 +298,13 @@ class CrawlDaemon:
             "claimed_pages",
             "max_pages",
             "parse_queue_wait_last_ms",
+            "finalize_queue_wait_last_ms",
             "publish_queue_wait_last_ms",
             "parse_queue_wait_max_ms",
+            "finalize_queue_wait_max_ms",
             "publish_queue_wait_max_ms",
             "parse_queue_depth_max",
+            "finalize_queue_depth_max",
             "publish_queue_depth_max",
             "failure_breakdown",
         ):
