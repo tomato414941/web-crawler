@@ -1612,7 +1612,8 @@ class Frontier:
                             queue_entry.next_fetch_at,
                             queue_entry.next_fetch_at > %s AS blocked_next_fetch,
                             COALESCE(domain_state.next_request_at, 0) > %s AS blocked_domain_next_request,
-                            COALESCE(domain_state.backoff_until, 0) > %s AS blocked_domain_backoff,
+                            COALESCE(domain_state.backoff_until, 0) > %s AS blocked_host_backoff,
+                            FALSE AS retry_quarantine,
                             GREATEST(
                                 queue_entry.next_fetch_at,
                                 COALESCE(domain_state.next_request_at, 0),
@@ -1627,7 +1628,8 @@ class Frontier:
                             blocked_entry.next_fetch_at,
                             FALSE AS blocked_next_fetch,
                             FALSE AS blocked_domain_next_request,
-                            TRUE AS blocked_domain_backoff,
+                            FALSE AS blocked_host_backoff,
+                            TRUE AS retry_quarantine,
                             NULL::DOUBLE PRECISION AS ready_at
                         FROM blocked_entries AS blocked_entry
                     )
@@ -1636,24 +1638,28 @@ class Frontier:
                         COUNT(*) FILTER (
                             WHERE NOT blocked_next_fetch
                               AND NOT blocked_domain_next_request
-                              AND NOT blocked_domain_backoff
+                              AND NOT blocked_host_backoff
+                              AND NOT retry_quarantine
                         ) AS ready,
                         MIN(ready_at) AS next_ready_at,
                         COUNT(*) FILTER (WHERE blocked_next_fetch) AS blocked_next_fetch,
                         COUNT(*) FILTER (WHERE blocked_domain_next_request) AS blocked_domain_next_request,
-                        COUNT(*) FILTER (WHERE blocked_domain_backoff) AS blocked_domain_backoff,
-                        COUNT(*) FILTER (WHERE blocked_domain_backoff) AS state_blocked_domain_backoff,
+                        COUNT(*) FILTER (WHERE blocked_host_backoff) AS blocked_host_backoff,
+                        COUNT(*) FILTER (WHERE retry_quarantine) AS retry_quarantine,
                         COUNT(*) FILTER (
-                            WHERE NOT blocked_domain_backoff
+                            WHERE NOT blocked_host_backoff
+                              AND NOT retry_quarantine
                               AND blocked_domain_next_request
                         ) AS state_blocked_domain_next_request,
                         COUNT(*) FILTER (
-                            WHERE NOT blocked_domain_backoff
+                            WHERE NOT blocked_host_backoff
+                              AND NOT retry_quarantine
                               AND NOT blocked_domain_next_request
                               AND blocked_next_fetch
                         ) AS state_scheduled,
                         COUNT(*) FILTER (
-                            WHERE NOT blocked_domain_backoff
+                            WHERE NOT blocked_host_backoff
+                              AND NOT retry_quarantine
                               AND NOT blocked_domain_next_request
                               AND NOT blocked_next_fetch
                         ) AS state_ready
@@ -1666,8 +1672,8 @@ class Frontier:
                 next_ready_at,
                 blocked_next_fetch,
                 blocked_domain_next_request,
-                blocked_domain_backoff,
-                state_blocked_domain_backoff,
+                blocked_host_backoff,
+                retry_quarantine,
                 state_blocked_domain_next_request,
                 state_scheduled,
                 state_ready,
@@ -1681,13 +1687,15 @@ class Frontier:
             blocked={
                 "next_fetch_at": blocked_next_fetch or 0,
                 "domain_next_request": blocked_domain_next_request or 0,
-                "domain_backoff": blocked_domain_backoff or 0,
+                "host_backoff": blocked_host_backoff or 0,
+                "retry_quarantine": retry_quarantine or 0,
             },
             state_counts={
                 "ready": state_ready or 0,
                 "scheduled": state_scheduled or 0,
                 "blocked_domain_next_request": state_blocked_domain_next_request or 0,
-                "blocked_domain_backoff": state_blocked_domain_backoff or 0,
+                "blocked_host_backoff": blocked_host_backoff or 0,
+                "retry_quarantine": retry_quarantine or 0,
             },
         )
 
