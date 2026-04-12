@@ -92,7 +92,7 @@ class CrawlDaemon:
         self._min_ready_sleep = (
             settings.daemon_min_ready_sleep if min_ready_sleep is None else min_ready_sleep
         )
-        self._min_exploration_pending = max(1, min(len(self._seeds), settings.daemon_min_exploration_pending))
+        self._min_exploration_ready = max(1, min(len(self._seeds), settings.daemon_min_exploration_ready))
         self._shutdown = False
         self._engine: CrawlerEngine | None = None
         self._last_runtime_snapshot: dict[str, object] = {}
@@ -376,15 +376,16 @@ class CrawlDaemon:
             logger.info("Re-seeded %d URLs", count)
             return
 
+        exploration_ready = frontier.ready_count(queue_classes=["exploration"])
         exploration_pending = frontier.pending_count(queue_classes=["exploration"])
-        if exploration_pending >= self._min_exploration_pending:
+        if exploration_ready >= self._min_exploration_ready:
             return
 
-        needed = self._min_exploration_pending - exploration_pending
+        needed = self._min_exploration_ready - exploration_ready
         branch_promoted = 0
         if hasattr(frontier, "promote_branch_novelty_exploration"):
             branch_promoted = frontier.promote_branch_novelty_exploration(
-                self._min_exploration_pending,
+                max(exploration_pending + needed, self._min_exploration_ready),
                 per_domain=1,
             )
 
@@ -395,12 +396,13 @@ class CrawlDaemon:
         if branch_promoted < needed and hasattr(frontier, "promote_seed_host_exploration") and self._seed_hosts:
             promoted = frontier.promote_seed_host_exploration(self._seed_hosts, per_host=1, max_depth=2)
         logger.info(
-            "Topped up exploration: branch_promoted=%d added_seeds=%d seed_promoted=%d pending_exploration=%d target=%d",
+            "Topped up exploration: branch_promoted=%d added_seeds=%d seed_promoted=%d ready_exploration=%d pending_exploration=%d target_ready=%d",
             branch_promoted,
             count,
             promoted,
+            exploration_ready,
             exploration_pending,
-            self._min_exploration_pending,
+            self._min_exploration_ready,
         )
 
     def _recrawl_stale(self, storage: PgStorage, frontier: Frontier):

@@ -531,6 +531,16 @@ class TestFrontier:
         assert frontier.ready_count(now=now) == 0
         assert frontier.next_ready_delay(now=now) == pytest.approx(30.0, abs=1e-3)
 
+    def test_ready_count_can_filter_queue_classes(self, frontier):
+        now = time.time()
+        frontier.add(CrawlTask(url="http://a.com/explore", depth=0, next_fetch_at=now))
+        frontier.add(CrawlTask(url="http://a.com/backlog", depth=3, next_fetch_at=now))
+        self.domain_store.record_failure("a.com", backoff_seconds=20.0, now=now)
+        frontier.add(CrawlTask(url="http://b.com/explore", depth=0, next_fetch_at=now))
+
+        assert frontier.ready_count(now=now, queue_classes=[QUEUE_EXPLORATION]) == 1
+        assert frontier.ready_count(now=now, queue_classes=[QUEUE_BACKLOG]) == 0
+
     def test_readiness_summarizes_pending_and_ready(self, frontier):
         now = time.time()
         frontier.add(CrawlTask(url="http://a.com/1", depth=0, next_fetch_at=now))

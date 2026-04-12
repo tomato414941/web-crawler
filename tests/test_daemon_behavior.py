@@ -425,6 +425,10 @@ def test_ensure_seeds_tops_up_when_exploration_queue_is_starved():
                 return 1
             return 25
 
+        def ready_count(self, queue_classes=None, now=None):
+            assert queue_classes == ["exploration"]
+            return 1
+
         def promote_branch_novelty_exploration(self, target_pending, per_domain=1):
             self.branch_promote_calls.append((target_pending, per_domain))
             return 2
@@ -462,6 +466,10 @@ def test_ensure_seeds_falls_back_to_seed_reinsertion_when_branch_promotion_is_in
             if queue_classes == ["exploration"]:
                 return 1
             return 25
+
+        def ready_count(self, queue_classes=None, now=None):
+            assert queue_classes == ["exploration"]
+            return 1
 
         def promote_branch_novelty_exploration(self, target_pending, per_domain=1):
             self.branch_promote_calls.append((target_pending, per_domain))
@@ -512,6 +520,10 @@ def test_ensure_seeds_does_not_top_up_when_exploration_queue_is_healthy():
                 return 3
             return 25
 
+        def ready_count(self, queue_classes=None, now=None):
+            assert queue_classes == ["exploration"]
+            return 3
+
         def upsert_seeds(self, urls, priority=2.0):
             self.upsert_calls.append((list(urls), priority))
             return len(urls)
@@ -531,3 +543,52 @@ def test_ensure_seeds_does_not_top_up_when_exploration_queue_is_healthy():
     daemon._ensure_seeds(frontier)
 
     assert frontier.upsert_calls == []
+
+
+def test_ensure_seeds_reinserts_when_exploration_pending_is_high_but_ready_is_zero():
+    class FakeFrontier:
+        def __init__(self):
+            self.upsert_calls = []
+            self.branch_promote_calls = []
+
+        def pending_count(self, queue_classes=None):
+            if queue_classes == ["exploration"]:
+                return 25
+            return 50
+
+        def ready_count(self, queue_classes=None, now=None):
+            assert queue_classes == ["exploration"]
+            return 0
+
+        def promote_branch_novelty_exploration(self, target_pending, per_domain=1):
+            self.branch_promote_calls.append((target_pending, per_domain))
+            return 0
+
+        def upsert_seeds(self, urls, priority=2.0):
+            self.upsert_calls.append((list(urls), priority))
+            return len(urls)
+
+    daemon = CrawlDaemon(
+        seeds=[
+            "https://www.wikipedia.org/",
+            "https://www.wikidata.org/",
+            "https://www.openstreetmap.org/",
+            "https://github.com/",
+        ],
+        postgres_dsn="postgresql://unused",
+        cycle_pages=10,
+        recrawl_ttl=3600,
+    )
+    frontier = FakeFrontier()
+
+    daemon._ensure_seeds(frontier)
+
+    assert frontier.branch_promote_calls == [(29, 1)]
+    assert frontier.upsert_calls == [
+        ([
+            "https://www.wikipedia.org/",
+            "https://www.wikidata.org/",
+            "https://www.openstreetmap.org/",
+            "https://github.com/",
+        ], 2.0)
+    ]
