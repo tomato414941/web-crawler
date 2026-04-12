@@ -619,6 +619,31 @@ class TestFrontier:
             "retry_quarantine": 1,
         }
 
+    def test_promote_blocked_domain_backoff_skips_high_failure_domains(self, frontier):
+        now = time.time()
+        frontier.add(CrawlTask(url="http://a.com/blocked", depth=0, next_fetch_at=now))
+        frontier.add(CrawlTask(url="http://b.com/blocked", depth=0, next_fetch_at=now))
+        self.domain_store.record_failure("a.com", backoff_seconds=30.0, now=now)
+        self.domain_store.record_failure("a.com", backoff_seconds=30.0, now=now + 1.0)
+        self.domain_store.record_failure("a.com", backoff_seconds=30.0, now=now + 2.0)
+        self.domain_store.record_failure("b.com", backoff_seconds=30.0, now=now)
+        frontier.rebalance_blocked_domain_backoff(now=now + 2.0)
+
+        promoted = frontier.promote_blocked_domain_backoff(
+            2,
+            per_domain=1,
+            max_consecutive_failures=1,
+            now=now + 40.0,
+        )
+
+        assert promoted == 1
+        assert frontier.pending_count() == 1
+        assert frontier.blocked_domain_backoff_count() == 1
+
+        leased = frontier.lease_next(now=now + 40.0)
+        assert leased is not None
+        assert leased.url == "http://b.com/blocked"
+
     def test_readiness_filters_blocked_queue_by_queue_class(self, frontier):
         now = time.time()
         frontier.add(CrawlTask(url="http://a.com/explore", depth=0, next_fetch_at=now))
