@@ -315,7 +315,8 @@ def test_get_stats_includes_readiness_breakdown(pg_storage):
             "pending_count": 1,
             "blocked_counts": {
                 "domain_next_request": 1,
-                "domain_backoff": 0,
+                "host_backoff": 0,
+                "retry_quarantine": 0,
             },
             "wait_seconds": pytest.approx(20.0, abs=1e-3),
             "dominant_reason": "domain_next_request",
@@ -381,9 +382,10 @@ def test_get_stats_prioritizes_domains_blocked_by_backoff(pg_storage):
     assert stats["top_blocked_domains"][0]["pending_count"] == 2
     assert stats["top_blocked_domains"][0]["blocked_counts"] == {
         "domain_next_request": 0,
-        "domain_backoff": 2,
+        "host_backoff": 2,
+        "retry_quarantine": 0,
     }
-    assert stats["top_blocked_domains"][0]["dominant_reason"] == "domain_backoff"
+    assert stats["top_blocked_domains"][0]["dominant_reason"] == "host_backoff"
     assert stats["top_blocked_domains"][0]["wait_seconds"] == pytest.approx(45.0, abs=1e-3)
     assert stats["top_blocked_domains"][0]["consecutive_failures"] == 3
 
@@ -446,6 +448,20 @@ def test_get_stats_counts_blocked_queue_classes(pg_storage):
     assert stats["readiness"]["ready"] == 0
     assert stats["readiness"]["state_counts"]["blocked_host_backoff"] == 0
     assert stats["readiness"]["state_counts"]["retry_quarantine"] == 2
+    assert stats["top_blocked_domains"] == [
+        {
+            "domain": "blocked.example",
+            "pending_count": 2,
+            "blocked_counts": {
+                "domain_next_request": 0,
+                "host_backoff": 0,
+                "retry_quarantine": 2,
+            },
+            "wait_seconds": pytest.approx(40.0, abs=1e-3),
+            "dominant_reason": "retry_quarantine",
+            "consecutive_failures": 4,
+        }
+    ]
 
 
 def test_get_stats_includes_active_error_breakdown(pg_storage):
