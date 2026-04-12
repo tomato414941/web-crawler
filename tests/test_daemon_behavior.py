@@ -627,7 +627,38 @@ def test_promote_blocked_retry_restores_small_subset_when_ready_is_thin():
     promoted = daemon._promote_blocked_retry(frontier)
 
     assert promoted == 2
-    assert frontier.calls == [(8, 1, 8)]
+    assert frontier.calls == [(17, 1, 8)]
+
+
+def test_promote_blocked_retry_surges_when_ready_is_zero():
+    class FakeFrontier:
+        def __init__(self):
+            self.calls = []
+
+        def ready_count(self, queue_classes=None, now=None):
+            assert queue_classes is None
+            return 0
+
+        def promote_blocked_domain_backoff(self, limit, per_domain=1, max_consecutive_failures=None):
+            self.calls.append((limit, per_domain, max_consecutive_failures))
+            return 5
+
+    daemon = CrawlDaemon(
+        seeds=[
+            "https://www.iana.org/",
+            "https://datatracker.ietf.org/",
+            "https://www.rfc-editor.org/",
+        ],
+        postgres_dsn="postgresql://unused",
+        cycle_pages=10,
+        recrawl_ttl=3600,
+    )
+    frontier = FakeFrontier()
+
+    promoted = daemon._promote_blocked_retry(frontier)
+
+    assert promoted == 5
+    assert frontier.calls == [(20, 20, 8)]
 
 
 def test_promote_blocked_retry_skips_when_ready_is_healthy():

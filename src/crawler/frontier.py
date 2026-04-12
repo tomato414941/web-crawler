@@ -1339,6 +1339,7 @@ class Frontier:
                             blocked.next_fetch_at,
                             blocked.added_at,
                             blocked.queue_class,
+                            COALESCE(domain_state.consecutive_failures, 0) AS failure_count,
                             '{PENDING_STATUS}' AS status,
                             ROW_NUMBER() OVER (
                                 PARTITION BY blocked.domain
@@ -1359,7 +1360,7 @@ class Frontier:
                         SELECT url
                         FROM ranked_candidates
                         WHERE domain_rownum <= %s
-                        ORDER BY priority DESC, next_fetch_at ASC, added_at ASC, url ASC
+                        ORDER BY failure_count ASC, priority DESC, next_fetch_at ASC, added_at ASC, url ASC
                         LIMIT %s
                     )
                     DELETE FROM {BLOCKED_DOMAIN_BACKOFF_TABLE} AS blocked
