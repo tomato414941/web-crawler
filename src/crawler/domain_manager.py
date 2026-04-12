@@ -238,6 +238,12 @@ class DomainManager:
                 persisted_state = self._domain_store.record_success(host_key)
                 self._apply_persisted_state(state, persisted_state)
 
+    def record_success_runtime(self, url: str) -> None:
+        """Reset in-memory failure state without touching durable storage."""
+        host_key = self._get_host_key(url)
+        if host_key in self._runtime_states:
+            self._runtime_states[host_key].consecutive_failures = 0
+
     def should_retry(self, url: str) -> bool:
         """Check if we should retry requests to this host key."""
         host_key = self._get_host_key(url)
