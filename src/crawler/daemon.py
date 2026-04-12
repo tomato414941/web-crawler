@@ -453,11 +453,15 @@ class CrawlDaemon:
             return 0
         if self._blocked_retry_budget <= 0:
             return 0
-        if frontier.ready_count() >= self._min_exploration_ready:
+        ready_count = frontier.ready_count()
+        if ready_count >= self._min_exploration_ready:
             return 0
+        deficit = max(1, self._min_exploration_ready - ready_count)
+        limit = max(self._blocked_retry_budget, deficit)
+        per_domain = self._blocked_retry_per_domain if ready_count > 0 else limit
         return frontier.promote_blocked_domain_backoff(
-            self._blocked_retry_budget,
-            per_domain=self._blocked_retry_per_domain,
+            limit,
+            per_domain=per_domain,
             max_consecutive_failures=self._blocked_retry_max_consecutive_failures,
         )
 
