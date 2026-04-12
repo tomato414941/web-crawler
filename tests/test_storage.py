@@ -200,13 +200,15 @@ def test_get_stats_includes_frontier_breakdown(pg_storage):
         "blocked": {
             "next_fetch_at": 0,
             "domain_next_request": 0,
-            "domain_backoff": 0,
+            "host_backoff": 0,
+            "retry_quarantine": 0,
         },
         "state_counts": {
             "ready": 2,
             "scheduled": 0,
             "blocked_domain_next_request": 0,
-            "blocked_domain_backoff": 0,
+            "blocked_host_backoff": 0,
+            "retry_quarantine": 0,
         },
     }
     assert stats["discovery_kinds"] == {"external": 1, "same_host": 1, "seed": 1}
@@ -297,13 +299,15 @@ def test_get_stats_includes_readiness_breakdown(pg_storage):
     assert stats["readiness"]["blocked"] == {
         "next_fetch_at": 1,
         "domain_next_request": 1,
-        "domain_backoff": 0,
+        "host_backoff": 0,
+        "retry_quarantine": 0,
     }
     assert stats["readiness"]["state_counts"] == {
         "ready": 1,
         "scheduled": 1,
         "blocked_domain_next_request": 1,
-        "blocked_domain_backoff": 0,
+        "blocked_host_backoff": 0,
+        "retry_quarantine": 0,
     }
     assert stats["top_blocked_domains"] == [
         {
@@ -440,7 +444,8 @@ def test_get_stats_counts_blocked_queue_classes(pg_storage):
     assert stats["frontier_status"]["pending"] == 2
     assert stats["readiness"]["pending"] == 2
     assert stats["readiness"]["ready"] == 0
-    assert stats["readiness"]["state_counts"]["blocked_domain_backoff"] == 2
+    assert stats["readiness"]["state_counts"]["blocked_host_backoff"] == 0
+    assert stats["readiness"]["state_counts"]["retry_quarantine"] == 2
 
 
 def test_get_stats_includes_active_error_breakdown(pg_storage):

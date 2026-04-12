@@ -352,13 +352,15 @@ async def test_daemon_persists_readiness_breakdown_while_waiting_for_ready():
                 blocked={
                     "next_fetch_at": 2,
                     "domain_next_request": 1,
-                    "domain_backoff": 0,
+                    "host_backoff": 0,
+                    "retry_quarantine": 2,
                 },
                 state_counts={
                     "ready": 0,
                     "scheduled": 0,
                     "blocked_domain_next_request": 1,
-                    "blocked_domain_backoff": 2,
+                    "blocked_host_backoff": 0,
+                    "retry_quarantine": 2,
                 },
             )
 
@@ -405,13 +407,15 @@ async def test_daemon_persists_readiness_breakdown_while_waiting_for_ready():
     assert storage.payloads[-1][1]["readiness_blocked"] == {
         "next_fetch_at": 2,
         "domain_next_request": 1,
-        "domain_backoff": 0,
+        "host_backoff": 0,
+        "retry_quarantine": 2,
     }
     assert storage.payloads[-1][1]["scheduler_state"] == {
         "ready": 0,
         "scheduled": 0,
         "blocked_domain_next_request": 1,
-        "blocked_domain_backoff": 2,
+        "blocked_host_backoff": 0,
+        "retry_quarantine": 2,
     }
 
 
