@@ -9,12 +9,14 @@ Already done:
 - Host-cooled URLs are physically isolated in `frontier_queue_blocked_domain_backoff`.
 - Retry quarantine is restored through a small retry budget instead of bulk re-entry.
 - `/stats` exposes `readiness` with `ready`, `scheduled`, `blocked_domain_next_request`, `blocked_host_backoff`, and `retry_quarantine`.
+- Scheduler observability is split out of `frontier` into `frontier_observability.py`.
+- Retry quarantine policy is split out of `frontier` into `frontier_quarantine.py`.
+- Daemon pre-cycle scheduling policy is split out of `daemon.py` into `daemon_policy.py`.
 
 Still not done:
 
 - Fetch / parse / publish are still too coupled inside one crawl worker path.
 - Scheduler policy is not yet latency-aware.
-- `top_blocked_domains` still uses older wording and should be split to match the new state model more directly.
 - Postgres is still carrying too many synchronous responsibilities on the hot path.
 
 ## Adopted principles
@@ -146,6 +148,7 @@ These must not block normal fetch throughput.
 Status: partially done.
 
 - `readiness`, blocked-domain breakdown, and runtime snapshots are in place.
+- Queue / quarantine / daemon policy responsibilities are split into dedicated modules.
 - Queue state is more explicit than before, but domain latency is still not a first-class scheduler input.
 - Remaining work: per-domain latency distributions and policy feedback, not just visibility.
 
@@ -154,6 +157,8 @@ Status: partially done.
 Status: not done.
 
 - This remains the biggest structural change still ahead.
+- The current worker still owns `fetch -> parse -> frontier update -> persist` end-to-end.
+- The next implementation step should introduce explicit stage boundaries before further scheduler tuning.
 
 ### Phase 3: Add latency-aware scheduling
 

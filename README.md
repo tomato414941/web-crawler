@@ -168,7 +168,10 @@ crawler/
 ├── cli.py              # Typer CLI
 ├── api.py              # FastAPI REST server
 ├── crawl.py            # Crawler engine (worker pool)
-├── frontier.py         # URL scheduler + PostgreSQL leasing
+├── frontier.py         # Scheduler facade
+├── frontier_observability.py  # Read-only scheduler snapshots
+├── frontier_quarantine.py     # Retry quarantine state transitions
+├── daemon_policy.py    # Pre-cycle scheduler policy
 ├── domain_manager.py   # robots.txt, runtime host state
 ├── domain_store.py     # Persistent host scheduling state
 ├── domain_state.py     # Runtime / persisted host state models
@@ -195,6 +198,12 @@ URL → AdaptiveFetcher
       └─ Response
 ```
 
+Current runtime note:
+
+- The worker path is still coupled as `lease -> fetch -> parse -> frontier update -> persist`.
+- The target design is to split this into explicit fetch / parse / publish stages.
+- Until that split lands, cycle throughput is still affected by parse and storage work inside crawl slots.
+
 ### Deduplication
 
 Two layers:
@@ -215,6 +224,13 @@ Current scheduler state is split across explicit physical tables:
 - `frontier_queue_recrawl` — stale-page revisit work
 - `frontier_queue_blocked_domain_backoff` — retry quarantine for host-cooled URLs
 - `frontier_lease_active` — active leases only
+
+Current module boundaries:
+
+- `frontier.py` — scheduler-facing facade used by the crawler
+- `frontier_observability.py` — queue and readiness snapshots
+- `frontier_quarantine.py` — host-backoff quarantine policy and state transitions
+- `daemon_policy.py` — pre-cycle frontier maintenance policy
 
 `pending` in `/stats` should be read as "not done yet", not as "immediately runnable".
 For actual scheduler state, prefer `readiness`:
