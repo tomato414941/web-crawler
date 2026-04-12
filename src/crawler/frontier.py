@@ -1615,7 +1615,12 @@ class Frontier:
         """Get queue statistics."""
         with self._conn.cursor() as cur:
             cur.execute("SELECT status, COUNT(*) FROM frontier GROUP BY status")
-            stats = dict(cur.fetchall())
+            legacy_status = dict(cur.fetchall())
+            stats = {
+                status: count
+                for status, count in legacy_status.items()
+                if status not in {PENDING_STATUS, LEASED_STATUS}
+            }
             cur.execute(f"SELECT COUNT(*) FROM {LEASE_TABLE}")
             stats[LEASED_STATUS] = cur.fetchone()[0]
             cur.execute(
@@ -1630,10 +1635,20 @@ class Frontier:
                    GROUP BY queue_class""",
                 (QUEUE_EXPLORATION, QUEUE_BACKLOG, QUEUE_RECRAWL),
             )
-            stats["pending_queue_tables"] = dict(cur.fetchall())
-            cur.execute(f"SELECT COUNT(*) FROM {BLOCKED_DOMAIN_BACKOFF_TABLE}")
-            stats["blocked_domain_backoff_queue"] = cur.fetchone()[0]
-        stats["total"] = sum(value for value in stats.values() if isinstance(value, int))
+            pending_queue_tables = dict(cur.fetchall())
+            stats["pending_queue_tables"] = pending_queue_tables
+            cur.execute(
+                f"SELECT queue_class, COUNT(*) FROM {BLOCKED_DOMAIN_BACKOFF_TABLE} GROUP BY queue_class"
+            )
+            blocked_queue_classes = dict(cur.fetchall())
+            stats["blocked_queue_classes"] = blocked_queue_classes
+            stats[PENDING_STATUS] = sum(pending_queue_tables.values()) + sum(blocked_queue_classes.values())
+            stats["legacy_pending"] = legacy_status.get(PENDING_STATUS, 0)
+            stats["legacy_leased"] = legacy_status.get(LEASED_STATUS, 0)
+        stats["total"] = sum(
+            stats.get(key, 0)
+            for key in (DONE_STATUS, FAILED_STATUS, PENDING_STATUS, LEASED_STATUS)
+        )
         return stats
 
     def pending_count(self, queue_classes: list[str] | None = None) -> int:
