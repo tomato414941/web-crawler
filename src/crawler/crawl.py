@@ -42,6 +42,7 @@ if TYPE_CHECKING:
 # Workers wait this many idle ticks (× 0.1s) before giving up
 _WORKER_PATIENCE = 50
 _PUBLISHER_SENTINEL = object()
+_FINALIZER_SENTINEL = object()
 _PARSER_SENTINEL = object()
 _TITLE_PATTERN = re.compile(r"<title[^>]*>(.*?)</title>", re.IGNORECASE | re.DOTALL)
 _META_ROBOTS_PATTERN = re.compile(
@@ -81,8 +82,8 @@ def _format_timings(timings: CrawlStageTimings | None) -> str:
     return (
         "lease=%0.1fms precheck=%0.1fms fetch=%0.1fms request=%0.1fms body=%0.1fms parse=%0.1fms "
         "frontier=%0.1fms persist=%0.1fms output=%0.1fms "
-        "parse_q_wait=%0.1fms publish_q_wait=%0.1fms process=%0.1fms slot=%0.1fms "
-        "parse_q_depth=%d publish_q_depth=%d"
+        "parse_q_wait=%0.1fms finalize_q_wait=%0.1fms publish_q_wait=%0.1fms process=%0.1fms slot=%0.1fms "
+        "parse_q_depth=%d finalize_q_depth=%d publish_q_depth=%d"
     ) % (
         timings.lease_ms,
         timings.precheck_ms,
@@ -94,10 +95,12 @@ def _format_timings(timings: CrawlStageTimings | None) -> str:
         timings.persist_ms,
         timings.output_ms,
         timings.parse_queue_wait_ms,
+        timings.finalize_queue_wait_ms,
         timings.publish_queue_wait_ms,
         timings.process_ms,
         timings.slot_ms,
         timings.parse_queue_depth,
+        timings.finalize_queue_depth,
         timings.publish_queue_depth,
     )
 
@@ -116,7 +119,16 @@ class _FetchedPage:
 
 @dataclass(slots=True)
 class _PublishItem:
-    """Parsed result handed from parser to publisher."""
+    """Finalized result handed from finalizer to publisher."""
+
+    result: CrawlResult
+    enqueued_at: float = 0.0
+    queue_depth: int = 0
+
+
+@dataclass(slots=True)
+class _FinalizeItem:
+    """Parsed payload handed from parser to finalizer."""
 
     parsed: _ParsedPage
     enqueued_at: float = 0.0
@@ -125,7 +137,7 @@ class _PublishItem:
 
 @dataclass(slots=True)
 class _ParsedPage:
-    """Parsed page handed from parse workers to publish workers."""
+    """Parsed page handed from parse workers to finalizer workers."""
 
     task: CrawlTask
     result: CrawlResult
@@ -218,12 +230,16 @@ class CrawlerEngine:
         self._active_host_counts: Counter[str] = Counter()
         self._active_branch_counts: Counter[tuple[str, str]] = Counter()
         self._parse_queue: asyncio.Queue[_FetchedPage | object] | None = None
+        self._finalize_queue: asyncio.Queue[_FinalizeItem | object] | None = None
         self._publish_queue: asyncio.Queue[_PublishItem | object] | None = None
         self._parse_queue_wait_last_ms = 0.0
+        self._finalize_queue_wait_last_ms = 0.0
         self._publish_queue_wait_last_ms = 0.0
         self._parse_queue_wait_max_ms = 0.0
+        self._finalize_queue_wait_max_ms = 0.0
         self._publish_queue_wait_max_ms = 0.0
         self._parse_queue_depth_max = 0
+        self._finalize_queue_depth_max = 0
         self._publish_queue_depth_max = 0
 
     def snapshot_runtime_stats(self) -> dict[str, object]:
@@ -241,14 +257,20 @@ class CrawlerEngine:
             "active_hosts": len(self._active_host_counts),
             "active_branches": len(self._active_branch_counts),
             "parse_queue_size": self._parse_queue.qsize() if self._parse_queue is not None else 0,
+            "finalize_queue_size": self._finalize_queue.qsize()
+            if self._finalize_queue is not None
+            else 0,
             "publish_queue_size": self._publish_queue.qsize()
             if self._publish_queue is not None
             else 0,
             "parse_queue_wait_last_ms": self._parse_queue_wait_last_ms,
+            "finalize_queue_wait_last_ms": self._finalize_queue_wait_last_ms,
             "publish_queue_wait_last_ms": self._publish_queue_wait_last_ms,
             "parse_queue_wait_max_ms": self._parse_queue_wait_max_ms,
+            "finalize_queue_wait_max_ms": self._finalize_queue_wait_max_ms,
             "publish_queue_wait_max_ms": self._publish_queue_wait_max_ms,
             "parse_queue_depth_max": self._parse_queue_depth_max,
+            "finalize_queue_depth_max": self._finalize_queue_depth_max,
             "publish_queue_depth_max": self._publish_queue_depth_max,
             "failure_breakdown": dict(self._failure_counts),
         }
@@ -569,15 +591,16 @@ class CrawlerEngine:
                     await self._parse_queue.put(result)
                 else:
                     parsed = await self._parse_fetched_page(result)
-                    parsed.timings.publish_queue_depth = 0
-                    parsed.timings.publish_queue_wait_ms = 0.0
-                    await self._publish_result(parsed)
+                    finalized = await self._finalize_parsed_page(parsed)
+                    finalized.timings.publish_queue_depth = 0
+                    finalized.timings.publish_queue_wait_ms = 0.0
+                    await self._publish_result(finalized)
                     logger.info(
                         "[%d/%d] %s (%s)",
                         self.pages_crawled,
                         self.max_pages,
-                        parsed.url,
-                        _format_timings(parsed.timings),
+                        finalized.url,
+                        _format_timings(finalized.timings),
                     )
 
     def _prepare_parsed_payload(
@@ -671,25 +694,26 @@ class CrawlerEngine:
             )
             try:
                 parsed = await self._parse_fetched_page(fetched)
-                if self._publish_queue is not None:
-                    queue_item = _PublishItem(
+                if self._finalize_queue is not None:
+                    queue_item = _FinalizeItem(
                         parsed=parsed,
                         enqueued_at=time.perf_counter(),
-                        queue_depth=self._publish_queue.qsize(),
+                        queue_depth=self._finalize_queue.qsize(),
                     )
-                    self._publish_queue_depth_max = max(
-                        self._publish_queue_depth_max,
+                    self._finalize_queue_depth_max = max(
+                        self._finalize_queue_depth_max,
                         queue_item.queue_depth,
                     )
-                    await self._publish_queue.put(queue_item)
+                    await self._finalize_queue.put(queue_item)
                 else:
-                    await self._publish_result(parsed)
+                    finalized = await self._finalize_parsed_page(parsed)
+                    await self._publish_result(finalized)
                     logger.info(
                         "[%d/%d] %s (%s)",
                         self.pages_crawled,
                         self.max_pages,
-                        parsed.result.url,
-                        _format_timings(parsed.result.timings),
+                        finalized.url,
+                        _format_timings(finalized.timings),
                     )
             except Exception as exc:
                 self.domain_manager.record_error(fetched.task.url)
@@ -711,13 +735,9 @@ class CrawlerEngine:
             finally:
                 self._parse_queue.task_done()
 
-    async def _publish_result(self, parsed: _ParsedPage):
-        """Apply frontier updates and persist crawl output outside fetch workers."""
-        loop = asyncio.get_running_loop()
-        storage = self._publisher_storage or self.pg_storage
-        executor = self._publisher_executor
+    async def _finalize_parsed_page(self, parsed: _ParsedPage) -> CrawlResult:
+        """Apply scheduler mutations after parse and before persistence."""
         result = parsed.result
-
         frontier_started = time.perf_counter()
         if parsed.new_tasks:
             self.frontier.add_many(parsed.new_tasks)
@@ -725,6 +745,14 @@ class CrawlerEngine:
         self.frontier.mark_done(parsed.task.url, lease_token=parsed.task.lease_token)
         result.timings.frontier_ms += _elapsed_ms(frontier_started)
         result.timings.process_ms = _elapsed_ms(parsed.process_started)
+
+        return result
+
+    async def _publish_result(self, result: CrawlResult):
+        """Persist crawl output outside fetch, parse, and finalize workers."""
+        loop = asyncio.get_running_loop()
+        storage = self._publisher_storage or self.pg_storage
+        executor = self._publisher_executor
 
         if storage:
             persist_started = time.perf_counter()
@@ -743,6 +771,57 @@ class CrawlerEngine:
         elif not storage:
             self.results.append(result.to_dict())
 
+    async def _finalizer(self):
+        """Drain parsed payloads and apply scheduler mutations before persistence."""
+        if self._finalize_queue is None:
+            return
+
+        while True:
+            item = await self._finalize_queue.get()
+            if item is _FINALIZER_SENTINEL:
+                self._finalize_queue.task_done()
+                break
+
+            queue_item = item
+            parsed = queue_item.parsed
+            parsed.result.timings.finalize_queue_wait_ms = (
+                _elapsed_ms(queue_item.enqueued_at) if queue_item.enqueued_at else 0.0
+            )
+            parsed.result.timings.finalize_queue_depth = queue_item.queue_depth
+            self._finalize_queue_wait_last_ms = parsed.result.timings.finalize_queue_wait_ms
+            self._finalize_queue_wait_max_ms = max(
+                self._finalize_queue_wait_max_ms,
+                parsed.result.timings.finalize_queue_wait_ms,
+            )
+            self._finalize_queue_depth_max = max(
+                self._finalize_queue_depth_max,
+                queue_item.queue_depth,
+            )
+            try:
+                result = await self._finalize_parsed_page(parsed)
+                if self._publish_queue is not None:
+                    publish_item = _PublishItem(
+                        result=result,
+                        enqueued_at=time.perf_counter(),
+                        queue_depth=self._publish_queue.qsize(),
+                    )
+                    self._publish_queue_depth_max = max(
+                        self._publish_queue_depth_max,
+                        publish_item.queue_depth,
+                    )
+                    await self._publish_queue.put(publish_item)
+                else:
+                    await self._publish_result(result)
+                    logger.info(
+                        "[%d/%d] %s (%s)",
+                        self.pages_crawled,
+                        self.max_pages,
+                        result.url,
+                        _format_timings(result.timings),
+                    )
+            finally:
+                self._finalize_queue.task_done()
+
     async def _publisher(self):
         """Drain processed crawl results and perform blocking writes."""
         if self._publish_queue is None:
@@ -755,8 +834,7 @@ class CrawlerEngine:
                 break
 
             queue_item = item
-            parsed = queue_item.parsed
-            result = parsed.result
+            result = queue_item.result
             result.timings.publish_queue_wait_ms = (
                 _elapsed_ms(queue_item.enqueued_at) if queue_item.enqueued_at else 0.0
             )
@@ -771,7 +849,7 @@ class CrawlerEngine:
                 queue_item.queue_depth,
             )
             try:
-                await self._publish_result(parsed)
+                await self._publish_result(result)
                 logger.info(
                     "[%d/%d] %s (%s)",
                     self.pages_crawled,
@@ -817,16 +895,20 @@ class CrawlerEngine:
         self._failure_counts = Counter()
         self._claimed_pages = 0
         self._parse_queue_wait_last_ms = 0.0
+        self._finalize_queue_wait_last_ms = 0.0
         self._publish_queue_wait_last_ms = 0.0
         self._parse_queue_wait_max_ms = 0.0
+        self._finalize_queue_wait_max_ms = 0.0
         self._publish_queue_wait_max_ms = 0.0
         self._parse_queue_depth_max = 0
+        self._finalize_queue_depth_max = 0
         self._publish_queue_depth_max = 0
 
         if self.start_url and self.frontier.pending_count() == 0:
             self.frontier.add(self._build_seed_task(self.start_url))
 
         self._parse_queue = asyncio.Queue()
+        self._finalize_queue = asyncio.Queue()
         self._publish_queue = asyncio.Queue()
         publisher_dsn = getattr(self.pg_storage, "_dsn", None) if self.pg_storage is not None else None
         if publisher_dsn and self._publisher_storage is None:
@@ -839,6 +921,7 @@ class CrawlerEngine:
                 thread_name_prefix="crawler-publisher",
             )
         parsers = [asyncio.create_task(self._parser()) for _ in range(self.parser_workers)]
+        finalizers = [asyncio.create_task(self._finalizer()) for _ in range(self.parser_workers)]
         publisher = asyncio.create_task(self._publisher())
 
         workers: list[asyncio.Task] = []
@@ -879,12 +962,18 @@ class CrawlerEngine:
 
         try:
             await asyncio.gather(*workers)
+            await self._parse_queue.join()
             for _ in range(self.parser_workers):
                 await self._parse_queue.put(_PARSER_SENTINEL)
-            await self._parse_queue.join()
             await asyncio.gather(*parsers)
-            await self._publish_queue.put(_PUBLISHER_SENTINEL)
+
+            await self._finalize_queue.join()
+            for _ in range(len(finalizers)):
+                await self._finalize_queue.put(_FINALIZER_SENTINEL)
+            await asyncio.gather(*finalizers)
+
             await self._publish_queue.join()
+            await self._publish_queue.put(_PUBLISHER_SENTINEL)
             await publisher
         finally:
             self._running = False
