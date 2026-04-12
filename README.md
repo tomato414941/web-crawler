@@ -13,6 +13,7 @@ entry points for discovery, not an allowlist and not a statement of the crawler'
 - **AI Agent** — Claude-powered autonomous browsing for complex tasks
 - **Web-scale Discovery** — Seed URLs start the crawl, but discovered external domains are valid crawl targets
 - **Postgres-backed Frontier** — Persistent crawl scheduler with URL leasing and retry backoff
+- **Physical Scheduler Queues** — Exploration / backlog / recrawl queues plus retry quarantine
 - **Host Scheduling State** — Durable per-host crawl delay and cooldown tracking in PostgreSQL
 - **REST API** — Serve crawled pages via `/pages`, `/stats` endpoints
 - **JSONL Export** — Optional streaming output alongside Postgres storage
@@ -206,6 +207,24 @@ Two persistent schedulers work together:
 1. **URL frontier** — controls retry timing, leasing, and recrawl eligibility
 2. **Host state** — controls per-host crawl delay and cooldown via `domain_state`
 
+Current scheduler state is split across explicit physical tables:
+
+- `frontier` — URL ledger and crawl result metadata
+- `frontier_queue_exploration` — ready or schedulable discovery work
+- `frontier_queue_backlog` — deferred discovery work
+- `frontier_queue_recrawl` — stale-page revisit work
+- `frontier_queue_blocked_domain_backoff` — retry quarantine for host-cooled URLs
+- `frontier_lease_active` — active leases only
+
+`pending` in `/stats` should be read as "not done yet", not as "immediately runnable".
+For actual scheduler state, prefer `readiness`:
+
+- `ready` — runnable now
+- `scheduled` — waiting on `next_fetch_at`
+- `blocked_domain_next_request` — waiting on per-host request slot timing
+- `blocked_host_backoff` — still in host cooldown while in normal queues
+- `retry_quarantine` — already isolated from normal queues and only restored through retry budget
+
 In daemon mode, seeds are starting points for graph expansion. The crawler is expected to
 discover and follow links onto other domains unless a specific crawl run is configured to stay
 on the same domain.
@@ -261,6 +280,9 @@ CRAWLER_DAEMON_KEEP_READY_PER_DOMAIN=128
 CRAWLER_DAEMON_BACKLOG_LOW_PRIORITY=0.75
 CRAWLER_DAEMON_BACKLOG_DEFER_SECONDS=1800
 CRAWLER_DAEMON_MIN_READY_SLEEP=0.5
+CRAWLER_DAEMON_MIN_EXPLORATION_READY=20
+CRAWLER_DAEMON_BLOCKED_RETRY_BUDGET=8
+CRAWLER_DAEMON_BLOCKED_RETRY_PER_DOMAIN=1
 ```
 
 Use `CRAWLER_*` only when you need to tune scheduler behavior without changing the daemon CLI
