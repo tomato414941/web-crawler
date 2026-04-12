@@ -1573,9 +1573,9 @@ class Frontier:
                             queue_entry.url,
                             queue_entry.domain,
                             queue_entry.next_fetch_at,
-                            queue_entry.next_fetch_at > %(now)s AS blocked_next_fetch,
-                            COALESCE(domain_state.next_request_at, 0) > %(now)s AS blocked_domain_next_request,
-                            COALESCE(domain_state.backoff_until, 0) > %(now)s AS blocked_domain_backoff,
+                            queue_entry.next_fetch_at > %s AS blocked_next_fetch,
+                            COALESCE(domain_state.next_request_at, 0) > %s AS blocked_domain_next_request,
+                            COALESCE(domain_state.backoff_until, 0) > %s AS blocked_domain_backoff,
                             GREATEST(
                                 queue_entry.next_fetch_at,
                                 COALESCE(domain_state.next_request_at, 0),
@@ -1621,7 +1621,7 @@ class Frontier:
                               AND NOT blocked_next_fetch
                         ) AS state_ready
                     FROM readiness_entries""",
-                (*blocked_queue_params, now),
+                (*blocked_queue_params, now, now, now),
             )
             (
                 pending,
