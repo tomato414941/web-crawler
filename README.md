@@ -225,6 +225,21 @@ For actual scheduler state, prefer `readiness`:
 - `blocked_host_backoff` — still in host cooldown while in normal queues
 - `retry_quarantine` — already isolated from normal queues and only restored through retry budget
 
+### Scheduler Design Principles
+
+The scheduler should be judged by a small set of explicit principles:
+
+1. Separate runtime scheduler truth from operator read models.
+2. Keep the crawl hot path as small as possible.
+3. Prefer requeue over in-slot stubborn retry.
+4. Keep host pacing state small and explicit.
+5. Keep planner logic thin; do not let it become the home for product policy,
+   observability, and safety all at once.
+
+These principles are intentionally narrower than any one implementation. They
+are the rules `web-crawler` should preserve even if tables, workers, or queue
+names change later.
+
 In daemon mode, seeds are starting points for graph expansion. The crawler is expected to
 discover and follow links onto other domains unless a specific crawl run is configured to stay
 on the same domain.
