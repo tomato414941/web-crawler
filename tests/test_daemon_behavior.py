@@ -717,3 +717,30 @@ def test_retire_blocked_retry_uses_configured_thresholds():
 
     assert retired == 3
     assert frontier.calls == [(64, 86400.0)]
+
+
+def test_restore_recovered_blocked_retry_uses_cycle_sized_budget():
+    class FakeFrontier:
+        def __init__(self):
+            self.calls = []
+
+        def restore_recovered_blocked_domain_backoff(self, *, limit, per_domain):
+            self.calls.append((limit, per_domain))
+            return 7
+
+    daemon = CrawlDaemon(
+        seeds=[
+            "https://www.iana.org/",
+            "https://datatracker.ietf.org/",
+            "https://www.rfc-editor.org/",
+        ],
+        postgres_dsn="postgresql://unused",
+        cycle_pages=300,
+        recrawl_ttl=3600,
+    )
+    frontier = FakeFrontier()
+
+    restored = daemon._restore_recovered_blocked_retry(frontier)
+
+    assert restored == 7
+    assert frontier.calls == [(300, 20)]
