@@ -458,22 +458,27 @@ class PgStorage:
 
                     cur.execute(
                         f"""WITH pending_entries AS (
-                                SELECT queue_class, url, domain, next_fetch_at, FALSE AS forced_blocked_domain_backoff
+                                SELECT queue_class, url, domain, next_fetch_at, FALSE AS forced_retry_quarantine
                                 FROM ({pending_queue_sql}) AS pending_queue_rows
                                 UNION ALL
-                                SELECT queue_class, url, domain, next_fetch_at, TRUE AS forced_blocked_domain_backoff
+                                SELECT queue_class, url, domain, next_fetch_at, TRUE AS forced_retry_quarantine
                                 FROM ({blocked_queue_sql}) AS blocked_queue_rows
                             )
                             SELECT
                                 pending_queue_rows.domain,
                                 COUNT(*) AS pending_count,
                                 COUNT(*) FILTER (
-                                    WHERE COALESCE(domain_state.next_request_at, 0) > %(now)s
+                                    WHERE NOT pending_queue_rows.forced_retry_quarantine
+                                      AND COALESCE(domain_state.next_request_at, 0) > %(now)s
+                                      AND COALESCE(domain_state.backoff_until, 0) <= %(now)s
                                 ) AS blocked_domain_next_request,
                                 COUNT(*) FILTER (
-                                    WHERE pending_queue_rows.forced_blocked_domain_backoff
-                                       OR COALESCE(domain_state.backoff_until, 0) > %(now)s
-                                ) AS blocked_domain_backoff,
+                                    WHERE NOT pending_queue_rows.forced_retry_quarantine
+                                      AND COALESCE(domain_state.backoff_until, 0) > %(now)s
+                                ) AS blocked_host_backoff,
+                                COUNT(*) FILTER (
+                                    WHERE pending_queue_rows.forced_retry_quarantine
+                                ) AS retry_quarantine,
                                 GREATEST(
                                     MAX(COALESCE(domain_state.next_request_at, 0)) - %(now)s,
                                     0
@@ -485,14 +490,17 @@ class PgStorage:
                                 COALESCE(MAX(domain_state.consecutive_failures), 0) AS consecutive_failures
                             FROM pending_entries AS pending_queue_rows
                             LEFT JOIN public.domain_state ON domain_state.host_key = pending_queue_rows.domain
-                            WHERE pending_queue_rows.forced_blocked_domain_backoff
+                            WHERE pending_queue_rows.forced_retry_quarantine
                                OR COALESCE(domain_state.next_request_at, 0) > %(now)s
                                OR COALESCE(domain_state.backoff_until, 0) > %(now)s
                             GROUP BY pending_queue_rows.domain
                             ORDER BY
                                 COUNT(*) FILTER (
-                                    WHERE pending_queue_rows.forced_blocked_domain_backoff
-                                       OR COALESCE(domain_state.backoff_until, 0) > %(now)s
+                                    WHERE pending_queue_rows.forced_retry_quarantine
+                                ) DESC,
+                                COUNT(*) FILTER (
+                                    WHERE NOT pending_queue_rows.forced_retry_quarantine
+                                      AND COALESCE(domain_state.backoff_until, 0) > %(now)s
                                 ) DESC,
                                 GREATEST(
                                     MAX(COALESCE(domain_state.backoff_until, 0)) - %(now)s,
@@ -509,14 +517,21 @@ class PgStorage:
                             domain,
                             pending_count,
                             blocked_next_request_count,
-                            blocked_backoff_count,
+                            blocked_host_backoff_count,
+                            retry_quarantine_count,
                             next_request_wait_seconds,
                             backoff_wait_seconds,
                             consecutive_failures,
                         ) = blocked_row
-                        dominant_reason = "domain_backoff"
+                        dominant_reason = "retry_quarantine"
                         wait_seconds = backoff_wait_seconds
-                        if blocked_backoff_count == 0 and blocked_next_request_count > 0:
+                        if retry_quarantine_count == 0 and blocked_host_backoff_count > 0:
+                            dominant_reason = "host_backoff"
+                        elif (
+                            retry_quarantine_count == 0
+                            and blocked_host_backoff_count == 0
+                            and blocked_next_request_count > 0
+                        ):
                             dominant_reason = "domain_next_request"
                             wait_seconds = next_request_wait_seconds
                         top_blocked_domains.append(
@@ -525,7 +540,8 @@ class PgStorage:
                                 "pending_count": pending_count,
                                 "blocked_counts": {
                                     "domain_next_request": blocked_next_request_count,
-                                    "domain_backoff": blocked_backoff_count,
+                                    "host_backoff": blocked_host_backoff_count,
+                                    "retry_quarantine": retry_quarantine_count,
                                 },
                                 "wait_seconds": round(wait_seconds, 3),
                                 "dominant_reason": dominant_reason,
