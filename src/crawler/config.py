@@ -27,6 +27,8 @@ class CrawlerSettings(BaseSettings):
     daemon_blocked_retry_budget: int = 8
     daemon_blocked_retry_per_domain: int = 1
     daemon_blocked_retry_max_consecutive_failures: int = 8
+    daemon_quarantine_retire_min_consecutive_failures: int = 64
+    daemon_quarantine_retire_after_seconds: float = 86400.0
 
     model_config = {"env_prefix": "CRAWLER_"}
 

@@ -109,6 +109,7 @@ BLOCKED_QUEUE_REQUIRED_COLUMNS = {
     "priority",
     "next_fetch_at",
     "added_at",
+    "quarantined_at",
     "branch_key",
 }
 
@@ -602,8 +603,11 @@ class Frontier:
         self,
         cur,
         rows: list[tuple[str, str, float, float, float, str, str]],
+        *,
+        quarantined_at: float | None = None,
     ) -> None:
         """Insert URLs into the blocked-domain-backoff physical queue."""
+        now = time.time() if quarantined_at is None else quarantined_at
         blocked_rows = [
             (
                 normalize_url(url),
@@ -612,6 +616,7 @@ class Frontier:
                 priority,
                 next_fetch_at,
                 added_at,
+                now,
                 url_branch_key(normalize_url(url)),
             )
             for url, domain, priority, next_fetch_at, added_at, queue_class, status in rows
@@ -622,7 +627,7 @@ class Frontier:
         psycopg2.extras.execute_values(
             cur,
             f"""INSERT INTO {BLOCKED_DOMAIN_BACKOFF_TABLE}
-                    (url, domain, queue_class, priority, next_fetch_at, added_at, branch_key)
+                    (url, domain, queue_class, priority, next_fetch_at, added_at, quarantined_at, branch_key)
                 VALUES %s
                 ON CONFLICT (url) DO UPDATE
                 SET domain = EXCLUDED.domain,
@@ -630,6 +635,7 @@ class Frontier:
                     priority = EXCLUDED.priority,
                     next_fetch_at = EXCLUDED.next_fetch_at,
                     added_at = EXCLUDED.added_at,
+                    quarantined_at = EXCLUDED.quarantined_at,
                     branch_key = EXCLUDED.branch_key""",
             blocked_rows,
             page_size=200,
@@ -1247,11 +1253,63 @@ class Frontier:
             if blocked_rows:
                 urls = [row[0] for row in blocked_rows]
                 self._delete_queue_entries(cur, urls)
-                self._insert_blocked_domain_backoff_rows(cur, blocked_rows)
+                self._insert_blocked_domain_backoff_rows(cur, blocked_rows, quarantined_at=now)
                 quarantined = len(blocked_rows)
 
         self._conn.commit()
         return quarantined, 0
+
+    def retire_blocked_domain_backoff(
+        self,
+        *,
+        min_consecutive_failures: int,
+        min_quarantine_seconds: float,
+        limit: int = 256,
+        now: float | None = None,
+    ) -> int:
+        """Retire long-stuck blocked URLs out of pending scheduler state."""
+        if min_consecutive_failures < 0 or min_quarantine_seconds < 0 or limit <= 0:
+            return 0
+
+        now = time.time() if now is None else now
+        with self._conn.cursor() as cur:
+            cur.execute(
+                f"""WITH doomed AS (
+                        SELECT blocked.url
+                        FROM {BLOCKED_DOMAIN_BACKOFF_TABLE} AS blocked
+                        JOIN domain_state ON domain_state.host_key = blocked.domain
+                        WHERE COALESCE(domain_state.consecutive_failures, 0) >= %s
+                          AND blocked.quarantined_at <= %s
+                        ORDER BY
+                            COALESCE(domain_state.consecutive_failures, 0) DESC,
+                            blocked.quarantined_at ASC,
+                            blocked.added_at ASC,
+                            blocked.url ASC
+                        LIMIT %s
+                    ), removed AS (
+                        DELETE FROM {BLOCKED_DOMAIN_BACKOFF_TABLE} AS blocked
+                        USING doomed
+                        WHERE blocked.url = doomed.url
+                        RETURNING blocked.url
+                    )
+                    UPDATE frontier
+                    SET status = '{FAILED_STATUS}',
+                        next_fetch_at = %s,
+                        lease_token = NULL,
+                        lease_expires_at = NULL,
+                        last_error = COALESCE(last_error, 'retry_quarantine_retired')
+                    WHERE url IN (SELECT url FROM removed)
+                    RETURNING url""",
+                (
+                    min_consecutive_failures,
+                    now - min_quarantine_seconds,
+                    limit,
+                    now,
+                ),
+            )
+            retired = len(cur.fetchall())
+        self._conn.commit()
+        return retired
 
     def promote_blocked_domain_backoff(
         self,

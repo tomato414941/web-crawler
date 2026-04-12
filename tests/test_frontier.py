@@ -644,6 +644,35 @@ class TestFrontier:
         assert leased is not None
         assert leased.url == "http://b.com/blocked"
 
+    def test_retire_blocked_domain_backoff_marks_old_high_failure_urls_failed(self, frontier):
+        now = time.time()
+        frontier.add(CrawlTask(url="http://a.com/blocked", depth=0, next_fetch_at=now))
+        self.domain_store.record_failure("a.com", backoff_seconds=30.0, now=now)
+        self.domain_store.record_failure("a.com", backoff_seconds=30.0, now=now + 1.0)
+        self.domain_store.record_failure("a.com", backoff_seconds=30.0, now=now + 2.0)
+        frontier.rebalance_blocked_domain_backoff(now=now + 2.0)
+
+        with frontier._conn.cursor() as cur:
+            cur.execute(
+                "UPDATE frontier_queue_blocked_domain_backoff SET quarantined_at = %s WHERE url = %s",
+                (now - 100.0, "http://a.com/blocked"),
+            )
+        frontier._conn.commit()
+
+        retired = frontier.retire_blocked_domain_backoff(
+            min_consecutive_failures=3,
+            min_quarantine_seconds=60.0,
+            now=now,
+        )
+
+        assert retired == 1
+        assert frontier.pending_count() == 0
+        assert frontier.blocked_domain_backoff_count() == 0
+
+        with frontier._conn.cursor() as cur:
+            cur.execute("SELECT status, last_error FROM frontier WHERE url = %s", ("http://a.com/blocked",))
+            assert cur.fetchone() == ("failed", "retry_quarantine_retired")
+
     def test_readiness_filters_blocked_queue_by_queue_class(self, frontier):
         now = time.time()
         frontier.add(CrawlTask(url="http://a.com/explore", depth=0, next_fetch_at=now))

@@ -98,6 +98,10 @@ class CrawlDaemon:
         self._blocked_retry_budget = max(0, settings.daemon_blocked_retry_budget)
         self._blocked_retry_per_domain = max(1, settings.daemon_blocked_retry_per_domain)
         self._blocked_retry_max_consecutive_failures = settings.daemon_blocked_retry_max_consecutive_failures
+        self._quarantine_retire_min_consecutive_failures = (
+            settings.daemon_quarantine_retire_min_consecutive_failures
+        )
+        self._quarantine_retire_after_seconds = max(0.0, settings.daemon_quarantine_retire_after_seconds)
         self._shutdown = False
         self._engine: CrawlerEngine | None = None
         self._last_runtime_snapshot: dict[str, object] = {}
@@ -157,6 +161,9 @@ class CrawlDaemon:
                                 quarantined,
                                 restored,
                             )
+                    retired = self._retire_blocked_retry(frontier)
+                    if retired:
+                        logger.info("Retired %d blocked-domain-backoff URLs", retired)
                     promoted = self._promote_blocked_retry(frontier)
                     if promoted:
                         logger.info("Promoted %d blocked-domain-backoff URLs for retry", promoted)
@@ -452,6 +459,15 @@ class CrawlDaemon:
             self._blocked_retry_budget,
             per_domain=self._blocked_retry_per_domain,
             max_consecutive_failures=self._blocked_retry_max_consecutive_failures,
+        )
+
+    def _retire_blocked_retry(self, frontier: Frontier) -> int:
+        """Retire long-stuck blocked retry URLs out of pending scheduler state."""
+        if not hasattr(frontier, "retire_blocked_domain_backoff"):
+            return 0
+        return frontier.retire_blocked_domain_backoff(
+            min_consecutive_failures=self._quarantine_retire_min_consecutive_failures,
+            min_quarantine_seconds=self._quarantine_retire_after_seconds,
         )
 
     def _recrawl_stale(self, storage: PgStorage, frontier: Frontier):
