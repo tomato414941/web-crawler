@@ -608,8 +608,8 @@ def test_promote_blocked_retry_restores_small_subset_when_ready_is_thin():
             assert queue_classes is None
             return 3
 
-        def promote_blocked_domain_backoff(self, limit, per_domain=1):
-            self.calls.append((limit, per_domain))
+        def promote_blocked_domain_backoff(self, limit, per_domain=1, max_consecutive_failures=None):
+            self.calls.append((limit, per_domain, max_consecutive_failures))
             return 2
 
     daemon = CrawlDaemon(
@@ -627,7 +627,7 @@ def test_promote_blocked_retry_restores_small_subset_when_ready_is_thin():
     promoted = daemon._promote_blocked_retry(frontier)
 
     assert promoted == 2
-    assert frontier.calls == [(8, 1)]
+    assert frontier.calls == [(8, 1, 8)]
 
 
 def test_promote_blocked_retry_skips_when_ready_is_healthy():
@@ -639,8 +639,8 @@ def test_promote_blocked_retry_skips_when_ready_is_healthy():
             assert queue_classes is None
             return 20
 
-        def promote_blocked_domain_backoff(self, limit, per_domain=1):
-            self.calls.append((limit, per_domain))
+        def promote_blocked_domain_backoff(self, limit, per_domain=1, max_consecutive_failures=None):
+            self.calls.append((limit, per_domain, max_consecutive_failures))
             return 1
 
     daemon = CrawlDaemon(

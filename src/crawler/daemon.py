@@ -97,6 +97,7 @@ class CrawlDaemon:
         )
         self._blocked_retry_budget = max(0, settings.daemon_blocked_retry_budget)
         self._blocked_retry_per_domain = max(1, settings.daemon_blocked_retry_per_domain)
+        self._blocked_retry_max_consecutive_failures = settings.daemon_blocked_retry_max_consecutive_failures
         self._shutdown = False
         self._engine: CrawlerEngine | None = None
         self._last_runtime_snapshot: dict[str, object] = {}
@@ -450,6 +451,7 @@ class CrawlDaemon:
         return frontier.promote_blocked_domain_backoff(
             self._blocked_retry_budget,
             per_domain=self._blocked_retry_per_domain,
+            max_consecutive_failures=self._blocked_retry_max_consecutive_failures,
         )
 
     def _recrawl_stale(self, storage: PgStorage, frontier: Frontier):
