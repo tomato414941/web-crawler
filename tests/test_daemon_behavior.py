@@ -659,3 +659,30 @@ def test_promote_blocked_retry_skips_when_ready_is_healthy():
 
     assert promoted == 0
     assert frontier.calls == []
+
+
+def test_retire_blocked_retry_uses_configured_thresholds():
+    class FakeFrontier:
+        def __init__(self):
+            self.calls = []
+
+        def retire_blocked_domain_backoff(self, *, min_consecutive_failures, min_quarantine_seconds):
+            self.calls.append((min_consecutive_failures, min_quarantine_seconds))
+            return 3
+
+    daemon = CrawlDaemon(
+        seeds=[
+            "https://www.iana.org/",
+            "https://datatracker.ietf.org/",
+            "https://www.rfc-editor.org/",
+        ],
+        postgres_dsn="postgresql://unused",
+        cycle_pages=10,
+        recrawl_ttl=3600,
+    )
+    frontier = FakeFrontier()
+
+    retired = daemon._retire_blocked_retry(frontier)
+
+    assert retired == 3
+    assert frontier.calls == [(64, 86400.0)]
