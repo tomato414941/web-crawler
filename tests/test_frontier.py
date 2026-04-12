@@ -673,6 +673,29 @@ class TestFrontier:
             cur.execute("SELECT status, last_error FROM frontier WHERE url = %s", ("http://a.com/blocked",))
             assert cur.fetchone() == ("failed", "retry_quarantine_retired")
 
+    def test_restore_recovered_blocked_domain_backoff_restores_healthy_domains(self, frontier):
+        now = time.time()
+        frontier.add(CrawlTask(url="http://a.com/blocked-1", depth=0, next_fetch_at=now))
+        frontier.add(CrawlTask(url="http://a.com/blocked-2", depth=0, next_fetch_at=now))
+        frontier.add(CrawlTask(url="http://b.com/blocked", depth=0, next_fetch_at=now))
+        self.domain_store.record_failure("a.com", backoff_seconds=30.0, now=now)
+        self.domain_store.record_failure("b.com", backoff_seconds=30.0, now=now)
+        frontier.rebalance_blocked_domain_backoff(now=now)
+
+        self.domain_store.record_success("a.com", now=now + 31.0)
+        restored = frontier.restore_recovered_blocked_domain_backoff(
+            limit=10,
+            per_domain=10,
+            now=now + 31.0,
+        )
+
+        assert restored == 2
+        assert frontier.pending_count() == 2
+        assert frontier.blocked_domain_backoff_count() == 1
+
+        leased = frontier.lease_batch(count=2, queue_classes=[QUEUE_EXPLORATION], now=now + 31.0)
+        assert {task.url for task in leased} == {"http://a.com/blocked-1", "http://a.com/blocked-2"}
+
     def test_readiness_filters_blocked_queue_by_queue_class(self, frontier):
         now = time.time()
         frontier.add(CrawlTask(url="http://a.com/explore", depth=0, next_fetch_at=now))

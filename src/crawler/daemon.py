@@ -161,6 +161,9 @@ class CrawlDaemon:
                                 quarantined,
                                 restored,
                             )
+                    restored = self._restore_recovered_blocked_retry(frontier)
+                    if restored:
+                        logger.info("Restored %d recovered blocked-domain-backoff URLs", restored)
                     retired = self._retire_blocked_retry(frontier)
                     if retired:
                         logger.info("Retired %d blocked-domain-backoff URLs", retired)
@@ -472,6 +475,15 @@ class CrawlDaemon:
         return frontier.retire_blocked_domain_backoff(
             min_consecutive_failures=self._quarantine_retire_min_consecutive_failures,
             min_quarantine_seconds=self._quarantine_retire_after_seconds,
+        )
+
+    def _restore_recovered_blocked_retry(self, frontier: Frontier) -> int:
+        """Restore healthy blocked retry domains before using bounded retry promotion."""
+        if not hasattr(frontier, "restore_recovered_blocked_domain_backoff"):
+            return 0
+        return frontier.restore_recovered_blocked_domain_backoff(
+            limit=max(self._cycle_pages, self._min_exploration_ready),
+            per_domain=max(self._blocked_retry_budget, self._min_exploration_ready),
         )
 
     def _recrawl_stale(self, storage: PgStorage, frontier: Frontier):

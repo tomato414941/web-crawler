@@ -1311,6 +1311,63 @@ class Frontier:
         self._conn.commit()
         return retired
 
+    def restore_recovered_blocked_domain_backoff(
+        self,
+        *,
+        limit: int,
+        per_domain: int,
+        now: float | None = None,
+    ) -> int:
+        """Restore blocked URLs whose domains have already recovered."""
+        if limit <= 0 or per_domain <= 0:
+            return 0
+
+        now = time.time() if now is None else now
+        with self._conn.cursor() as cur:
+            cur.execute(
+                f"""WITH ranked AS (
+                        SELECT
+                            blocked.url,
+                            blocked.domain,
+                            blocked.priority,
+                            blocked.next_fetch_at,
+                            blocked.added_at,
+                            blocked.queue_class,
+                            '{PENDING_STATUS}' AS status,
+                            ROW_NUMBER() OVER (
+                                PARTITION BY blocked.domain
+                                ORDER BY blocked.next_fetch_at ASC, blocked.added_at ASC, blocked.url ASC
+                            ) AS domain_rownum
+                        FROM {BLOCKED_DOMAIN_BACKOFF_TABLE} AS blocked
+                        LEFT JOIN domain_state ON domain_state.host_key = blocked.domain
+                        WHERE COALESCE(domain_state.backoff_until, 0) <= %s
+                          AND COALESCE(domain_state.consecutive_failures, 0) = 0
+                    ), picked AS (
+                        SELECT url
+                        FROM ranked
+                        WHERE domain_rownum <= %s
+                        ORDER BY priority DESC, next_fetch_at ASC, added_at ASC, url ASC
+                        LIMIT %s
+                    )
+                    DELETE FROM {BLOCKED_DOMAIN_BACKOFF_TABLE} AS blocked
+                    USING picked
+                    WHERE blocked.url = picked.url
+                    RETURNING
+                        blocked.url,
+                        blocked.domain,
+                        blocked.priority,
+                        blocked.next_fetch_at,
+                        blocked.added_at,
+                        blocked.queue_class,
+                        '{PENDING_STATUS}' AS status""",
+                (now, per_domain, limit),
+            )
+            rows = cur.fetchall()
+            if rows:
+                self._insert_pending_queue_rows(cur, rows)
+        self._conn.commit()
+        return len(rows)
+
     def promote_blocked_domain_backoff(
         self,
         limit: int,
