@@ -450,9 +450,11 @@ class PgStorage:
 
                     cur.execute(
                         f"""WITH pending_entries AS (
-                                {pending_queue_sql}
+                                SELECT queue_class, url, domain, next_fetch_at, FALSE AS forced_blocked_domain_backoff
+                                FROM ({pending_queue_sql}) AS pending_queue_rows
                                 UNION ALL
-                                SELECT queue_class, url, domain, next_fetch_at FROM ({blocked_queue_sql}) AS blocked_queue_rows
+                                SELECT queue_class, url, domain, next_fetch_at, TRUE AS forced_blocked_domain_backoff
+                                FROM ({blocked_queue_sql}) AS blocked_queue_rows
                             )
                             SELECT
                                 pending_queue_rows.domain,
@@ -461,7 +463,8 @@ class PgStorage:
                                     WHERE COALESCE(domain_state.next_request_at, 0) > %(now)s
                                 ) AS blocked_domain_next_request,
                                 COUNT(*) FILTER (
-                                    WHERE COALESCE(domain_state.backoff_until, 0) > %(now)s
+                                    WHERE pending_queue_rows.forced_blocked_domain_backoff
+                                       OR COALESCE(domain_state.backoff_until, 0) > %(now)s
                                 ) AS blocked_domain_backoff,
                                 GREATEST(
                                     MAX(COALESCE(domain_state.next_request_at, 0)) - %(now)s,
@@ -474,12 +477,14 @@ class PgStorage:
                                 COALESCE(MAX(domain_state.consecutive_failures), 0) AS consecutive_failures
                             FROM pending_entries AS pending_queue_rows
                             LEFT JOIN public.domain_state ON domain_state.host_key = pending_queue_rows.domain
-                            WHERE COALESCE(domain_state.next_request_at, 0) > %(now)s
+                            WHERE pending_queue_rows.forced_blocked_domain_backoff
+                               OR COALESCE(domain_state.next_request_at, 0) > %(now)s
                                OR COALESCE(domain_state.backoff_until, 0) > %(now)s
                             GROUP BY pending_queue_rows.domain
                             ORDER BY
                                 COUNT(*) FILTER (
-                                    WHERE COALESCE(domain_state.backoff_until, 0) > %(now)s
+                                    WHERE pending_queue_rows.forced_blocked_domain_backoff
+                                       OR COALESCE(domain_state.backoff_until, 0) > %(now)s
                                 ) DESC,
                                 GREATEST(
                                     MAX(COALESCE(domain_state.backoff_until, 0)) - %(now)s,

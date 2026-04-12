@@ -593,3 +593,65 @@ def test_ensure_seeds_reinserts_when_exploration_pending_is_high_but_ready_is_ze
             "https://github.com/",
         ], 2.0)
     ]
+
+
+def test_promote_blocked_retry_restores_small_subset_when_ready_is_thin():
+    class FakeFrontier:
+        def __init__(self):
+            self.calls = []
+
+        def ready_count(self, queue_classes=None, now=None):
+            assert queue_classes is None
+            return 3
+
+        def promote_blocked_domain_backoff(self, limit, per_domain=1):
+            self.calls.append((limit, per_domain))
+            return 2
+
+    daemon = CrawlDaemon(
+        seeds=[
+            "https://www.iana.org/",
+            "https://datatracker.ietf.org/",
+            "https://www.rfc-editor.org/",
+        ],
+        postgres_dsn="postgresql://unused",
+        cycle_pages=10,
+        recrawl_ttl=3600,
+    )
+    frontier = FakeFrontier()
+
+    promoted = daemon._promote_blocked_retry(frontier)
+
+    assert promoted == 2
+    assert frontier.calls == [(8, 1)]
+
+
+def test_promote_blocked_retry_skips_when_ready_is_healthy():
+    class FakeFrontier:
+        def __init__(self):
+            self.calls = []
+
+        def ready_count(self, queue_classes=None, now=None):
+            assert queue_classes is None
+            return 20
+
+        def promote_blocked_domain_backoff(self, limit, per_domain=1):
+            self.calls.append((limit, per_domain))
+            return 1
+
+    daemon = CrawlDaemon(
+        seeds=[
+            "https://www.iana.org/",
+            "https://datatracker.ietf.org/",
+            "https://www.rfc-editor.org/",
+        ],
+        postgres_dsn="postgresql://unused",
+        cycle_pages=10,
+        recrawl_ttl=3600,
+    )
+    frontier = FakeFrontier()
+
+    promoted = daemon._promote_blocked_retry(frontier)
+
+    assert promoted == 0
+    assert frontier.calls == []
