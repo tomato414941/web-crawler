@@ -565,7 +565,7 @@ class TestFrontier:
             "blocked_domain_backoff": 1,
         }
 
-    def test_rebalance_blocked_domain_backoff_quarantines_and_restores_urls(self, frontier):
+    def test_rebalance_blocked_domain_backoff_quarantines_urls(self, frontier):
         now = time.time()
         frontier.add(CrawlTask(url="http://a.com/blocked", depth=0, next_fetch_at=now))
         frontier.add(CrawlTask(url="http://b.com/ready", depth=0, next_fetch_at=now))
@@ -588,14 +588,32 @@ class TestFrontier:
             "blocked_domain_backoff": 1,
         }
 
-        self.domain_store.record_success("a.com", now=now + 1.0)
+    def test_promote_blocked_domain_backoff_restores_small_cooldown_subset(self, frontier):
+        now = time.time()
+        frontier.add(CrawlTask(url="http://a.com/blocked-1", depth=0, next_fetch_at=now))
+        frontier.add(CrawlTask(url="http://a.com/blocked-2", depth=0, next_fetch_at=now))
+        frontier.add(CrawlTask(url="http://b.com/blocked", depth=0, next_fetch_at=now))
+        self.domain_store.record_failure("a.com", backoff_seconds=30.0, now=now)
+        self.domain_store.record_failure("b.com", backoff_seconds=30.0, now=now)
+        frontier.rebalance_blocked_domain_backoff(now=now)
 
-        quarantined, restored = frontier.rebalance_blocked_domain_backoff(now=now + 1.0)
+        self.domain_store.record_success("a.com", now=now + 31.0)
+        self.domain_store.record_success("b.com", now=now + 31.0)
 
-        assert quarantined == 0
-        assert restored == 1
+        promoted = frontier.promote_blocked_domain_backoff(2, per_domain=1, now=now + 31.0)
+
+        assert promoted == 2
         assert frontier.pending_count() == 2
-        assert frontier.blocked_domain_backoff_count() == 0
+        assert frontier.blocked_domain_backoff_count() == 1
+
+        readiness = frontier.readiness(now=now + 31.0)
+        assert readiness.ready == 2
+        assert readiness.state_counts == {
+            "ready": 2,
+            "scheduled": 0,
+            "blocked_domain_next_request": 0,
+            "blocked_domain_backoff": 1,
+        }
 
     def test_readiness_filters_blocked_queue_by_queue_class(self, frontier):
         now = time.time()
