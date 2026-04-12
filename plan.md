@@ -17,6 +17,28 @@ Still not done:
 - `top_blocked_domains` still uses older wording and should be split to match the new state model more directly.
 - Postgres is still carrying too many synchronous responsibilities on the hot path.
 
+## Adopted principles
+
+These are the ideas worth keeping regardless of source project:
+
+- Separate scheduler truth from operator read models.
+- Keep the hot path small and throughput-oriented.
+- Prefer requeue over in-slot retry.
+- Keep host pacing state minimal and explicit.
+- Keep planner logic thin.
+
+## Explicit non-goals for adoption
+
+These ideas should not be copied directly from other crawler projects:
+
+- service boundaries that only make sense in a larger search stack
+- another project's exact table layout or API contracts
+- product-specific ranking, denylist, or source-policy behavior
+- admin snapshot semantics as scheduler truth
+
+The goal is to adopt durable principles, not to clone `web-search` runtime
+structure into `web-crawler`.
+
 ## Active priorities
 
 1. Re-center the project on a high-throughput crawler architecture.
