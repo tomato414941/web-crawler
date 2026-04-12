@@ -265,6 +265,7 @@ class PgStorage:
                 legacy_frontier_status: dict[str, int] = {}
                 queue_classes: dict[str, int] = {}
                 pending_queue_classes: dict[str, int] = {}
+                blocked_queue_classes: dict[str, int] = {}
                 readiness: dict[str, object] = {}
                 discovery_kinds: dict[str, int] = {}
                 archetypes: dict[str, int] = {}
@@ -280,6 +281,8 @@ class PgStorage:
                         UNION ALL
                         SELECT 'recrawl' AS queue_class, url, domain, next_fetch_at FROM public.frontier_queue_recrawl
                     ) AS pending_queue_rows"""
+                blocked_queue_sql = """SELECT queue_class, url, domain, next_fetch_at
+                    FROM public.frontier_queue_blocked_domain_backoff"""
                 cur.execute("SELECT to_regclass('public.crawler_runtime_stats')")
                 runtime_exists = cur.fetchone()[0] is not None
                 if runtime_exists:
@@ -324,7 +327,15 @@ class PgStorage:
                            GROUP BY queue_class"""
                     )
                     pending_queue_classes = {queue_class: count for queue_class, count in cur.fetchall()}
-                    frontier_status['pending'] = sum(pending_queue_classes.values())
+                    cur.execute(
+                        f"""SELECT queue_class, COUNT(*)
+                           FROM ({blocked_queue_sql}) AS blocked_queue_rows
+                           GROUP BY queue_class"""
+                    )
+                    blocked_queue_classes = {queue_class: count for queue_class, count in cur.fetchall()}
+                    frontier_status['pending'] = sum(pending_queue_classes.values()) + sum(
+                        blocked_queue_classes.values()
+                    )
 
                     cur.execute(
                         """SELECT discovery_kind, COUNT(*)
@@ -355,6 +366,8 @@ class PgStorage:
                     cur.execute(
                         f"""WITH pending_entries AS (
                                 {pending_queue_sql}
+                            ), blocked_entries AS (
+                                {blocked_queue_sql}
                             ), readiness_entries AS (
                                 SELECT
                                     pending_queue_rows.next_fetch_at > %(now)s AS blocked_next_fetch,
@@ -367,6 +380,13 @@ class PgStorage:
                                     ) AS ready_at
                                 FROM pending_entries AS pending_queue_rows
                                 LEFT JOIN public.domain_state ON domain_state.host_key = pending_queue_rows.domain
+                                UNION ALL
+                                SELECT
+                                    FALSE AS blocked_next_fetch,
+                                    FALSE AS blocked_domain_next_request,
+                                    TRUE AS blocked_domain_backoff,
+                                    NULL::DOUBLE PRECISION AS ready_at
+                                FROM blocked_entries
                             )
                             SELECT
                                 COUNT(*) AS pending,
@@ -431,6 +451,8 @@ class PgStorage:
                     cur.execute(
                         f"""WITH pending_entries AS (
                                 {pending_queue_sql}
+                                UNION ALL
+                                SELECT queue_class, url, domain, next_fetch_at FROM ({blocked_queue_sql}) AS blocked_queue_rows
                             )
                             SELECT
                                 pending_queue_rows.domain,
@@ -561,6 +583,7 @@ class PgStorage:
             "legacy_frontier_status": legacy_frontier_status,
             "queue_classes": queue_classes,
             "pending_queue_classes": pending_queue_classes,
+            "blocked_queue_classes": blocked_queue_classes,
             "readiness": readiness,
             "discovery_kinds": discovery_kinds,
             "archetypes": archetypes,
