@@ -23,6 +23,7 @@ from .discovery import (
     DISCOVERY_SEED_HOST,
     discovery_rank,
 )
+from .frontier_observability import FrontierObservability, FrontierReadiness
 from .schema import assert_public_table_columns
 from .urls import normalize_url, url_branch_key
 
@@ -137,17 +138,6 @@ class CrawlTask:
 
 
 @dataclass(frozen=True)
-class FrontierReadiness:
-    """Summary of the current pending queue readiness."""
-
-    pending: int
-    ready: int
-    next_ready_delay: float | None
-    blocked: dict[str, int]
-    state_counts: dict[str, int]
-
-
-@dataclass(frozen=True)
 class _ReadySql:
     """SQL fragments for pending URL readiness checks."""
 
@@ -177,6 +167,17 @@ class Frontier:
             if max_retry_backoff_seconds is None else max_retry_backoff_seconds
         )
         self._domain_store: DomainStore | None = None
+        self._observability = FrontierObservability(
+            conn,
+            queue_table_by_class=QUEUE_TABLE_BY_CLASS,
+            queue_class_order=QUEUE_CLASS_ORDER,
+            blocked_queue_table=BLOCKED_DOMAIN_BACKOFF_TABLE,
+            lease_table=LEASE_TABLE,
+            pending_status=PENDING_STATUS,
+            leased_status=LEASED_STATUS,
+            done_status=DONE_STATUS,
+            failed_status=FAILED_STATUS,
+        )
         self._assert_current_schema()
 
     def attach_domain_store(self, domain_store: "DomainStore | None") -> None:
@@ -286,24 +287,6 @@ class Frontier:
             params=tuple(params),
             ready_at=f"GREATEST({alias}.next_fetch_at, {next_request_sql}, {backoff_sql})",
         )
-
-    def _pending_queue_union_sql(self, queue_classes: list[str] | None = None) -> str:
-        """Return UNION ALL SQL across the selected physical pending queue tables."""
-        normalized_queue_classes = self._normalized_queue_classes(queue_classes)
-        selects = [
-            f"SELECT url, domain, next_fetch_at FROM {self._queue_table_sql(queue_class)}"
-            for queue_class in normalized_queue_classes
-        ]
-        return "\nUNION ALL\n".join(selects)
-
-    def _blocked_queue_sql(self, queue_classes: list[str] | None = None) -> tuple[str, tuple[object, ...]]:
-        """Return SQL for blocked-domain-backoff rows, optionally filtered by queue class."""
-        normalized_queue_classes = self._normalized_queue_classes(queue_classes)
-        sql = f"SELECT url, domain, next_fetch_at FROM {BLOCKED_DOMAIN_BACKOFF_TABLE}"
-        if queue_classes:
-            sql += " WHERE queue_class = ANY(%s)"
-            return sql, (normalized_queue_classes,)
-        return sql, ()
 
     def _recover_leased_locked(self, now: float, expired_only: bool) -> int:
         """Reset leased URLs back to pending inside an open transaction."""
@@ -1670,66 +1653,16 @@ class Frontier:
 
     def stats(self) -> dict:
         """Get queue statistics."""
-        with self._conn.cursor() as cur:
-            cur.execute("SELECT status, COUNT(*) FROM frontier GROUP BY status")
-            legacy_status = dict(cur.fetchall())
-            stats = {
-                status: count
-                for status, count in legacy_status.items()
-                if status not in {PENDING_STATUS, LEASED_STATUS}
-            }
-            cur.execute(f"SELECT COUNT(*) FROM {LEASE_TABLE}")
-            stats[LEASED_STATUS] = cur.fetchone()[0]
-            cur.execute(
-                """SELECT queue_class, count(*)
-                   FROM (
-                       SELECT %s AS queue_class, url FROM frontier_queue_exploration
-                       UNION ALL
-                       SELECT %s AS queue_class, url FROM frontier_queue_backlog
-                       UNION ALL
-                       SELECT %s AS queue_class, url FROM frontier_queue_recrawl
-                   ) AS pending_queues
-                   GROUP BY queue_class""",
-                (QUEUE_EXPLORATION, QUEUE_BACKLOG, QUEUE_RECRAWL),
-            )
-            pending_queue_tables = dict(cur.fetchall())
-            stats["pending_queue_tables"] = pending_queue_tables
-            cur.execute(
-                f"SELECT queue_class, COUNT(*) FROM {BLOCKED_DOMAIN_BACKOFF_TABLE} GROUP BY queue_class"
-            )
-            blocked_queue_classes = dict(cur.fetchall())
-            stats["blocked_queue_classes"] = blocked_queue_classes
-            stats[PENDING_STATUS] = sum(pending_queue_tables.values()) + sum(blocked_queue_classes.values())
-            stats["legacy_pending"] = legacy_status.get(PENDING_STATUS, 0)
-            stats["legacy_leased"] = legacy_status.get(LEASED_STATUS, 0)
-        stats["total"] = sum(
-            stats.get(key, 0)
-            for key in (DONE_STATUS, FAILED_STATUS, PENDING_STATUS, LEASED_STATUS)
-        )
-        return stats
+        return self._observability.status_counts()
 
     def pending_count(self, queue_classes: list[str] | None = None) -> int:
         """Get count of pending URLs, optionally filtered by queue class."""
-        if queue_classes:
-            with self._conn.cursor() as cur:
-                total = 0
-                for queue_class in queue_classes:
-                    cur.execute(f"SELECT COUNT(*) FROM {self._queue_table_sql(queue_class)}")
-                    total += cur.fetchone()[0]
-                return total
-
-        with self._conn.cursor() as cur:
-            total = 0
-            for queue_class in (QUEUE_EXPLORATION, QUEUE_BACKLOG, QUEUE_RECRAWL):
-                cur.execute(f"SELECT COUNT(*) FROM {self._queue_table_sql(queue_class)}")
-                total += cur.fetchone()[0]
-            return total
+        normalized_queue_classes = self._normalized_queue_classes(queue_classes)
+        return self._observability.pending_count(normalized_queue_classes)
 
     def blocked_domain_backoff_count(self) -> int:
         """Return count of URLs isolated due to host backoff."""
-        with self._conn.cursor() as cur:
-            cur.execute(f"SELECT COUNT(*) FROM {BLOCKED_DOMAIN_BACKOFF_TABLE}")
-            return cur.fetchone()[0]
+        return self._observability.blocked_count()
 
     def readiness(
         self,
@@ -1737,108 +1670,8 @@ class Frontier:
         queue_classes: list[str] | None = None,
     ) -> FrontierReadiness:
         """Return a single snapshot of pending and leaseable queue state."""
-        now = time.time() if now is None else now
-        pending_queue_sql = self._pending_queue_union_sql(queue_classes)
-        blocked_queue_sql, blocked_queue_params = self._blocked_queue_sql(queue_classes)
-        with self._conn.cursor() as cur:
-            cur.execute(
-                f"""WITH pending_entries AS (
-                        {pending_queue_sql}
-                    ), blocked_entries AS (
-                        {blocked_queue_sql}
-                    ), readiness_entries AS (
-                        SELECT
-                            queue_entry.url,
-                            queue_entry.domain,
-                            queue_entry.next_fetch_at,
-                            queue_entry.next_fetch_at > %s AS blocked_next_fetch,
-                            COALESCE(domain_state.next_request_at, 0) > %s AS blocked_domain_next_request,
-                            COALESCE(domain_state.backoff_until, 0) > %s AS blocked_host_backoff,
-                            FALSE AS retry_quarantine,
-                            GREATEST(
-                                queue_entry.next_fetch_at,
-                                COALESCE(domain_state.next_request_at, 0),
-                                COALESCE(domain_state.backoff_until, 0)
-                            ) AS ready_at
-                        FROM pending_entries AS queue_entry
-                        LEFT JOIN domain_state ON domain_state.host_key = queue_entry.domain
-                        UNION ALL
-                        SELECT
-                            blocked_entry.url,
-                            blocked_entry.domain,
-                            blocked_entry.next_fetch_at,
-                            FALSE AS blocked_next_fetch,
-                            FALSE AS blocked_domain_next_request,
-                            FALSE AS blocked_host_backoff,
-                            TRUE AS retry_quarantine,
-                            NULL::DOUBLE PRECISION AS ready_at
-                        FROM blocked_entries AS blocked_entry
-                    )
-                    SELECT
-                        COUNT(*) AS pending,
-                        COUNT(*) FILTER (
-                            WHERE NOT blocked_next_fetch
-                              AND NOT blocked_domain_next_request
-                              AND NOT blocked_host_backoff
-                              AND NOT retry_quarantine
-                        ) AS ready,
-                        MIN(ready_at) AS next_ready_at,
-                        COUNT(*) FILTER (WHERE blocked_next_fetch) AS blocked_next_fetch,
-                        COUNT(*) FILTER (WHERE blocked_domain_next_request) AS blocked_domain_next_request,
-                        COUNT(*) FILTER (WHERE blocked_host_backoff) AS blocked_host_backoff,
-                        COUNT(*) FILTER (WHERE retry_quarantine) AS retry_quarantine,
-                        COUNT(*) FILTER (
-                            WHERE NOT blocked_host_backoff
-                              AND NOT retry_quarantine
-                              AND blocked_domain_next_request
-                        ) AS state_blocked_domain_next_request,
-                        COUNT(*) FILTER (
-                            WHERE NOT blocked_host_backoff
-                              AND NOT retry_quarantine
-                              AND NOT blocked_domain_next_request
-                              AND blocked_next_fetch
-                        ) AS state_scheduled,
-                        COUNT(*) FILTER (
-                            WHERE NOT blocked_host_backoff
-                              AND NOT retry_quarantine
-                              AND NOT blocked_domain_next_request
-                              AND NOT blocked_next_fetch
-                        ) AS state_ready
-                    FROM readiness_entries""",
-                (*blocked_queue_params, now, now, now),
-            )
-            (
-                pending,
-                ready,
-                next_ready_at,
-                blocked_next_fetch,
-                blocked_domain_next_request,
-                blocked_host_backoff,
-                retry_quarantine,
-                state_blocked_domain_next_request,
-                state_scheduled,
-                state_ready,
-            ) = cur.fetchone()
-
-        next_ready_delay = None if next_ready_at is None else max(0.0, next_ready_at - now)
-        return FrontierReadiness(
-            pending=pending or 0,
-            ready=ready or 0,
-            next_ready_delay=next_ready_delay,
-            blocked={
-                "next_fetch_at": blocked_next_fetch or 0,
-                "domain_next_request": blocked_domain_next_request or 0,
-                "host_backoff": blocked_host_backoff or 0,
-                "retry_quarantine": retry_quarantine or 0,
-            },
-            state_counts={
-                "ready": state_ready or 0,
-                "scheduled": state_scheduled or 0,
-                "blocked_domain_next_request": state_blocked_domain_next_request or 0,
-                "blocked_host_backoff": blocked_host_backoff or 0,
-                "retry_quarantine": retry_quarantine or 0,
-            },
-        )
+        normalized_queue_classes = self._normalized_queue_classes(queue_classes)
+        return self._observability.readiness(now=now, queue_classes=normalized_queue_classes)
 
     def ready_count(
         self,
