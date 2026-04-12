@@ -23,6 +23,7 @@ class CrawlerSettings(BaseSettings):
     daemon_backlog_defer_seconds: float = 1800.0
     daemon_min_ready_sleep: float = 0.5
     daemon_min_exploration_pending: int = 3
+    daemon_min_exploration_ready: int = 20
 
     model_config = {"env_prefix": "CRAWLER_"}
 
