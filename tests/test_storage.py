@@ -26,6 +26,7 @@ def _reset_schema(dsn: str) -> None:
             cur.execute("DROP TABLE IF EXISTS public.frontier_queue_exploration")
             cur.execute("DROP TABLE IF EXISTS public.frontier_queue_backlog")
             cur.execute("DROP TABLE IF EXISTS public.frontier_queue_recrawl")
+            cur.execute("DROP TABLE IF EXISTS public.frontier_queue_blocked_domain_backoff")
             cur.execute("DROP TABLE IF EXISTS public.frontier_lease_active")
             cur.execute("DROP TABLE IF EXISTS public.frontier")
             cur.execute("DROP TABLE IF EXISTS public.crawler_runtime_stats")
@@ -191,6 +192,7 @@ def test_get_stats_includes_frontier_breakdown(pg_storage):
     assert stats["legacy_frontier_status"] == {"done": 1, "pending": 2}
     assert stats["queue_classes"] == {"exploration": 2, "recrawl": 1}
     assert stats["pending_queue_classes"] == {"exploration": 2}
+    assert stats["blocked_queue_classes"] == {}
     assert stats["readiness"] == {
         "pending": 2,
         "ready": 2,
@@ -380,6 +382,65 @@ def test_get_stats_prioritizes_domains_blocked_by_backoff(pg_storage):
     assert stats["top_blocked_domains"][0]["dominant_reason"] == "domain_backoff"
     assert stats["top_blocked_domains"][0]["wait_seconds"] == pytest.approx(45.0, abs=1e-3)
     assert stats["top_blocked_domains"][0]["consecutive_failures"] == 3
+
+
+def test_get_stats_counts_blocked_queue_classes(pg_storage):
+    now = time.time()
+
+    with pg_storage._conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO frontier (
+                url, domain, depth, priority, queue_class, discovery_kind, archetype,
+                source_url, added_at, status, next_fetch_at
+            )
+            VALUES
+                ('https://blocked.example/explore', 'blocked.example', 0, 1.0, 'exploration', 'seed', 'generic_page', NULL, %s, 'pending', %s),
+                ('https://blocked.example/backlog', 'blocked.example', 3, 1.0, 'backlog', 'same_host', 'generic_page', NULL, %s, 'pending', %s)
+            """,
+            (now, now, now, now),
+        )
+        cur.execute(
+            """
+            INSERT INTO frontier_queue_blocked_domain_backoff (
+                url, domain, queue_class, priority, next_fetch_at, added_at, branch_key
+            )
+            VALUES
+                ('https://blocked.example/explore', 'blocked.example', 'exploration', 1.0, %s, %s, '/explore'),
+                ('https://blocked.example/backlog', 'blocked.example', 'backlog', 1.0, %s, %s, '/backlog')
+            """,
+            (now, now, now, now),
+        )
+        cur.execute(
+            """
+            INSERT INTO domain_state (
+                host_key,
+                crawl_delay_seconds,
+                next_request_at,
+                backoff_until,
+                consecutive_failures,
+                robots_checked_at,
+                updated_at
+            )
+            VALUES ('blocked.example', 1.0, %s, %s, 4, %s, %s)
+            ON CONFLICT (host_key) DO UPDATE
+            SET next_request_at = EXCLUDED.next_request_at,
+                backoff_until = EXCLUDED.backoff_until,
+                consecutive_failures = EXCLUDED.consecutive_failures,
+                updated_at = EXCLUDED.updated_at
+            """,
+            (now, now + 40.0, now, now),
+        )
+    pg_storage._conn.commit()
+
+    stats = pg_storage.get_stats()
+
+    assert stats["pending_queue_classes"] == {}
+    assert stats["blocked_queue_classes"] == {"backlog": 1, "exploration": 1}
+    assert stats["frontier_status"]["pending"] == 2
+    assert stats["readiness"]["pending"] == 2
+    assert stats["readiness"]["ready"] == 0
+    assert stats["readiness"]["state_counts"]["blocked_domain_backoff"] == 2
 
 
 def test_get_stats_includes_active_error_breakdown(pg_storage):
