@@ -181,6 +181,10 @@ class CrawlerEngine:
         ) = _split_worker_pools(concurrency)
         self._publisher_executor: concurrent.futures.ThreadPoolExecutor | None = None
         self._publisher_storage = None
+        self._finalizer_executor: concurrent.futures.ThreadPoolExecutor | None = None
+        self._finalizer_storage = None
+        self._finalizer_frontier: Frontier | None = None
+        self._finalizer_domain_store: DomainStore | None = None
 
         self.start_domain = urlparse(start_url).netloc if start_url else ""
         self.seed_hosts = seed_hosts_from_urls(seed_urls or [])
@@ -289,10 +293,34 @@ class CrawlerEngine:
         if self._publisher_storage is not None:
             self._publisher_storage.close()
             self._publisher_storage = None
+        if self._finalizer_executor is not None:
+            self._finalizer_executor.shutdown(wait=True, cancel_futures=False)
+            self._finalizer_executor = None
+        self._finalizer_frontier = None
+        self._finalizer_domain_store = None
+        if self._finalizer_storage is not None:
+            self._finalizer_storage.close()
+            self._finalizer_storage = None
         if hasattr(self.fetcher, "close"):
             await self.fetcher.close()
         if self._owns_domain_manager:
             await self.domain_manager.close()
+
+    def _finalize_sync(self, task: CrawlTask, new_tasks: list[CrawlTask]) -> None:
+        """Apply durable scheduler mutations on the dedicated finalizer connection."""
+        frontier = self._finalizer_frontier or self.frontier
+        if new_tasks:
+            frontier.add_many(new_tasks)
+
+        domain_store = self._finalizer_domain_store or self._domain_store_for_success_tracking()
+        if domain_store is not None:
+            domain_store.record_success(self._host_key_for_url(task.url))
+
+        frontier.mark_done(task.url, lease_token=task.lease_token)
+
+    def _domain_store_for_success_tracking(self) -> DomainStore | None:
+        """Return the durable store used for host success resets when available."""
+        return getattr(self.domain_manager, "_domain_store", None)
 
     def _is_valid_url(self, url: str) -> bool:
         """Check if URL should be crawled."""
@@ -739,10 +767,23 @@ class CrawlerEngine:
         """Apply scheduler mutations after parse and before persistence."""
         result = parsed.result
         frontier_started = time.perf_counter()
-        if parsed.new_tasks:
-            self.frontier.add_many(parsed.new_tasks)
-        self.domain_manager.record_success(parsed.task.url)
-        self.frontier.mark_done(parsed.task.url, lease_token=parsed.task.lease_token)
+        if self._finalizer_executor is not None:
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(
+                self._finalizer_executor,
+                self._finalize_sync,
+                parsed.task,
+                parsed.new_tasks,
+            )
+            if hasattr(self.domain_manager, "record_success_runtime"):
+                self.domain_manager.record_success_runtime(parsed.task.url)
+            else:
+                self.domain_manager.record_success(parsed.task.url)
+        else:
+            if parsed.new_tasks:
+                self.frontier.add_many(parsed.new_tasks)
+            self.domain_manager.record_success(parsed.task.url)
+            self.frontier.mark_done(parsed.task.url, lease_token=parsed.task.lease_token)
         result.timings.frontier_ms += _elapsed_ms(frontier_started)
         result.timings.process_ms = _elapsed_ms(parsed.process_started)
 
@@ -915,10 +956,21 @@ class CrawlerEngine:
             from .storage import PgStorage
 
             self._publisher_storage = PgStorage(publisher_dsn)
+            self._finalizer_storage = PgStorage(publisher_dsn)
+            self._finalizer_frontier = Frontier(self._finalizer_storage.conn)
+            self._finalizer_domain_store = DomainStore(
+                self._finalizer_storage.conn,
+                default_delay=self.domain_manager.default_delay,
+            )
         if publisher_dsn and self._publisher_executor is None:
             self._publisher_executor = concurrent.futures.ThreadPoolExecutor(
                 max_workers=1,
                 thread_name_prefix="crawler-publisher",
+            )
+        if publisher_dsn and self._finalizer_executor is None:
+            self._finalizer_executor = concurrent.futures.ThreadPoolExecutor(
+                max_workers=1,
+                thread_name_prefix="crawler-finalizer",
             )
         parsers = [asyncio.create_task(self._parser()) for _ in range(self.parser_workers)]
         finalizers = [asyncio.create_task(self._finalizer()) for _ in range(self.parser_workers)]
