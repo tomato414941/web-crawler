@@ -118,9 +118,19 @@ class _FetchedPage:
 class _PublishItem:
     """Parsed result handed from parser to publisher."""
 
-    result: CrawlResult
+    parsed: _ParsedPage
     enqueued_at: float = 0.0
     queue_depth: int = 0
+
+
+@dataclass(slots=True)
+class _ParsedPage:
+    """Parsed page handed from parse workers to publish workers."""
+
+    task: CrawlTask
+    result: CrawlResult
+    new_tasks: list[CrawlTask]
+    process_started: float
 
 
 class CrawlerEngine:
@@ -603,8 +613,8 @@ class CrawlerEngine:
 
         return content, outlinks, new_tasks
 
-    async def _parse_fetched_page(self, fetched: _FetchedPage) -> CrawlResult:
-        """Parse fetched content and apply frontier updates outside fetch workers."""
+    async def _parse_fetched_page(self, fetched: _FetchedPage) -> _ParsedPage:
+        """Parse fetched content into a publishable payload outside fetch workers."""
         task = fetched.task
         response = fetched.response
         timings = fetched.timings
@@ -617,27 +627,21 @@ class CrawlerEngine:
         )
         timings.parse_ms = _elapsed_ms(parse_started)
 
-        if new_tasks:
-            frontier_started = time.perf_counter()
-            self.frontier.add_many(new_tasks)
-            timings.frontier_ms += _elapsed_ms(frontier_started)
-
-        self.domain_manager.record_success(task.url)
-        frontier_started = time.perf_counter()
-        self.frontier.mark_done(task.url, lease_token=task.lease_token)
-        timings.frontier_ms += _elapsed_ms(frontier_started)
-        timings.process_ms = _elapsed_ms(fetched.process_started)
-
-        return CrawlResult(
-            url=response.url,
-            status=response.status,
-            content_length=len(response.content),
-            depth=task.depth,
-            source_url=task.source_url,
-            timestamp=time.time(),
-            content=content,
-            outlinks=outlinks,
-            timings=timings,
+        return _ParsedPage(
+            task=task,
+            new_tasks=new_tasks,
+            process_started=fetched.process_started,
+            result=CrawlResult(
+                url=response.url,
+                status=response.status,
+                content_length=len(response.content),
+                depth=task.depth,
+                source_url=task.source_url,
+                timestamp=time.time(),
+                content=content,
+                outlinks=outlinks,
+                timings=timings,
+            ),
         )
 
     async def _parser(self):
@@ -666,10 +670,10 @@ class CrawlerEngine:
                 fetched.queue_depth,
             )
             try:
-                result = await self._parse_fetched_page(fetched)
+                parsed = await self._parse_fetched_page(fetched)
                 if self._publish_queue is not None:
                     queue_item = _PublishItem(
-                        result=result,
+                        parsed=parsed,
                         enqueued_at=time.perf_counter(),
                         queue_depth=self._publish_queue.qsize(),
                     )
@@ -679,13 +683,13 @@ class CrawlerEngine:
                     )
                     await self._publish_queue.put(queue_item)
                 else:
-                    await self._publish_result(result)
+                    await self._publish_result(parsed)
                     logger.info(
                         "[%d/%d] %s (%s)",
                         self.pages_crawled,
                         self.max_pages,
-                        result.url,
-                        _format_timings(result.timings),
+                        parsed.result.url,
+                        _format_timings(parsed.result.timings),
                     )
             except Exception as exc:
                 self.domain_manager.record_error(fetched.task.url)
@@ -707,11 +711,21 @@ class CrawlerEngine:
             finally:
                 self._parse_queue.task_done()
 
-    async def _publish_result(self, result: CrawlResult):
-        """Persist crawl output outside the fetch worker hot path."""
+    async def _publish_result(self, parsed: _ParsedPage):
+        """Apply frontier updates and persist crawl output outside fetch workers."""
         loop = asyncio.get_running_loop()
         storage = self._publisher_storage or self.pg_storage
         executor = self._publisher_executor
+        result = parsed.result
+
+        frontier_started = time.perf_counter()
+        if parsed.new_tasks:
+            self.frontier.add_many(parsed.new_tasks)
+        self.domain_manager.record_success(parsed.task.url)
+        self.frontier.mark_done(parsed.task.url, lease_token=parsed.task.lease_token)
+        result.timings.frontier_ms += _elapsed_ms(frontier_started)
+        result.timings.process_ms = _elapsed_ms(parsed.process_started)
+
         if storage:
             persist_started = time.perf_counter()
             if executor is not None:
@@ -741,7 +755,8 @@ class CrawlerEngine:
                 break
 
             queue_item = item
-            result = queue_item.result
+            parsed = queue_item.parsed
+            result = parsed.result
             result.timings.publish_queue_wait_ms = (
                 _elapsed_ms(queue_item.enqueued_at) if queue_item.enqueued_at else 0.0
             )
@@ -756,7 +771,7 @@ class CrawlerEngine:
                 queue_item.queue_depth,
             )
             try:
-                await self._publish_result(result)
+                await self._publish_result(parsed)
                 logger.info(
                     "[%d/%d] %s (%s)",
                     self.pages_crawled,
