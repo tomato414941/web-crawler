@@ -1,5 +1,22 @@
 # web-crawler plan
 
+## Current state
+
+Already done:
+
+- `frontier` is no longer the only scheduler surface; physical queue tables are the working scheduler state.
+- Active leases are isolated in `frontier_lease_active`.
+- Host-cooled URLs are physically isolated in `frontier_queue_blocked_domain_backoff`.
+- Retry quarantine is restored through a small retry budget instead of bulk re-entry.
+- `/stats` exposes `readiness` with `ready`, `scheduled`, `blocked_domain_next_request`, `blocked_host_backoff`, and `retry_quarantine`.
+
+Still not done:
+
+- Fetch / parse / publish are still too coupled inside one crawl worker path.
+- Scheduler policy is not yet latency-aware.
+- `top_blocked_domains` still uses older wording and should be split to match the new state model more directly.
+- Postgres is still carrying too many synchronous responsibilities on the hot path.
+
 ## Active priorities
 
 1. Re-center the project on a high-throughput crawler architecture.
@@ -104,26 +121,30 @@ These must not block normal fetch throughput.
 
 ### Phase 1: Instrument and simplify
 
-- Measure request latency, failure rate, and slot occupancy by domain.
-- Remove hot-path work that is only for operator visibility.
-- Confirm which synchronous writes still happen during fetch.
+Status: partially done.
+
+- `readiness`, blocked-domain breakdown, and runtime snapshots are in place.
+- Queue state is more explicit than before, but domain latency is still not a first-class scheduler input.
+- Remaining work: per-domain latency distributions and policy feedback, not just visibility.
 
 ### Phase 2: Split fetch from parse/publish
 
-- Introduce a fetch result handoff boundary.
-- Stop having a single worker own fetch, parse, and storage in sequence.
-- Preserve current behavior behind the new boundaries first.
+Status: not done.
+
+- This remains the biggest structural change still ahead.
 
 ### Phase 3: Add latency-aware scheduling
 
-- Use rolling per-domain latency and failure signals.
-- Reduce concurrency or priority for slow domains automatically.
-- Increase fairness without any domain-specific hard-coded rules.
+Status: not done.
+
+- Current policy is generic and host-agnostic, but it is still mostly backoff-driven rather than latency-driven.
 
 ### Phase 4: Revisit recrawl and backlog policy
 
-- Tune recrawl TTL after throughput stabilizes.
-- Rework backlog deferral based on measured scheduler behavior instead of defensive defaults.
+Status: partially done.
+
+- Backlog deferral and retry quarantine now exist.
+- Recrawl and backlog policy still need re-tuning once the hot path is cleaner.
 
 ## Deferred
 
