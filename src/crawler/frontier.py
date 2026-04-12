@@ -1258,6 +1258,7 @@ class Frontier:
         limit: int,
         *,
         per_domain: int = 1,
+        max_consecutive_failures: int | None = None,
         now: float | None = None,
     ) -> int:
         """Promote a small cooled-down subset from blocked queue back into normal queues."""
@@ -1266,6 +1267,11 @@ class Frontier:
 
         now = time.time() if now is None else now
         with self._conn.cursor() as cur:
+            effective_max_failures = (
+                None
+                if max_consecutive_failures is None or max_consecutive_failures < 0
+                else max_consecutive_failures
+            )
             cur.execute(
                 f"""WITH ranked_candidates AS (
                         SELECT
@@ -1287,6 +1293,10 @@ class Frontier:
                         FROM {BLOCKED_DOMAIN_BACKOFF_TABLE} AS blocked
                         LEFT JOIN domain_state ON domain_state.host_key = blocked.domain
                         WHERE COALESCE(domain_state.backoff_until, 0) <= %s
+                          AND (
+                                %s IS NULL
+                                OR COALESCE(domain_state.consecutive_failures, 0) <= %s
+                          )
                     ), picked AS (
                         SELECT url
                         FROM ranked_candidates
@@ -1305,7 +1315,7 @@ class Frontier:
                         blocked.added_at,
                         blocked.queue_class,
                         '{PENDING_STATUS}' AS status""",
-                (now, per_domain, limit),
+                (now, effective_max_failures, effective_max_failures, per_domain, limit),
             )
             rows = cur.fetchall()
             if rows:
