@@ -92,7 +92,11 @@ class CrawlDaemon:
         self._min_ready_sleep = (
             settings.daemon_min_ready_sleep if min_ready_sleep is None else min_ready_sleep
         )
-        self._min_exploration_ready = max(1, min(len(self._seeds), settings.daemon_min_exploration_ready))
+        self._min_exploration_ready = max(
+            1, min(len(self._seeds), settings.daemon_min_exploration_ready)
+        )
+        self._blocked_retry_budget = max(0, settings.daemon_blocked_retry_budget)
+        self._blocked_retry_per_domain = max(1, settings.daemon_blocked_retry_per_domain)
         self._shutdown = False
         self._engine: CrawlerEngine | None = None
         self._last_runtime_snapshot: dict[str, object] = {}
@@ -152,6 +156,9 @@ class CrawlDaemon:
                                 quarantined,
                                 restored,
                             )
+                    promoted = self._promote_blocked_retry(frontier)
+                    if promoted:
+                        logger.info("Promoted %d blocked-domain-backoff URLs for retry", promoted)
 
                     readiness = frontier.readiness()
                     pending = readiness.pending
@@ -336,6 +343,9 @@ class CrawlDaemon:
                 )
                 if deferred:
                     logger.info("Deferred %d low-priority backlog URLs", deferred)
+                promoted = self._promote_blocked_retry(frontier)
+                if promoted:
+                    logger.info("Promoted %d blocked-domain-backoff URLs for retry", promoted)
                 logger.info("Database connected (attempt %d)", attempt)
                 return storage, frontier
             except psycopg2.OperationalError as e:
@@ -427,6 +437,19 @@ class CrawlDaemon:
             exploration_ready,
             exploration_pending,
             self._min_exploration_ready,
+        )
+
+    def _promote_blocked_retry(self, frontier: Frontier) -> int:
+        """Restore a small cooled-down subset from blocked retry queue when ready work is thin."""
+        if not hasattr(frontier, "promote_blocked_domain_backoff"):
+            return 0
+        if self._blocked_retry_budget <= 0:
+            return 0
+        if frontier.ready_count() >= self._min_exploration_ready:
+            return 0
+        return frontier.promote_blocked_domain_backoff(
+            self._blocked_retry_budget,
+            per_domain=self._blocked_retry_per_domain,
         )
 
     def _recrawl_stale(self, storage: PgStorage, frontier: Frontier):
