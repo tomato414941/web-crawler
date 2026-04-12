@@ -80,6 +80,7 @@ QUEUE_TABLE_BY_CLASS = {
     QUEUE_RECRAWL: "frontier_queue_recrawl",
 }
 QUEUE_TABLES = tuple(QUEUE_TABLE_BY_CLASS.values())
+BLOCKED_DOMAIN_BACKOFF_TABLE = "frontier_queue_blocked_domain_backoff"
 QUEUE_CLASS_ORDER = (
     QUEUE_EXPLORATION,
     QUEUE_BACKLOG,
@@ -100,6 +101,15 @@ LEASE_REQUIRED_COLUMNS = {
     "queue_class",
     "lease_token",
     "lease_expires_at",
+}
+BLOCKED_QUEUE_REQUIRED_COLUMNS = {
+    "url",
+    "domain",
+    "queue_class",
+    "priority",
+    "next_fetch_at",
+    "added_at",
+    "branch_key",
 }
 
 @dataclass
@@ -285,6 +295,15 @@ class Frontier:
         ]
         return "\nUNION ALL\n".join(selects)
 
+    def _blocked_queue_sql(self, queue_classes: list[str] | None = None) -> tuple[str, tuple[object, ...]]:
+        """Return SQL for blocked-domain-backoff rows, optionally filtered by queue class."""
+        normalized_queue_classes = self._normalized_queue_classes(queue_classes)
+        sql = f"SELECT url, domain, next_fetch_at FROM {BLOCKED_DOMAIN_BACKOFF_TABLE}"
+        if queue_classes:
+            sql += " WHERE queue_class = ANY(%s)"
+            return sql, (normalized_queue_classes,)
+        return sql, ()
+
     def _recover_leased_locked(self, now: float, expired_only: bool) -> int:
         """Reset leased URLs back to pending inside an open transaction."""
         if expired_only:
@@ -323,6 +342,16 @@ class Frontier:
                 if cur.fetchone()[0] is None:
                     raise RuntimeError(f"missing frontier queue table: {table_name}")
                 assert_public_table_columns(self._conn, table_name, QUEUE_REQUIRED_COLUMNS)
+            cur.execute("SELECT to_regclass(%s)", (f"public.{BLOCKED_DOMAIN_BACKOFF_TABLE}",))
+            if cur.fetchone()[0] is None:
+                raise RuntimeError(
+                    f"missing frontier blocked queue table: {BLOCKED_DOMAIN_BACKOFF_TABLE}"
+                )
+            assert_public_table_columns(
+                self._conn,
+                BLOCKED_DOMAIN_BACKOFF_TABLE,
+                BLOCKED_QUEUE_REQUIRED_COLUMNS,
+            )
             cur.execute("SELECT to_regclass(%s)", (f"public.{LEASE_TABLE}",))
             if cur.fetchone()[0] is None:
                 raise RuntimeError(f"missing frontier lease table: {LEASE_TABLE}")
@@ -529,11 +558,82 @@ class Frontier:
         return QUEUE_TABLE_BY_CLASS[self._normalize_queue_class(queue_class)]
 
     def _delete_queue_entries(self, cur, urls: list[str]) -> None:
-        """Remove URLs from all physical pending queue tables."""
+        """Remove URLs from all physical scheduler queue tables."""
         if not urls:
             return
         for table_name in QUEUE_TABLES:
             cur.execute(f"DELETE FROM {table_name} WHERE url = ANY(%s)", (urls,))
+        cur.execute(f"DELETE FROM {BLOCKED_DOMAIN_BACKOFF_TABLE} WHERE url = ANY(%s)", (urls,))
+
+    def _insert_pending_queue_rows(
+        self,
+        cur,
+        rows: list[tuple[str, str, float, float, float, str, str]],
+    ) -> None:
+        """Insert scheduler-pending rows into the appropriate physical queue tables."""
+        grouped: dict[str, list[tuple[str, str, float, float, float, str]]] = {
+            queue_class: [] for queue_class in FRONTIER_ALLOWED_QUEUE_CLASSES
+        }
+        for url, domain, priority, next_fetch_at, added_at, queue_class, _status in rows:
+            normalized_url = normalize_url(url)
+            grouped[self._normalize_queue_class(queue_class)].append(
+                (normalized_url, domain, priority, next_fetch_at, added_at, url_branch_key(normalized_url))
+            )
+
+        for queue_class, pending_rows in grouped.items():
+            if not pending_rows:
+                continue
+            psycopg2.extras.execute_values(
+                cur,
+                f"""INSERT INTO {self._queue_table_sql(queue_class)}
+                        (url, domain, priority, next_fetch_at, added_at, branch_key)
+                    VALUES %s
+                    ON CONFLICT (url) DO UPDATE
+                    SET domain = EXCLUDED.domain,
+                        priority = EXCLUDED.priority,
+                        next_fetch_at = EXCLUDED.next_fetch_at,
+                        added_at = EXCLUDED.added_at,
+                        branch_key = EXCLUDED.branch_key""",
+                pending_rows,
+                page_size=200,
+            )
+
+    def _insert_blocked_domain_backoff_rows(
+        self,
+        cur,
+        rows: list[tuple[str, str, float, float, float, str, str]],
+    ) -> None:
+        """Insert URLs into the blocked-domain-backoff physical queue."""
+        blocked_rows = [
+            (
+                normalize_url(url),
+                domain,
+                self._normalize_queue_class(queue_class),
+                priority,
+                next_fetch_at,
+                added_at,
+                url_branch_key(normalize_url(url)),
+            )
+            for url, domain, priority, next_fetch_at, added_at, queue_class, status in rows
+            if status == PENDING_STATUS
+        ]
+        if not blocked_rows:
+            return
+        psycopg2.extras.execute_values(
+            cur,
+            f"""INSERT INTO {BLOCKED_DOMAIN_BACKOFF_TABLE}
+                    (url, domain, queue_class, priority, next_fetch_at, added_at, branch_key)
+                VALUES %s
+                ON CONFLICT (url) DO UPDATE
+                SET domain = EXCLUDED.domain,
+                    queue_class = EXCLUDED.queue_class,
+                    priority = EXCLUDED.priority,
+                    next_fetch_at = EXCLUDED.next_fetch_at,
+                    added_at = EXCLUDED.added_at,
+                    branch_key = EXCLUDED.branch_key""",
+            blocked_rows,
+            page_size=200,
+        )
 
     def _delete_active_leases(self, cur, urls: list[str]) -> None:
         """Remove URLs from the physical active lease table."""
@@ -590,35 +690,10 @@ class Frontier:
         if not normalized_urls:
             return
         self._delete_queue_entries(cur, normalized_urls)
-
-        grouped: dict[str, list[tuple[str, str, float, float, float, str]]] = {
-            queue_class: [] for queue_class in FRONTIER_ALLOWED_QUEUE_CLASSES
-        }
-        for url, domain, priority, next_fetch_at, added_at, queue_class, status in rows:
-            if status != PENDING_STATUS:
-                continue
-            normalized_url = normalize_url(url)
-            grouped[self._normalize_queue_class(queue_class)].append(
-                (normalized_url, domain, priority, next_fetch_at, added_at, url_branch_key(normalized_url))
-            )
-
-        for queue_class, pending_rows in grouped.items():
-            if not pending_rows:
-                continue
-            psycopg2.extras.execute_values(
-                cur,
-                f"""INSERT INTO {self._queue_table_sql(queue_class)}
-                        (url, domain, priority, next_fetch_at, added_at, branch_key)
-                    VALUES %s
-                    ON CONFLICT (url) DO UPDATE
-                    SET domain = EXCLUDED.domain,
-                        priority = EXCLUDED.priority,
-                        next_fetch_at = EXCLUDED.next_fetch_at,
-                        added_at = EXCLUDED.added_at,
-                        branch_key = EXCLUDED.branch_key""",
-                pending_rows,
-                page_size=200,
-            )
+        self._insert_pending_queue_rows(
+            cur,
+            [row for row in rows if row[6] == PENDING_STATUS],
+        )
 
     def _project_pending_queue_rows(
         self,
@@ -1135,6 +1210,72 @@ class Frontier:
         self._conn.commit()
         return count
 
+    def rebalance_blocked_domain_backoff(self, now: float | None = None) -> tuple[int, int]:
+        """Move backoff-blocked URLs out of ready queues and restore cooled-down URLs."""
+        now = time.time() if now is None else now
+        restored = 0
+        quarantined = 0
+
+        with self._conn.cursor() as cur:
+            cur.execute(
+                f"""DELETE FROM {BLOCKED_DOMAIN_BACKOFF_TABLE} AS blocked
+                    WHERE COALESCE((
+                            SELECT domain_state.backoff_until
+                            FROM domain_state
+                            WHERE domain_state.host_key = blocked.domain
+                        ), 0) <= %s
+                    RETURNING
+                        blocked.url,
+                        blocked.domain,
+                        blocked.priority,
+                        blocked.next_fetch_at,
+                        blocked.added_at,
+                        blocked.queue_class,
+                        '{PENDING_STATUS}' AS status""",
+                (now,),
+            )
+            restore_rows = cur.fetchall()
+            if restore_rows:
+                self._insert_pending_queue_rows(cur, restore_rows)
+                restored = len(restore_rows)
+
+            cur.execute(
+                f"""SELECT queue.url, queue.domain, queue.priority, queue.next_fetch_at, queue.added_at,
+                           %s AS queue_class, '{PENDING_STATUS}' AS status
+                    FROM {self._queue_table_sql(QUEUE_EXPLORATION)} AS queue
+                    JOIN domain_state ON domain_state.host_key = queue.domain
+                    WHERE domain_state.backoff_until > %s
+                    UNION ALL
+                    SELECT queue.url, queue.domain, queue.priority, queue.next_fetch_at, queue.added_at,
+                           %s AS queue_class, '{PENDING_STATUS}' AS status
+                    FROM {self._queue_table_sql(QUEUE_BACKLOG)} AS queue
+                    JOIN domain_state ON domain_state.host_key = queue.domain
+                    WHERE domain_state.backoff_until > %s
+                    UNION ALL
+                    SELECT queue.url, queue.domain, queue.priority, queue.next_fetch_at, queue.added_at,
+                           %s AS queue_class, '{PENDING_STATUS}' AS status
+                    FROM {self._queue_table_sql(QUEUE_RECRAWL)} AS queue
+                    JOIN domain_state ON domain_state.host_key = queue.domain
+                    WHERE domain_state.backoff_until > %s""",
+                (
+                    QUEUE_EXPLORATION,
+                    now,
+                    QUEUE_BACKLOG,
+                    now,
+                    QUEUE_RECRAWL,
+                    now,
+                ),
+            )
+            blocked_rows = cur.fetchall()
+            if blocked_rows:
+                urls = [row[0] for row in blocked_rows]
+                self._delete_queue_entries(cur, urls)
+                self._insert_blocked_domain_backoff_rows(cur, blocked_rows)
+                quarantined = len(blocked_rows)
+
+        self._conn.commit()
+        return quarantined, restored
+
     def recover_leased(self, expired_only: bool = True) -> int:
         """Reset leased URLs back to pending."""
         count = self._recover_leased_locked(time.time(), expired_only=expired_only)
@@ -1384,6 +1525,8 @@ class Frontier:
                 (QUEUE_EXPLORATION, QUEUE_BACKLOG, QUEUE_RECRAWL),
             )
             stats["pending_queue_tables"] = dict(cur.fetchall())
+            cur.execute(f"SELECT COUNT(*) FROM {BLOCKED_DOMAIN_BACKOFF_TABLE}")
+            stats["blocked_domain_backoff_queue"] = cur.fetchone()[0]
         stats["total"] = sum(value for value in stats.values() if isinstance(value, int))
         return stats
 
@@ -1404,6 +1547,12 @@ class Frontier:
                 total += cur.fetchone()[0]
             return total
 
+    def blocked_domain_backoff_count(self) -> int:
+        """Return count of URLs isolated due to host backoff."""
+        with self._conn.cursor() as cur:
+            cur.execute(f"SELECT COUNT(*) FROM {BLOCKED_DOMAIN_BACKOFF_TABLE}")
+            return cur.fetchone()[0]
+
     def readiness(
         self,
         now: float | None = None,
@@ -1412,10 +1561,13 @@ class Frontier:
         """Return a single snapshot of pending and leaseable queue state."""
         now = time.time() if now is None else now
         pending_queue_sql = self._pending_queue_union_sql(queue_classes)
+        blocked_queue_sql, blocked_queue_params = self._blocked_queue_sql(queue_classes)
         with self._conn.cursor() as cur:
             cur.execute(
                 f"""WITH pending_entries AS (
                         {pending_queue_sql}
+                    ), blocked_entries AS (
+                        {blocked_queue_sql}
                     ), readiness_entries AS (
                         SELECT
                             queue_entry.url,
@@ -1431,6 +1583,16 @@ class Frontier:
                             ) AS ready_at
                         FROM pending_entries AS queue_entry
                         LEFT JOIN domain_state ON domain_state.host_key = queue_entry.domain
+                        UNION ALL
+                        SELECT
+                            blocked_entry.url,
+                            blocked_entry.domain,
+                            blocked_entry.next_fetch_at,
+                            FALSE AS blocked_next_fetch,
+                            FALSE AS blocked_domain_next_request,
+                            TRUE AS blocked_domain_backoff,
+                            NULL::DOUBLE PRECISION AS ready_at
+                        FROM blocked_entries AS blocked_entry
                     )
                     SELECT
                         COUNT(*) AS pending,
@@ -1459,7 +1621,7 @@ class Frontier:
                               AND NOT blocked_next_fetch
                         ) AS state_ready
                     FROM readiness_entries""",
-                {"now": now},
+                (*blocked_queue_params, now),
             )
             (
                 pending,

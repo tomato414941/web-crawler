@@ -23,6 +23,7 @@ def _reset_schema(dsn: str) -> None:
             cur.execute("DROP TABLE IF EXISTS public.frontier_queue_exploration")
             cur.execute("DROP TABLE IF EXISTS public.frontier_queue_backlog")
             cur.execute("DROP TABLE IF EXISTS public.frontier_queue_recrawl")
+            cur.execute("DROP TABLE IF EXISTS public.frontier_queue_blocked_domain_backoff")
             cur.execute("DROP TABLE IF EXISTS public.frontier_lease_active")
             cur.execute("DROP TABLE IF EXISTS public.frontier")
             cur.execute("DROP TABLE IF EXISTS public.crawler_runtime_stats")
@@ -54,6 +55,7 @@ def test_apply_migrations_creates_expected_tables(migrated_dsn):
         "008_expand_frontier_pending_queue_tables.sql",
         "009_frontier_active_lease_table.sql",
         "010_frontier_queue_branch_keys.sql",
+        "011_frontier_blocked_domain_backoff_queue.sql",
     ]
 
     conn = psycopg2.connect(migrated_dsn)
@@ -69,6 +71,7 @@ def test_apply_migrations_creates_expected_tables(migrated_dsn):
                        to_regclass('public.frontier_queue_exploration'),
                        to_regclass('public.frontier_queue_backlog'),
                        to_regclass('public.frontier_queue_recrawl'),
+                       to_regclass('public.frontier_queue_blocked_domain_backoff'),
                        to_regclass('public.frontier_lease_active')
                 """
             )
@@ -81,6 +84,7 @@ def test_apply_migrations_creates_expected_tables(migrated_dsn):
                 "frontier_queue_exploration",
                 "frontier_queue_backlog",
                 "frontier_queue_recrawl",
+                "frontier_queue_blocked_domain_backoff",
                 "frontier_lease_active",
             )
     finally:

@@ -113,6 +113,7 @@ class TestFrontier:
             cur.execute("DROP TABLE IF EXISTS frontier_queue_exploration")
             cur.execute("DROP TABLE IF EXISTS frontier_queue_backlog")
             cur.execute("DROP TABLE IF EXISTS frontier_queue_recrawl")
+            cur.execute("DROP TABLE IF EXISTS frontier_queue_blocked_domain_backoff")
             cur.execute("DROP TABLE IF EXISTS frontier")
             cur.execute("DROP TABLE IF EXISTS domain_state")
             cur.execute("DROP TABLE IF EXISTS pages")
@@ -563,12 +564,53 @@ class TestFrontier:
             "blocked_domain_next_request": 0,
             "blocked_domain_backoff": 1,
         }
+
+    def test_rebalance_blocked_domain_backoff_quarantines_and_restores_urls(self, frontier):
+        now = time.time()
+        frontier.add(CrawlTask(url="http://a.com/blocked", depth=0, next_fetch_at=now))
+        frontier.add(CrawlTask(url="http://b.com/ready", depth=0, next_fetch_at=now))
+        self.domain_store.record_failure("a.com", backoff_seconds=30.0, now=now)
+
+        quarantined, restored = frontier.rebalance_blocked_domain_backoff(now=now)
+
+        assert quarantined == 1
+        assert restored == 0
+        assert frontier.pending_count() == 1
+        assert frontier.blocked_domain_backoff_count() == 1
+
+        readiness = frontier.readiness(now=now)
+        assert readiness.pending == 2
+        assert readiness.ready == 1
         assert readiness.state_counts == {
-            "ready": 0,
-            "scheduled": 1,
+            "ready": 1,
+            "scheduled": 0,
             "blocked_domain_next_request": 0,
             "blocked_domain_backoff": 1,
         }
+
+        self.domain_store.record_success("a.com", now=now + 1.0)
+
+        quarantined, restored = frontier.rebalance_blocked_domain_backoff(now=now + 1.0)
+
+        assert quarantined == 0
+        assert restored == 1
+        assert frontier.pending_count() == 2
+        assert frontier.blocked_domain_backoff_count() == 0
+
+    def test_readiness_filters_blocked_queue_by_queue_class(self, frontier):
+        now = time.time()
+        frontier.add(CrawlTask(url="http://a.com/explore", depth=0, next_fetch_at=now))
+        frontier.add(CrawlTask(url="http://a.com/backlog", depth=3, next_fetch_at=now))
+        self.domain_store.record_failure("a.com", backoff_seconds=30.0, now=now)
+        frontier.rebalance_blocked_domain_backoff(now=now)
+
+        exploration = frontier.readiness(now=now, queue_classes=[QUEUE_EXPLORATION])
+        backlog = frontier.readiness(now=now, queue_classes=[QUEUE_BACKLOG])
+
+        assert exploration.pending == 1
+        assert exploration.state_counts["blocked_domain_backoff"] == 1
+        assert backlog.pending == 1
+        assert backlog.state_counts["blocked_domain_backoff"] == 1
 
     def test_domain_filter(self, frontier):
         frontier.add(CrawlTask(url="http://a.com/page", depth=0))

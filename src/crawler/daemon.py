@@ -126,6 +126,14 @@ class CrawlDaemon:
                         continue
 
                 try:
+                    if hasattr(frontier, "rebalance_blocked_domain_backoff"):
+                        quarantined, restored = frontier.rebalance_blocked_domain_backoff()
+                        if quarantined or restored:
+                            logger.info(
+                                "Rebalanced blocked-domain-backoff queue: quarantined=%d restored=%d",
+                                quarantined,
+                                restored,
+                            )
                     self._ensure_seeds(frontier)
                     self._recrawl_stale(storage, frontier)
                     deferred = frontier.defer_overcrowded_backlog(
@@ -136,6 +144,14 @@ class CrawlDaemon:
                     )
                     if deferred:
                         logger.info("Deferred %d low-priority backlog URLs", deferred)
+                    if hasattr(frontier, "rebalance_blocked_domain_backoff"):
+                        quarantined, restored = frontier.rebalance_blocked_domain_backoff()
+                        if quarantined or restored:
+                            logger.info(
+                                "Rebalanced blocked-domain-backoff queue: quarantined=%d restored=%d",
+                                quarantined,
+                                restored,
+                            )
 
                     readiness = frontier.readiness()
                     pending = readiness.pending
@@ -304,6 +320,14 @@ class CrawlDaemon:
                 count = frontier.recover_leased(expired_only=False)
                 if count:
                     logger.info("Recovered %d leased URLs", count)
+                if hasattr(frontier, "rebalance_blocked_domain_backoff"):
+                    quarantined, restored = frontier.rebalance_blocked_domain_backoff()
+                    if quarantined or restored:
+                        logger.info(
+                            "Rebalanced blocked-domain-backoff queue: quarantined=%d restored=%d",
+                            quarantined,
+                            restored,
+                        )
                 deferred = frontier.defer_overcrowded_backlog(
                     keep_ready_per_domain=self._backlog_ready_per_domain,
                     keep_ready_per_branch=self._backlog_ready_per_branch,
