@@ -276,6 +276,15 @@ class Frontier:
             ready_at=f"GREATEST({alias}.next_fetch_at, {next_request_sql}, {backoff_sql})",
         )
 
+    def _pending_queue_union_sql(self, queue_classes: list[str] | None = None) -> str:
+        """Return UNION ALL SQL across the selected physical pending queue tables."""
+        normalized_queue_classes = self._normalized_queue_classes(queue_classes)
+        selects = [
+            f"SELECT url, domain, next_fetch_at FROM {self._queue_table_sql(queue_class)}"
+            for queue_class in normalized_queue_classes
+        ]
+        return "\nUNION ALL\n".join(selects)
+
     def _recover_leased_locked(self, now: float, expired_only: bool) -> int:
         """Reset leased URLs back to pending inside an open transaction."""
         if expired_only:
@@ -1395,20 +1404,18 @@ class Frontier:
                 total += cur.fetchone()[0]
             return total
 
-    def readiness(self, now: float | None = None) -> FrontierReadiness:
+    def readiness(
+        self,
+        now: float | None = None,
+        queue_classes: list[str] | None = None,
+    ) -> FrontierReadiness:
         """Return a single snapshot of pending and leaseable queue state."""
         now = time.time() if now is None else now
+        pending_queue_sql = self._pending_queue_union_sql(queue_classes)
         with self._conn.cursor() as cur:
             cur.execute(
-                """WITH pending_entries AS (
-                        SELECT url, domain, next_fetch_at
-                        FROM frontier_queue_exploration
-                        UNION ALL
-                        SELECT url, domain, next_fetch_at
-                        FROM frontier_queue_backlog
-                        UNION ALL
-                        SELECT url, domain, next_fetch_at
-                        FROM frontier_queue_recrawl
+                f"""WITH pending_entries AS (
+                        {pending_queue_sql}
                     ), readiness_entries AS (
                         SELECT
                             queue_entry.url,
@@ -1485,13 +1492,21 @@ class Frontier:
             },
         )
 
-    def ready_count(self, now: float | None = None) -> int:
+    def ready_count(
+        self,
+        now: float | None = None,
+        queue_classes: list[str] | None = None,
+    ) -> int:
         """Get count of pending URLs that are leaseable right now."""
-        return self.readiness(now=now).ready
+        return self.readiness(now=now, queue_classes=queue_classes).ready
 
-    def next_ready_delay(self, now: float | None = None) -> float | None:
+    def next_ready_delay(
+        self,
+        now: float | None = None,
+        queue_classes: list[str] | None = None,
+    ) -> float | None:
         """Return seconds until the next pending URL becomes leaseable."""
-        return self.readiness(now=now).next_ready_delay
+        return self.readiness(now=now, queue_classes=queue_classes).next_ready_delay
 
     def is_seen(self, url: str) -> bool:
         """Check if URL exists in frontier."""
