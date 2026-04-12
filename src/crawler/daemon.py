@@ -11,6 +11,7 @@ import psycopg2
 
 from .config import settings
 from .crawl import CrawlerEngine
+from .daemon_policy import DaemonSchedulerPolicy
 from .domain_manager import DomainManager
 from .domain_store import DomainStore
 from .discovery import seed_hosts_from_urls
@@ -110,6 +111,21 @@ class CrawlDaemon:
             user_agent=settings.user_agent,
             default_delay=delay,
         )
+        self._policy = DaemonSchedulerPolicy(
+            seeds=self._seeds,
+            seed_hosts=self._seed_hosts,
+            cycle_pages=self._cycle_pages,
+            min_exploration_ready=self._min_exploration_ready,
+            blocked_retry_budget=self._blocked_retry_budget,
+            blocked_retry_per_domain=self._blocked_retry_per_domain,
+            blocked_retry_max_consecutive_failures=self._blocked_retry_max_consecutive_failures,
+            quarantine_retire_min_consecutive_failures=self._quarantine_retire_min_consecutive_failures,
+            quarantine_retire_after_seconds=self._quarantine_retire_after_seconds,
+            backlog_ready_per_domain=self._backlog_ready_per_domain,
+            backlog_ready_per_branch=self._backlog_ready_per_branch,
+            backlog_low_priority=self._backlog_low_priority,
+            backlog_defer_seconds=self._backlog_defer_seconds,
+        )
 
     async def run(self):
         """Main daemon loop."""
@@ -135,41 +151,28 @@ class CrawlDaemon:
                         continue
 
                 try:
-                    if hasattr(frontier, "rebalance_blocked_domain_backoff"):
-                        quarantined, restored = frontier.rebalance_blocked_domain_backoff()
-                        if quarantined or restored:
-                            logger.info(
-                                "Rebalanced blocked-domain-backoff queue: quarantined=%d restored=%d",
-                                quarantined,
-                                restored,
-                            )
-                    self._ensure_seeds(frontier)
-                    self._recrawl_stale(storage, frontier)
-                    deferred = frontier.defer_overcrowded_backlog(
-                        keep_ready_per_domain=self._backlog_ready_per_domain,
-                        keep_ready_per_branch=self._backlog_ready_per_branch,
-                        low_priority_threshold=self._backlog_low_priority,
-                        defer_seconds=self._backlog_defer_seconds,
+                    maintenance = self._policy.prepare_frontier(
+                        frontier,
+                        recrawl_stale=lambda: self._recrawl_stale(storage, frontier),
                     )
-                    if deferred:
-                        logger.info("Deferred %d low-priority backlog URLs", deferred)
-                    if hasattr(frontier, "rebalance_blocked_domain_backoff"):
-                        quarantined, restored = frontier.rebalance_blocked_domain_backoff()
-                        if quarantined or restored:
-                            logger.info(
-                                "Rebalanced blocked-domain-backoff queue: quarantined=%d restored=%d",
-                                quarantined,
-                                restored,
-                            )
-                    restored = self._restore_recovered_blocked_retry(frontier)
-                    if restored:
-                        logger.info("Restored %d recovered blocked-domain-backoff URLs", restored)
-                    retired = self._retire_blocked_retry(frontier)
-                    if retired:
-                        logger.info("Retired %d blocked-domain-backoff URLs", retired)
-                    promoted = self._promote_blocked_retry(frontier)
-                    if promoted:
-                        logger.info("Promoted %d blocked-domain-backoff URLs for retry", promoted)
+                    if maintenance["rebalanced_before"]:
+                        logger.info(
+                            "Rebalanced blocked-domain-backoff queue: quarantined=%d restored=0",
+                            maintenance["rebalanced_before"],
+                        )
+                    if maintenance["deferred"]:
+                        logger.info("Deferred %d low-priority backlog URLs", maintenance["deferred"])
+                    if maintenance["rebalanced_after"]:
+                        logger.info(
+                            "Rebalanced blocked-domain-backoff queue: quarantined=%d restored=0",
+                            maintenance["rebalanced_after"],
+                        )
+                    if maintenance["restored"]:
+                        logger.info("Restored %d recovered blocked-domain-backoff URLs", maintenance["restored"])
+                    if maintenance["retired"]:
+                        logger.info("Retired %d blocked-domain-backoff URLs", maintenance["retired"])
+                    if maintenance["promoted"]:
+                        logger.info("Promoted %d blocked-domain-backoff URLs for retry", maintenance["promoted"])
 
                     readiness = frontier.readiness()
                     pending = readiness.pending
@@ -338,25 +341,16 @@ class CrawlDaemon:
                 count = frontier.recover_leased(expired_only=False)
                 if count:
                     logger.info("Recovered %d leased URLs", count)
-                if hasattr(frontier, "rebalance_blocked_domain_backoff"):
-                    quarantined, restored = frontier.rebalance_blocked_domain_backoff()
-                    if quarantined or restored:
-                        logger.info(
-                            "Rebalanced blocked-domain-backoff queue: quarantined=%d restored=%d",
-                            quarantined,
-                            restored,
-                        )
-                deferred = frontier.defer_overcrowded_backlog(
-                    keep_ready_per_domain=self._backlog_ready_per_domain,
-                    keep_ready_per_branch=self._backlog_ready_per_branch,
-                    low_priority_threshold=self._backlog_low_priority,
-                    defer_seconds=self._backlog_defer_seconds,
-                )
-                if deferred:
-                    logger.info("Deferred %d low-priority backlog URLs", deferred)
-                promoted = self._promote_blocked_retry(frontier)
-                if promoted:
-                    logger.info("Promoted %d blocked-domain-backoff URLs for retry", promoted)
+                prime = self._policy.prime_frontier(frontier)
+                if prime["rebalanced"]:
+                    logger.info(
+                        "Rebalanced blocked-domain-backoff queue: quarantined=%d restored=0",
+                        prime["rebalanced"],
+                    )
+                if prime["deferred"]:
+                    logger.info("Deferred %d low-priority backlog URLs", prime["deferred"])
+                if prime["promoted"]:
+                    logger.info("Promoted %d blocked-domain-backoff URLs for retry", prime["promoted"])
                 logger.info("Database connected (attempt %d)", attempt)
                 return storage, frontier
             except psycopg2.OperationalError as e:
@@ -416,75 +410,37 @@ class CrawlDaemon:
 
     def _ensure_seeds(self, frontier: Frontier):
         """Bootstrap seeds, then top up exploration from novel backlog branches."""
-        if frontier.pending_count() == 0:
-            count = frontier.upsert_seeds(self._seeds, priority=2.0)
-            logger.info("Re-seeded %d URLs", count)
+        before_pending = frontier.pending_count()
+        before_ready = frontier.ready_count(queue_classes=["exploration"])
+        before_exploration_pending = frontier.pending_count(queue_classes=["exploration"])
+        self._policy.ensure_seeds(frontier)
+        after_pending = frontier.pending_count()
+        after_ready = frontier.ready_count(queue_classes=["exploration"])
+        after_exploration_pending = frontier.pending_count(queue_classes=["exploration"])
+        if after_pending == before_pending and after_ready == before_ready:
             return
-
-        exploration_ready = frontier.ready_count(queue_classes=["exploration"])
-        exploration_pending = frontier.pending_count(queue_classes=["exploration"])
-        if exploration_ready >= self._min_exploration_ready:
-            return
-
-        needed = self._min_exploration_ready - exploration_ready
-        branch_promoted = 0
-        if hasattr(frontier, "promote_branch_novelty_exploration"):
-            branch_promoted = frontier.promote_branch_novelty_exploration(
-                max(exploration_pending + needed, self._min_exploration_ready),
-                per_domain=1,
-            )
-
-        count = 0
-        promoted = 0
-        if branch_promoted < needed:
-            count = frontier.upsert_seeds(self._seeds, priority=2.0)
-        if branch_promoted < needed and hasattr(frontier, "promote_seed_host_exploration") and self._seed_hosts:
-            promoted = frontier.promote_seed_host_exploration(self._seed_hosts, per_host=1, max_depth=2)
         logger.info(
-            "Topped up exploration: branch_promoted=%d added_seeds=%d seed_promoted=%d ready_exploration=%d pending_exploration=%d target_ready=%d",
-            branch_promoted,
-            count,
-            promoted,
-            exploration_ready,
-            exploration_pending,
+            "Topped up exploration: pending_total=%d->%d ready_exploration=%d->%d pending_exploration=%d->%d target_ready=%d",
+            before_pending,
+            after_pending,
+            before_ready,
+            after_ready,
+            before_exploration_pending,
+            after_exploration_pending,
             self._min_exploration_ready,
         )
 
     def _promote_blocked_retry(self, frontier: Frontier) -> int:
         """Restore a small cooled-down subset from blocked retry queue when ready work is thin."""
-        if not hasattr(frontier, "promote_blocked_domain_backoff"):
-            return 0
-        if self._blocked_retry_budget <= 0:
-            return 0
-        ready_count = frontier.ready_count()
-        if ready_count >= self._min_exploration_ready:
-            return 0
-        deficit = max(1, self._min_exploration_ready - ready_count)
-        limit = max(self._blocked_retry_budget, deficit)
-        per_domain = self._blocked_retry_per_domain if ready_count > 0 else limit
-        return frontier.promote_blocked_domain_backoff(
-            limit,
-            per_domain=per_domain,
-            max_consecutive_failures=self._blocked_retry_max_consecutive_failures,
-        )
+        return self._policy.promote_blocked_retry(frontier)
 
     def _retire_blocked_retry(self, frontier: Frontier) -> int:
         """Retire long-stuck blocked retry URLs out of pending scheduler state."""
-        if not hasattr(frontier, "retire_blocked_domain_backoff"):
-            return 0
-        return frontier.retire_blocked_domain_backoff(
-            min_consecutive_failures=self._quarantine_retire_min_consecutive_failures,
-            min_quarantine_seconds=self._quarantine_retire_after_seconds,
-        )
+        return self._policy.retire_blocked_retry(frontier)
 
     def _restore_recovered_blocked_retry(self, frontier: Frontier) -> int:
         """Restore healthy blocked retry domains before using bounded retry promotion."""
-        if not hasattr(frontier, "restore_recovered_blocked_domain_backoff"):
-            return 0
-        return frontier.restore_recovered_blocked_domain_backoff(
-            limit=max(self._cycle_pages, self._min_exploration_ready),
-            per_domain=max(self._blocked_retry_budget, self._min_exploration_ready),
-        )
+        return self._policy.restore_recovered_blocked_retry(frontier)
 
     def _recrawl_stale(self, storage: PgStorage, frontier: Frontier):
         """Re-queue pages older than recrawl_ttl."""
