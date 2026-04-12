@@ -24,6 +24,7 @@ from .discovery import (
     discovery_rank,
 )
 from .frontier_observability import FrontierObservability, FrontierReadiness
+from .frontier_quarantine import FrontierQuarantine
 from .schema import assert_public_table_columns
 from .urls import normalize_url, url_branch_key
 
@@ -177,6 +178,19 @@ class Frontier:
             leased_status=LEASED_STATUS,
             done_status=DONE_STATUS,
             failed_status=FAILED_STATUS,
+        )
+        self._quarantine = FrontierQuarantine(
+            conn,
+            queue_exploration=QUEUE_EXPLORATION,
+            queue_backlog=QUEUE_BACKLOG,
+            queue_recrawl=QUEUE_RECRAWL,
+            pending_status=PENDING_STATUS,
+            failed_status=FAILED_STATUS,
+            blocked_queue_table=BLOCKED_DOMAIN_BACKOFF_TABLE,
+            queue_table_sql=self._queue_table_sql,
+            delete_queue_entries=self._delete_queue_entries,
+            insert_blocked_rows=self._insert_blocked_domain_backoff_rows,
+            insert_pending_rows=self._insert_pending_queue_rows,
         )
         self._assert_current_schema()
 
@@ -1201,46 +1215,7 @@ class Frontier:
 
     def rebalance_blocked_domain_backoff(self, now: float | None = None) -> tuple[int, int]:
         """Move backoff-blocked URLs out of the normal scheduler queues."""
-        now = time.time() if now is None else now
-        quarantined = 0
-
-        with self._conn.cursor() as cur:
-            cur.execute(
-                f"""SELECT queue.url, queue.domain, queue.priority, queue.next_fetch_at, queue.added_at,
-                           %s AS queue_class, '{PENDING_STATUS}' AS status
-                    FROM {self._queue_table_sql(QUEUE_EXPLORATION)} AS queue
-                    JOIN domain_state ON domain_state.host_key = queue.domain
-                    WHERE domain_state.backoff_until > %s
-                    UNION ALL
-                    SELECT queue.url, queue.domain, queue.priority, queue.next_fetch_at, queue.added_at,
-                           %s AS queue_class, '{PENDING_STATUS}' AS status
-                    FROM {self._queue_table_sql(QUEUE_BACKLOG)} AS queue
-                    JOIN domain_state ON domain_state.host_key = queue.domain
-                    WHERE domain_state.backoff_until > %s
-                    UNION ALL
-                    SELECT queue.url, queue.domain, queue.priority, queue.next_fetch_at, queue.added_at,
-                           %s AS queue_class, '{PENDING_STATUS}' AS status
-                    FROM {self._queue_table_sql(QUEUE_RECRAWL)} AS queue
-                    JOIN domain_state ON domain_state.host_key = queue.domain
-                    WHERE domain_state.backoff_until > %s""",
-                (
-                    QUEUE_EXPLORATION,
-                    now,
-                    QUEUE_BACKLOG,
-                    now,
-                    QUEUE_RECRAWL,
-                    now,
-                ),
-            )
-            blocked_rows = cur.fetchall()
-            if blocked_rows:
-                urls = [row[0] for row in blocked_rows]
-                self._delete_queue_entries(cur, urls)
-                self._insert_blocked_domain_backoff_rows(cur, blocked_rows, quarantined_at=now)
-                quarantined = len(blocked_rows)
-
-        self._conn.commit()
-        return quarantined, 0
+        return self._quarantine.rebalance(now=now)
 
     def retire_blocked_domain_backoff(
         self,
@@ -1251,48 +1226,12 @@ class Frontier:
         now: float | None = None,
     ) -> int:
         """Retire long-stuck blocked URLs out of pending scheduler state."""
-        if min_consecutive_failures < 0 or min_quarantine_seconds < 0 or limit <= 0:
-            return 0
-
-        now = time.time() if now is None else now
-        with self._conn.cursor() as cur:
-            cur.execute(
-                f"""WITH doomed AS (
-                        SELECT blocked.url
-                        FROM {BLOCKED_DOMAIN_BACKOFF_TABLE} AS blocked
-                        JOIN domain_state ON domain_state.host_key = blocked.domain
-                        WHERE COALESCE(domain_state.consecutive_failures, 0) >= %s
-                          AND blocked.quarantined_at <= %s
-                        ORDER BY
-                            COALESCE(domain_state.consecutive_failures, 0) DESC,
-                            blocked.quarantined_at ASC,
-                            blocked.added_at ASC,
-                            blocked.url ASC
-                        LIMIT %s
-                    ), removed AS (
-                        DELETE FROM {BLOCKED_DOMAIN_BACKOFF_TABLE} AS blocked
-                        USING doomed
-                        WHERE blocked.url = doomed.url
-                        RETURNING blocked.url
-                    )
-                    UPDATE frontier
-                    SET status = '{FAILED_STATUS}',
-                        next_fetch_at = %s,
-                        lease_token = NULL,
-                        lease_expires_at = NULL,
-                        last_error = COALESCE(last_error, 'retry_quarantine_retired')
-                    WHERE url IN (SELECT url FROM removed)
-                    RETURNING url""",
-                (
-                    min_consecutive_failures,
-                    now - min_quarantine_seconds,
-                    limit,
-                    now,
-                ),
-            )
-            retired = len(cur.fetchall())
-        self._conn.commit()
-        return retired
+        return self._quarantine.retire(
+            min_consecutive_failures=min_consecutive_failures,
+            min_quarantine_seconds=min_quarantine_seconds,
+            limit=limit,
+            now=now,
+        )
 
     def restore_recovered_blocked_domain_backoff(
         self,
@@ -1302,54 +1241,7 @@ class Frontier:
         now: float | None = None,
     ) -> int:
         """Restore blocked URLs whose domains have already recovered."""
-        if limit <= 0 or per_domain <= 0:
-            return 0
-
-        now = time.time() if now is None else now
-        with self._conn.cursor() as cur:
-            cur.execute(
-                f"""WITH ranked AS (
-                        SELECT
-                            blocked.url,
-                            blocked.domain,
-                            blocked.priority,
-                            blocked.next_fetch_at,
-                            blocked.added_at,
-                            blocked.queue_class,
-                            '{PENDING_STATUS}' AS status,
-                            ROW_NUMBER() OVER (
-                                PARTITION BY blocked.domain
-                                ORDER BY blocked.next_fetch_at ASC, blocked.added_at ASC, blocked.url ASC
-                            ) AS domain_rownum
-                        FROM {BLOCKED_DOMAIN_BACKOFF_TABLE} AS blocked
-                        LEFT JOIN domain_state ON domain_state.host_key = blocked.domain
-                        WHERE COALESCE(domain_state.backoff_until, 0) <= %s
-                          AND COALESCE(domain_state.consecutive_failures, 0) = 0
-                    ), picked AS (
-                        SELECT url
-                        FROM ranked
-                        WHERE domain_rownum <= %s
-                        ORDER BY priority DESC, next_fetch_at ASC, added_at ASC, url ASC
-                        LIMIT %s
-                    )
-                    DELETE FROM {BLOCKED_DOMAIN_BACKOFF_TABLE} AS blocked
-                    USING picked
-                    WHERE blocked.url = picked.url
-                    RETURNING
-                        blocked.url,
-                        blocked.domain,
-                        blocked.priority,
-                        blocked.next_fetch_at,
-                        blocked.added_at,
-                        blocked.queue_class,
-                        '{PENDING_STATUS}' AS status""",
-                (now, per_domain, limit),
-            )
-            rows = cur.fetchall()
-            if rows:
-                self._insert_pending_queue_rows(cur, rows)
-        self._conn.commit()
-        return len(rows)
+        return self._quarantine.restore_recovered(limit=limit, per_domain=per_domain, now=now)
 
     def promote_blocked_domain_backoff(
         self,
@@ -1360,67 +1252,12 @@ class Frontier:
         now: float | None = None,
     ) -> int:
         """Promote a small cooled-down subset from blocked queue back into normal queues."""
-        if limit <= 0 or per_domain <= 0:
-            return 0
-
-        now = time.time() if now is None else now
-        with self._conn.cursor() as cur:
-            effective_max_failures = (
-                None
-                if max_consecutive_failures is None or max_consecutive_failures < 0
-                else max_consecutive_failures
-            )
-            cur.execute(
-                f"""WITH ranked_candidates AS (
-                        SELECT
-                            blocked.url,
-                            blocked.domain,
-                            blocked.priority,
-                            blocked.next_fetch_at,
-                            blocked.added_at,
-                            blocked.queue_class,
-                            COALESCE(domain_state.consecutive_failures, 0) AS failure_count,
-                            '{PENDING_STATUS}' AS status,
-                            ROW_NUMBER() OVER (
-                                PARTITION BY blocked.domain
-                                ORDER BY
-                                    COALESCE(domain_state.consecutive_failures, 0) ASC,
-                                    blocked.next_fetch_at ASC,
-                                    blocked.added_at ASC,
-                                    blocked.url ASC
-                            ) AS domain_rownum
-                        FROM {BLOCKED_DOMAIN_BACKOFF_TABLE} AS blocked
-                        LEFT JOIN domain_state ON domain_state.host_key = blocked.domain
-                        WHERE COALESCE(domain_state.backoff_until, 0) <= %s
-                          AND (
-                                %s IS NULL
-                                OR COALESCE(domain_state.consecutive_failures, 0) <= %s
-                          )
-                    ), picked AS (
-                        SELECT url
-                        FROM ranked_candidates
-                        WHERE domain_rownum <= %s
-                        ORDER BY failure_count ASC, priority DESC, next_fetch_at ASC, added_at ASC, url ASC
-                        LIMIT %s
-                    )
-                    DELETE FROM {BLOCKED_DOMAIN_BACKOFF_TABLE} AS blocked
-                    USING picked
-                    WHERE blocked.url = picked.url
-                    RETURNING
-                        blocked.url,
-                        blocked.domain,
-                        blocked.priority,
-                        blocked.next_fetch_at,
-                        blocked.added_at,
-                        blocked.queue_class,
-                        '{PENDING_STATUS}' AS status""",
-                (now, effective_max_failures, effective_max_failures, per_domain, limit),
-            )
-            rows = cur.fetchall()
-            if rows:
-                self._insert_pending_queue_rows(cur, rows)
-        self._conn.commit()
-        return len(rows)
+        return self._quarantine.promote(
+            limit,
+            per_domain=per_domain,
+            max_consecutive_failures=max_consecutive_failures,
+            now=now,
+        )
 
     def recover_leased(self, expired_only: bool = True) -> int:
         """Reset leased URLs back to pending."""
