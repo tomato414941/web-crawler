@@ -130,9 +130,10 @@ class FakeFrontier:
 
 
 class FakeDomainManager:
-    def __init__(self):
+    def __init__(self, budgets: dict[str, int] | None = None):
         self.errors: list[str] = []
         self.successes: list[str] = []
+        self.budgets = budgets or {}
 
     async def is_allowed(self, url: str) -> bool:
         return True
@@ -145,6 +146,9 @@ class FakeDomainManager:
 
     def record_success(self, url: str):
         self.successes.append(url)
+
+    def get_host_budget(self, host_key: str, *, default_budget: int) -> int:
+        return self.budgets.get(host_key, default_budget)
 
     def should_retry(self, url: str) -> bool:
         return True
@@ -576,6 +580,40 @@ async def test_crawler_avoids_leasing_same_host_while_request_in_flight():
     assert fetcher.calls == ["https://a.com/1", "https://b.com/1"]
     assert frontier.lease_calls[1]["exclude_domains"] == ["a.com"]
     assert frontier.lease_calls[1]["exclude_domain_branches"] == [("a.com", "/1")]
+
+
+@pytest.mark.asyncio
+async def test_crawler_allows_second_inflight_for_fast_host_budget():
+    frontier = FakeFrontier(
+        [
+            CrawlTask(url="https://a.com/1", depth=0),
+            CrawlTask(url="https://a.com/2", depth=0),
+            CrawlTask(url="https://b.com/1", depth=0),
+        ]
+    )
+    domain_manager = FakeDomainManager(budgets={"a.com": 2})
+    fetcher = FakeFetcher(
+        [
+            Response(url="https://a.com/1", status=200, content=b"<html>a1</html>", headers={}),
+            Response(url="https://a.com/2", status=200, content=b"<html>a2</html>", headers={}),
+            Response(url="https://b.com/1", status=200, content=b"<html>b1</html>", headers={}),
+        ],
+        delay=0.05,
+    )
+
+    async with CrawlerEngine(
+        max_pages=3,
+        concurrency=3,
+        frontier=frontier,
+        domain_manager=domain_manager,
+    ) as engine:
+        engine.max_inflight_requests_per_host = 1
+        engine.fetcher = fetcher
+        await engine.crawl()
+
+    assert fetcher.calls == ["https://a.com/1", "https://a.com/2", "https://b.com/1"]
+    assert frontier.lease_calls[1]["exclude_domains"] == []
+    assert frontier.lease_calls[2]["exclude_domains"] == ["a.com"]
 
 
 @pytest.mark.asyncio
