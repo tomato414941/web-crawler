@@ -51,6 +51,7 @@ class TestDomainStore:
         assert state.next_request_at == 0.0
         assert state.backoff_until == 0.0
         assert state.consecutive_failures == 0
+        assert state.latency_ewma_ms == 0.0
 
     def test_update_robots_persists_delay(self, store):
         checked_at = time.time()
@@ -89,3 +90,10 @@ class TestDomainStore:
         state = store.record_success("example.com", now=110.0)
         assert state.consecutive_failures == 0
         assert state.backoff_until == 0.0
+
+    def test_record_success_updates_latency_ewma(self, store):
+        first = store.record_success("example.com", now=100.0, request_latency_ms=100.0)
+        second = store.record_success("example.com", now=110.0, request_latency_ms=300.0)
+
+        assert first.latency_ewma_ms == pytest.approx(100.0, abs=1e-6)
+        assert second.latency_ewma_ms == pytest.approx(140.0, abs=1e-6)

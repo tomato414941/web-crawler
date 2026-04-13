@@ -47,6 +47,9 @@ DEFAULT_RETRY_BACKOFF_SECONDS = 30.0
 MAX_RETRY_BACKOFF_SECONDS = 1800.0
 RETRY_PRIORITY_DECAY = 0.6
 MIN_RETRY_PRIORITY = 0.25
+LATENCY_BUCKET_FAST_MS = 150.0
+LATENCY_BUCKET_SLOW_MS = 400.0
+LATENCY_BUCKET_VERY_SLOW_MS = 1000.0
 FRONTIER_REQUIRED_COLUMNS = {
     "url",
     "domain",
@@ -504,17 +507,34 @@ class Frontier:
 
     def _lease_order_by_sql(self, alias: str, prioritize_breadth: bool) -> str:
         """Return the ORDER BY clause used for lease selection."""
+        latency_penalty = self._latency_penalty_sql(alias)
         if prioritize_breadth:
             return (
                 f"{alias}.next_fetch_at ASC, "
+                f"{latency_penalty} ASC, "
                 f"{alias}.added_at ASC, "
                 f"{alias}.priority DESC"
             )
 
         return (
             f"{alias}.priority DESC, "
+            f"{latency_penalty} ASC, "
             f"{alias}.next_fetch_at ASC, "
             f"{alias}.added_at ASC"
+        )
+
+    def _latency_penalty_sql(self, alias: str) -> str:
+        """Return a small host-latency bucket used as a lease tiebreaker."""
+        latency_ms = (
+            "COALESCE((SELECT ds.latency_ewma_ms "
+            f"FROM domain_state AS ds WHERE ds.host_key = {alias}.domain), 0)"
+        )
+        return (
+            "CASE "
+            f"WHEN {latency_ms} >= {LATENCY_BUCKET_VERY_SLOW_MS} THEN 3 "
+            f"WHEN {latency_ms} >= {LATENCY_BUCKET_SLOW_MS} THEN 2 "
+            f"WHEN {latency_ms} >= {LATENCY_BUCKET_FAST_MS} THEN 1 "
+            "ELSE 0 END"
         )
 
     def _branch_breadth_candidate_from_sql(
