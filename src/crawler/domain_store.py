@@ -15,9 +15,12 @@ DOMAIN_STATE_REQUIRED_COLUMNS = {
     "next_request_at",
     "backoff_until",
     "consecutive_failures",
+    "latency_ewma_ms",
     "robots_checked_at",
     "updated_at",
 }
+
+_LATENCY_EWMA_ALPHA = 0.2
 
 
 class DomainStore:
@@ -35,8 +38,9 @@ class DomainStore:
             next_request_at=row[2],
             backoff_until=row[3],
             consecutive_failures=row[4],
-            robots_checked_at=row[5],
-            updated_at=row[6],
+            latency_ewma_ms=row[5],
+            robots_checked_at=row[6],
+            updated_at=row[7],
         )
 
     def get_or_create(self, host_key: str) -> PersistedDomainState:
@@ -56,6 +60,7 @@ class DomainStore:
                        next_request_at,
                        backoff_until,
                        consecutive_failures,
+                       latency_ewma_ms,
                        robots_checked_at,
                        updated_at
                    FROM domain_state
@@ -94,6 +99,7 @@ class DomainStore:
                        next_request_at,
                        backoff_until,
                        consecutive_failures,
+                       latency_ewma_ms,
                        robots_checked_at,
                        updated_at""",
                 (host_key, crawl_delay_seconds, checked_at, checked_at),
@@ -124,6 +130,7 @@ class DomainStore:
                        next_request_at,
                        backoff_until,
                        consecutive_failures,
+                       latency_ewma_ms,
                        robots_checked_at
                    FROM domain_state
                    WHERE host_key = %s
@@ -146,6 +153,7 @@ class DomainStore:
                        next_request_at,
                        backoff_until,
                        consecutive_failures,
+                       latency_ewma_ms,
                        robots_checked_at,
                        updated_at""",
                 (crawl_delay_seconds, next_request_at, now, host_key),
@@ -154,7 +162,13 @@ class DomainStore:
         self._conn.commit()
         return wait_seconds, self._row_to_state(updated_row)
 
-    def record_success(self, host_key: str, *, now: float | None = None) -> PersistedDomainState:
+    def record_success(
+        self,
+        host_key: str,
+        *,
+        now: float | None = None,
+        request_latency_ms: float | None = None,
+    ) -> PersistedDomainState:
         """Reset failure-related state after a successful request."""
         now = time.time() if now is None else now
         with self._conn.cursor() as cur:
@@ -168,6 +182,11 @@ class DomainStore:
                 """UPDATE domain_state
                    SET consecutive_failures = 0,
                        backoff_until = 0,
+                       latency_ewma_ms = CASE
+                           WHEN %s IS NULL THEN latency_ewma_ms
+                           WHEN latency_ewma_ms <= 0 THEN %s
+                           ELSE latency_ewma_ms + ((%s - latency_ewma_ms) * %s)
+                       END,
                        updated_at = %s
                    WHERE host_key = %s
                    RETURNING
@@ -176,9 +195,17 @@ class DomainStore:
                        next_request_at,
                        backoff_until,
                        consecutive_failures,
+                       latency_ewma_ms,
                        robots_checked_at,
                        updated_at""",
-                (now, host_key),
+                (
+                    request_latency_ms,
+                    request_latency_ms,
+                    request_latency_ms,
+                    _LATENCY_EWMA_ALPHA,
+                    now,
+                    host_key,
+                ),
             )
             row = cur.fetchone()
         self._conn.commit()
@@ -221,6 +248,7 @@ class DomainStore:
                        next_request_at,
                        backoff_until,
                        consecutive_failures,
+                       latency_ewma_ms,
                        robots_checked_at,
                        updated_at""",
                 (consecutive_failures + 1, next_backoff_until, now, host_key),

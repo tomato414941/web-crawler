@@ -16,6 +16,7 @@ class PersistedDomainState:
     next_request_at: float = 0.0
     backoff_until: float = 0.0
     consecutive_failures: int = 0
+    latency_ewma_ms: float = 0.0
     robots_checked_at: float = 0.0
     updated_at: float = 0.0
 
@@ -31,6 +32,7 @@ class RuntimeDomainState:
     last_request_started_at: float = 0.0
     request_count: int = 0
     consecutive_failures: int = 0
+    latency_ewma_ms: float = 0.0
     crawl_delay_seconds: float = 1.0
 
 

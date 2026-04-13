@@ -108,6 +108,7 @@ class DomainManager:
         """Copy durable scheduling fields into runtime state."""
         runtime_state.crawl_delay_seconds = persisted_state.crawl_delay_seconds
         runtime_state.consecutive_failures = persisted_state.consecutive_failures
+        runtime_state.latency_ewma_ms = persisted_state.latency_ewma_ms
         return runtime_state
 
     def _compute_host_backoff(self, consecutive_failures: int) -> float:
