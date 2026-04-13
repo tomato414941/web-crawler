@@ -325,6 +325,7 @@ class PgStorage:
                 archetypes: dict[str, int] = {}
                 top_pending_domains: list[dict[str, object]] = []
                 top_blocked_domains: list[dict[str, object]] = []
+                top_slow_domains: list[dict[str, object]] = []
                 active_error_breakdown: dict[str, int] = {}
                 top_error_domains: list[dict[str, object]] = []
                 runtime: dict[str, object] = {}
@@ -511,6 +512,61 @@ class PgStorage:
                         )
 
                     cur.execute(
+                        f"""WITH pending_entries AS (
+                                SELECT queue_class, url, domain
+                                FROM ({pending_queue_sql}) AS pending_queue_rows
+                                UNION ALL
+                                SELECT queue_class, url, domain
+                                FROM ({blocked_queue_sql}) AS blocked_queue_rows
+                            )
+                            SELECT
+                                pending_entries.domain,
+                                COUNT(*) AS pending_count,
+                                MAX(COALESCE(domain_state.latency_ewma_ms, 0)) AS latency_ewma_ms,
+                                COALESCE(MAX(domain_state.consecutive_failures), 0) AS consecutive_failures,
+                                COUNT(*) FILTER (
+                                    WHERE pending_entries.queue_class = 'exploration'
+                                ) AS exploration_count,
+                                COUNT(*) FILTER (
+                                    WHERE pending_entries.queue_class = 'backlog'
+                                ) AS backlog_count,
+                                COUNT(*) FILTER (
+                                    WHERE pending_entries.queue_class = 'recrawl'
+                                ) AS recrawl_count
+                            FROM pending_entries
+                            JOIN public.domain_state ON domain_state.host_key = pending_entries.domain
+                            WHERE COALESCE(domain_state.latency_ewma_ms, 0) > 0
+                            GROUP BY pending_entries.domain
+                            ORDER BY
+                                MAX(COALESCE(domain_state.latency_ewma_ms, 0)) DESC,
+                                COUNT(*) DESC,
+                                pending_entries.domain ASC
+                            LIMIT 10"""
+                    )
+                    top_slow_domains = [
+                        {
+                            "domain": domain,
+                            "pending_count": pending_count,
+                            "latency_ewma_ms": round(latency_ewma_ms, 1),
+                            "consecutive_failures": consecutive_failures,
+                            "queue_counts": {
+                                "exploration": exploration_count,
+                                "backlog": backlog_count,
+                                "recrawl": recrawl_count,
+                            },
+                        }
+                        for (
+                            domain,
+                            pending_count,
+                            latency_ewma_ms,
+                            consecutive_failures,
+                            exploration_count,
+                            backlog_count,
+                            recrawl_count,
+                        ) in cur.fetchall()
+                    ]
+
+                    cur.execute(
                         """SELECT last_error, COUNT(*)
                            FROM public.frontier
                            WHERE last_error IS NOT NULL
@@ -587,6 +643,7 @@ class PgStorage:
             "top_page_domains": top_page_domains,
             "top_pending_domains": top_pending_domains,
             "top_blocked_domains": top_blocked_domains,
+            "top_slow_domains": top_slow_domains,
             "active_error_breakdown": active_error_breakdown,
             "top_error_domains": top_error_domains,
             "runtime": runtime,
