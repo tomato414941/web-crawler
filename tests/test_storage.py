@@ -218,6 +218,7 @@ def test_get_stats_includes_frontier_breakdown(pg_storage):
         {"domain": "example.com", "count": 1},
         {"domain": "other.com", "count": 1},
     ]
+    assert stats["top_slow_domains"] == []
     assert stats["active_error_breakdown"] == {}
     assert stats["top_error_domains"] == []
 
@@ -512,6 +513,95 @@ def test_get_stats_counts_blocked_queue_classes(pg_storage):
             "dominant_reason": "retry_quarantine",
             "consecutive_failures": 4,
         }
+    ]
+
+
+def test_get_stats_includes_top_slow_domains(pg_storage):
+    now = time.time()
+
+    with pg_storage._conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO frontier (
+                url, domain, depth, priority, queue_class, discovery_kind, archetype,
+                source_url, added_at, status, next_fetch_at
+            )
+            VALUES
+                ('https://slow.example/a', 'slow.example', 0, 1.0, 'exploration', 'seed', 'generic_page', NULL, %s, 'pending', %s),
+                ('https://slow.example/b', 'slow.example', 0, 1.0, 'backlog', 'same_host', 'generic_page', NULL, %s, 'pending', %s),
+                ('https://fast.example/', 'fast.example', 0, 1.0, 'exploration', 'seed', 'generic_page', NULL, %s, 'pending', %s)
+            """,
+            (now, now, now, now, now, now),
+        )
+        cur.execute(
+            """
+            INSERT INTO frontier_queue_exploration (url, domain, priority, next_fetch_at, added_at, branch_key)
+            VALUES
+                ('https://slow.example/a', 'slow.example', 1.0, %s, %s, '/a'),
+                ('https://fast.example/', 'fast.example', 1.0, %s, %s, '/')
+            """,
+            (now, now, now, now),
+        )
+        cur.execute(
+            """
+            INSERT INTO frontier_queue_blocked_domain_backoff (
+                url, domain, queue_class, priority, next_fetch_at, added_at, branch_key
+            )
+            VALUES ('https://slow.example/b', 'slow.example', 'backlog', 1.0, %s, %s, '/b')
+            """,
+            (now, now),
+        )
+        cur.execute(
+            """
+            INSERT INTO domain_state (
+                host_key,
+                crawl_delay_seconds,
+                next_request_at,
+                backoff_until,
+                consecutive_failures,
+                latency_ewma_ms,
+                robots_checked_at,
+                updated_at
+            )
+            VALUES
+                ('slow.example', 1.0, %s, %s, 4, 900.0, %s, %s),
+                ('fast.example', 1.0, %s, %s, 0, 80.0, %s, %s)
+            ON CONFLICT (host_key) DO UPDATE
+            SET next_request_at = EXCLUDED.next_request_at,
+                backoff_until = EXCLUDED.backoff_until,
+                consecutive_failures = EXCLUDED.consecutive_failures,
+                latency_ewma_ms = EXCLUDED.latency_ewma_ms,
+                updated_at = EXCLUDED.updated_at
+            """,
+            (now, now, now, now, now, now, now, now),
+        )
+    pg_storage._conn.commit()
+
+    stats = pg_storage.get_stats()
+
+    assert stats["top_slow_domains"] == [
+        {
+            "domain": "slow.example",
+            "pending_count": 2,
+            "latency_ewma_ms": 900.0,
+            "consecutive_failures": 4,
+            "queue_counts": {
+                "exploration": 1,
+                "backlog": 1,
+                "recrawl": 0,
+            },
+        },
+        {
+            "domain": "fast.example",
+            "pending_count": 1,
+            "latency_ewma_ms": 80.0,
+            "consecutive_failures": 0,
+            "queue_counts": {
+                "exploration": 1,
+                "backlog": 0,
+                "recrawl": 0,
+            },
+        },
     ]
 
 
