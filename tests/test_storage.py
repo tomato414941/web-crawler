@@ -286,8 +286,11 @@ def test_get_stats_includes_runtime_snapshot(pg_storage):
             "publish_queue_wait_max_ms": 4.5,
         },
         "adaptive_budget": {
+            "observed_hosts": 0,
             "eligible_hosts": 0,
             "eligible_pending": 0,
+            "ineligible_due_to_failures": 0,
+            "ineligible_due_to_latency": 0,
             "max_budget": 1,
         },
     }
@@ -624,8 +627,11 @@ def test_get_stats_includes_top_slow_domains(pg_storage):
         }
     ]
     assert stats["operator_summary"]["adaptive_budget"] == {
+        "observed_hosts": 2,
         "eligible_hosts": 1,
         "eligible_pending": 1,
+        "ineligible_due_to_failures": 0,
+        "ineligible_due_to_latency": 1,
         "max_budget": 2,
     }
 
