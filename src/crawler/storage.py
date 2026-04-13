@@ -68,6 +68,51 @@ def _sanitize_stored_content(content: object) -> str:
     return content
 
 
+def _build_operator_summary(
+    frontier_status: Mapping[str, object],
+    readiness: Mapping[str, object],
+    runtime: Mapping[str, object],
+    active_error_breakdown: Mapping[str, int],
+) -> dict[str, object]:
+    """Build a compact operator-facing metrics surface from detailed stats."""
+    runtime_payload = runtime.get("payload") if isinstance(runtime.get("payload"), Mapping) else {}
+    state_counts = readiness.get("state_counts") if isinstance(readiness.get("state_counts"), Mapping) else {}
+    cycle_errors = runtime_payload.get("errors")
+    if not isinstance(cycle_errors, Mapping):
+        cycle_errors = runtime_payload.get("failure_breakdown")
+    if not isinstance(cycle_errors, Mapping):
+        cycle_errors = active_error_breakdown
+
+    return {
+        "scheduler_state": {
+            "pending": int(readiness.get("pending", 0) or 0),
+            "ready": int(state_counts.get("ready", 0) or 0),
+            "scheduled": int(state_counts.get("scheduled", 0) or 0),
+            "blocked_domain_next_request": int(
+                state_counts.get("blocked_domain_next_request", 0) or 0
+            ),
+            "blocked_host_backoff": int(state_counts.get("blocked_host_backoff", 0) or 0),
+            "retry_quarantine": int(state_counts.get("retry_quarantine", 0) or 0),
+            "leased": int(frontier_status.get("leased", 0) or 0),
+        },
+        "throughput": {
+            "pages_per_second": runtime_payload.get("pages_per_second"),
+            "cycle_pages": runtime_payload.get("pages"),
+            "active_hosts": int(runtime_payload.get("active_hosts", 0) or 0),
+            "active_branches": int(runtime_payload.get("active_branches", 0) or 0),
+            "errors": dict(cycle_errors),
+        },
+        "backpressure": {
+            "parse_queue_size": int(runtime_payload.get("parse_queue_size", 0) or 0),
+            "finalize_queue_size": int(runtime_payload.get("finalize_queue_size", 0) or 0),
+            "publish_queue_size": int(runtime_payload.get("publish_queue_size", 0) or 0),
+            "parse_queue_wait_max_ms": runtime_payload.get("parse_queue_wait_max_ms", 0.0),
+            "finalize_queue_wait_max_ms": runtime_payload.get("finalize_queue_wait_max_ms", 0.0),
+            "publish_queue_wait_max_ms": runtime_payload.get("publish_queue_wait_max_ms", 0.0),
+        },
+    }
+
+
 class PgStorage:
     """Store crawl results in Postgres."""
 
@@ -283,6 +328,7 @@ class PgStorage:
                 active_error_breakdown: dict[str, int] = {}
                 top_error_domains: list[dict[str, object]] = []
                 runtime: dict[str, object] = {}
+                operator_summary: dict[str, object] = {}
                 pending_queue_sql = """SELECT queue_class, url, domain, next_fetch_at FROM (
                         SELECT 'exploration' AS queue_class, url, domain, next_fetch_at FROM public.frontier_queue_exploration
                         UNION ALL
@@ -517,6 +563,13 @@ class PgStorage:
             self._conn.rollback()
             raise
 
+        operator_summary = _build_operator_summary(
+            frontier_status=frontier_status,
+            readiness=readiness,
+            runtime=runtime,
+            active_error_breakdown=active_error_breakdown,
+        )
+
         return {
             "total_pages": row[0],
             "domains": row[1],
@@ -537,6 +590,7 @@ class PgStorage:
             "active_error_breakdown": active_error_breakdown,
             "top_error_domains": top_error_domains,
             "runtime": runtime,
+            "operator_summary": operator_summary,
         }
 
     def close(self):
