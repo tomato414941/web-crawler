@@ -15,6 +15,7 @@ class DaemonSchedulerPolicy:
         seed_hosts: list[str],
         cycle_pages: int,
         min_exploration_ready: int,
+        min_exploration_hosts: int,
         blocked_retry_budget: int,
         blocked_retry_per_domain: int,
         blocked_retry_max_consecutive_failures: int,
@@ -29,6 +30,7 @@ class DaemonSchedulerPolicy:
         self._seed_hosts = seed_hosts
         self._cycle_pages = cycle_pages
         self._min_exploration_ready = min_exploration_ready
+        self._min_exploration_hosts = min_exploration_hosts
         self._blocked_retry_budget = blocked_retry_budget
         self._blocked_retry_per_domain = blocked_retry_per_domain
         self._blocked_retry_max_consecutive_failures = blocked_retry_max_consecutive_failures
@@ -90,14 +92,27 @@ class DaemonSchedulerPolicy:
 
         exploration_ready = frontier.ready_count(queue_classes=["exploration"])
         exploration_pending = frontier.pending_count(queue_classes=["exploration"])
-        if exploration_ready >= self._min_exploration_ready:
+        exploration_hosts = (
+            frontier.pending_domain_count(queue_classes=["exploration"])
+            if hasattr(frontier, "pending_domain_count")
+            else exploration_pending
+        )
+        if (
+            exploration_ready >= self._min_exploration_ready
+            and exploration_hosts >= self._min_exploration_hosts
+        ):
             return
 
         needed = self._min_exploration_ready - exploration_ready
+        needed_hosts = self._min_exploration_hosts - exploration_hosts
         branch_promoted = 0
         if hasattr(frontier, "promote_branch_novelty_exploration"):
             branch_promoted = frontier.promote_branch_novelty_exploration(
-                max(exploration_pending + needed, self._min_exploration_ready),
+                max(
+                    exploration_pending + max(needed, 0) + max(needed_hosts, 0),
+                    self._min_exploration_ready,
+                    self._min_exploration_hosts,
+                ),
                 per_domain=1,
             )
 

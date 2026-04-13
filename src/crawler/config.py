@@ -26,6 +26,7 @@ class CrawlerSettings(BaseSettings):
     daemon_min_ready_sleep: float = 0.5
     daemon_min_exploration_pending: int = 3
     daemon_min_exploration_ready: int = 20
+    daemon_min_exploration_hosts: int = 8
     daemon_blocked_retry_budget: int = 8
     daemon_blocked_retry_per_domain: int = 1
     daemon_blocked_retry_max_consecutive_failures: int = 8

@@ -1517,6 +1517,11 @@ class Frontier:
         normalized_queue_classes = self._normalized_queue_classes(queue_classes)
         return self._observability.pending_count(normalized_queue_classes)
 
+    def pending_domain_count(self, queue_classes: list[str] | None = None) -> int:
+        """Get count of distinct pending domains, optionally filtered by queue class."""
+        normalized_queue_classes = self._normalized_queue_classes(queue_classes)
+        return self._observability.pending_domain_count(normalized_queue_classes)
+
     def blocked_domain_backoff_count(self) -> int:
         """Return count of URLs isolated due to host backoff."""
         return self._observability.blocked_count()
