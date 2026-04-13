@@ -254,6 +254,22 @@ class DomainManager:
         if host_key in self._runtime_states:
             self._runtime_states[host_key].consecutive_failures = 0
 
+    def get_host_budget(self, host_key: str, *, default_budget: int) -> int:
+        """Return the allowed in-flight request count for a host."""
+        budget = max(1, default_budget)
+        state = self._runtime_states.get(host_key)
+        if state is None:
+            return budget
+        if state.consecutive_failures > 0:
+            return 1
+        latency_ewma_ms = state.latency_ewma_ms
+        if (
+            latency_ewma_ms > 0
+            and latency_ewma_ms <= settings.fast_host_latency_threshold_ms
+        ):
+            return max(budget, settings.fast_host_max_inflight_requests_per_host)
+        return budget
+
     def should_retry(self, url: str) -> bool:
         """Check if we should retry requests to this host key."""
         host_key = self._get_host_key(url)

@@ -103,6 +103,35 @@ class TestPersistedDomainState:
         assert state.robots_checked_at == 0.0
 
 
+class TestDomainManagerHostBudget:
+    async def test_fast_healthy_host_gets_extra_budget(self):
+        store = StubDomainStore()
+        store.states["fast.example"] = PersistedDomainState(
+            host_key="fast.example",
+            latency_ewma_ms=80.0,
+        )
+        manager = DomainManager(domain_store=store)
+        try:
+            await manager.get_state("http://fast.example/page")
+            assert manager.get_host_budget("fast.example", default_budget=1) == 2
+        finally:
+            await manager.close()
+
+    async def test_failing_host_stays_at_single_budget(self):
+        store = StubDomainStore()
+        store.states["slow.example"] = PersistedDomainState(
+            host_key="slow.example",
+            latency_ewma_ms=80.0,
+            consecutive_failures=2,
+        )
+        manager = DomainManager(domain_store=store)
+        try:
+            await manager.get_state("http://slow.example/page")
+            assert manager.get_host_budget("slow.example", default_budget=1) == 1
+        finally:
+            await manager.close()
+
+
 class TestDomainManagerIsAllowed:
     async def test_is_allowed_without_robots(self, httpx_mock):
         """Should allow all URLs when robots.txt is not available."""
