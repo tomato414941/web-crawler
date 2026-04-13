@@ -227,9 +227,17 @@ def test_get_stats_includes_runtime_snapshot(pg_storage):
         "crawler",
         {
             "running": True,
+            "pages_per_second": 2.5,
+            "pages": 15,
+            "active_hosts": 3,
+            "active_branches": 4,
             "parse_queue_size": 2,
+            "finalize_queue_size": 1,
             "publish_queue_size": 1,
             "parse_queue_wait_max_ms": 12.5,
+            "finalize_queue_wait_max_ms": 8.0,
+            "publish_queue_wait_max_ms": 4.5,
+            "errors": {"timeout": 1},
         },
     )
 
@@ -237,11 +245,45 @@ def test_get_stats_includes_runtime_snapshot(pg_storage):
 
     assert stats["runtime"]["payload"] == {
         "running": True,
+        "pages_per_second": 2.5,
+        "pages": 15,
+        "active_hosts": 3,
+        "active_branches": 4,
         "parse_queue_size": 2,
+        "finalize_queue_size": 1,
         "publish_queue_size": 1,
         "parse_queue_wait_max_ms": 12.5,
+        "finalize_queue_wait_max_ms": 8.0,
+        "publish_queue_wait_max_ms": 4.5,
+        "errors": {"timeout": 1},
     }
     assert stats["runtime"]["updated_at"] > 0
+    assert stats["operator_summary"] == {
+        "scheduler_state": {
+            "pending": 0,
+            "ready": 0,
+            "scheduled": 0,
+            "blocked_domain_next_request": 0,
+            "blocked_host_backoff": 0,
+            "retry_quarantine": 0,
+            "leased": 0,
+        },
+        "throughput": {
+            "pages_per_second": 2.5,
+            "cycle_pages": 15,
+            "active_hosts": 3,
+            "active_branches": 4,
+            "errors": {"timeout": 1},
+        },
+        "backpressure": {
+            "parse_queue_size": 2,
+            "finalize_queue_size": 1,
+            "publish_queue_size": 1,
+            "parse_queue_wait_max_ms": 12.5,
+            "finalize_queue_wait_max_ms": 8.0,
+            "publish_queue_wait_max_ms": 4.5,
+        },
+    }
 
 
 def test_get_stats_includes_readiness_breakdown(pg_storage):
@@ -323,6 +365,15 @@ def test_get_stats_includes_readiness_breakdown(pg_storage):
             "consecutive_failures": 0,
         }
     ]
+    assert stats["operator_summary"]["scheduler_state"] == {
+        "pending": 3,
+        "ready": 1,
+        "scheduled": 1,
+        "blocked_domain_next_request": 1,
+        "blocked_host_backoff": 0,
+        "retry_quarantine": 0,
+        "leased": 0,
+    }
 
 
 def test_get_stats_prioritizes_domains_blocked_by_backoff(pg_storage):
