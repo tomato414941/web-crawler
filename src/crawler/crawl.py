@@ -130,7 +130,8 @@ class _PublishItem:
 class _FinalizeItem:
     """Parsed payload handed from parser to finalizer."""
 
-    parsed: _ParsedPage
+    parsed: _ParsedPage | None = None
+    failed: _FailedTask | None = None
     enqueued_at: float = 0.0
     queue_depth: int = 0
 
@@ -143,6 +144,19 @@ class _ParsedPage:
     result: CrawlResult
     new_tasks: list[CrawlTask]
     process_started: float
+
+
+@dataclass(slots=True)
+class _FailedTask:
+    """Failed crawl handed to finalizer for scheduler mutation."""
+
+    task: CrawlTask
+    failure: CrawlFailure
+    process_started: float
+    mark_done: bool = False
+    record_success: bool = False
+    record_error: bool = False
+    backoff_seconds: float | None = None
 
 
 class CrawlerEngine:
@@ -322,6 +336,58 @@ class CrawlerEngine:
         """Return the durable store used for host success resets when available."""
         return getattr(self.domain_manager, "_domain_store", None)
 
+    def _enqueue_finalize_item(self, item: _FinalizeItem) -> None:
+        """Track finalize queue depth before handing work to finalizer workers."""
+        self._finalize_queue_depth_max = max(self._finalize_queue_depth_max, item.queue_depth)
+
+    def _record_error_runtime(self, url: str) -> float:
+        """Advance runtime failure state without requiring durable writes on the event loop."""
+        if hasattr(self.domain_manager, "record_error_runtime"):
+            return self.domain_manager.record_error_runtime(url)
+        self.domain_manager.record_error(url)
+        return 0.0
+
+    def _finalize_failed_sync(self, failed: _FailedTask) -> None:
+        """Apply durable failure mutations on the dedicated finalizer connection."""
+        frontier = self._finalizer_frontier or self.frontier
+        domain_store = self._finalizer_domain_store or self._domain_store_for_success_tracking()
+        if failed.record_success and domain_store is not None:
+            domain_store.record_success(self._host_key_for_url(failed.task.url))
+        if failed.record_error and domain_store is not None:
+            domain_store.record_failure(
+                self._host_key_for_url(failed.task.url),
+                backoff_seconds=failed.backoff_seconds or 0.0,
+            )
+
+        if failed.mark_done:
+            frontier.mark_done(failed.task.url, lease_token=failed.task.lease_token)
+            return
+
+        frontier.mark_failed(
+            failed.task.url,
+            retryable=failed.failure.retryable,
+            error=failed.failure.error,
+            backoff_seconds=failed.backoff_seconds,
+            lease_token=failed.task.lease_token,
+        )
+
+    async def _finalize_failed_task(self, failed: _FailedTask) -> CrawlFailure:
+        """Apply scheduler mutations for a failed crawl outside fetch and parse workers."""
+        failure = failed.failure
+        frontier_started = time.perf_counter()
+        if self._finalizer_executor is not None:
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(
+                self._finalizer_executor,
+                self._finalize_failed_sync,
+                failed,
+            )
+        else:
+            self._finalize_failed_sync(failed)
+        failure.timings.frontier_ms += _elapsed_ms(frontier_started)
+        failure.timings.process_ms = _elapsed_ms(failed.process_started)
+        return failure
+
     def _is_valid_url(self, url: str) -> bool:
         """Check if URL should be crawled."""
         if self.same_domain:
@@ -391,7 +457,7 @@ class CrawlerEngine:
             return self.frontier.preview_tasks(tasks)
         return tasks
 
-    async def _process_url(self, task: CrawlTask) -> _FetchedPage | CrawlFailure | None:
+    async def _process_url(self, task: CrawlTask) -> _FetchedPage | _FailedTask | None:
         """Process a single URL."""
         url = task.url
         timings = CrawlStageTimings()
@@ -417,27 +483,42 @@ class CrawlerEngine:
             timings.fetch_body_read_ms = getattr(response, "fetch_body_read_ms", 0.0)
 
             if response.status >= 400:
-                frontier_started = time.perf_counter()
                 if 400 <= response.status < 500:
-                    self.domain_manager.record_success(url)
-                    self.frontier.mark_done(url, lease_token=task.lease_token)
-                else:
-                    self.domain_manager.record_error(url)
-                    self.frontier.mark_failed(
-                        url,
-                        retryable=True,
-                        error=f"http_{response.status}",
-                        lease_token=task.lease_token,
+                    if hasattr(self.domain_manager, "record_success_runtime"):
+                        self.domain_manager.record_success_runtime(url)
+                    else:
+                        self.domain_manager.record_success(url)
+                    retryable = False
+                    failed = _FailedTask(
+                        task=task,
+                        failure=CrawlFailure(
+                            url=response.url,
+                            error=f"http_{response.status}",
+                            retryable=False,
+                            depth=task.depth,
+                            timings=timings,
+                        ),
+                        process_started=process_started,
+                        mark_done=True,
+                        record_success=True,
                     )
-                timings.frontier_ms = _elapsed_ms(frontier_started)
-                timings.process_ms = _elapsed_ms(process_started)
-                return CrawlFailure(
-                    url=response.url,
-                    error=f"http_{response.status}",
-                    retryable=response.status >= 500,
-                    depth=task.depth,
-                    timings=timings,
-                )
+                else:
+                    backoff_seconds = self._record_error_runtime(url)
+                    retryable = True
+                    failed = _FailedTask(
+                        task=task,
+                        failure=CrawlFailure(
+                            url=response.url,
+                            error=f"http_{response.status}",
+                            retryable=True,
+                            depth=task.depth,
+                            timings=timings,
+                        ),
+                        process_started=process_started,
+                        record_error=True,
+                        backoff_seconds=backoff_seconds,
+                    )
+                return failed
 
             return _FetchedPage(
                 task=task,
@@ -448,63 +529,54 @@ class CrawlerEngine:
 
         except httpx.TimeoutException:
             timings.fetch_ms = _elapsed_ms(fetch_started)
-            self.domain_manager.record_error(url)
-            frontier_started = time.perf_counter()
-            self.frontier.mark_failed(
-                url,
-                retryable=True,
-                error="timeout",
-                lease_token=task.lease_token,
-            )
-            timings.frontier_ms = _elapsed_ms(frontier_started)
-            timings.process_ms = _elapsed_ms(process_started)
-            return CrawlFailure(
-                url=url,
-                error="timeout",
-                retryable=True,
-                depth=task.depth,
-                timings=timings,
+            backoff_seconds = self._record_error_runtime(url)
+            return _FailedTask(
+                task=task,
+                failure=CrawlFailure(
+                    url=url,
+                    error="timeout",
+                    retryable=True,
+                    depth=task.depth,
+                    timings=timings,
+                ),
+                process_started=process_started,
+                record_error=True,
+                backoff_seconds=backoff_seconds,
             )
 
         except httpx.ConnectError:
             timings.fetch_ms = _elapsed_ms(fetch_started)
-            self.domain_manager.record_error(url)
-            frontier_started = time.perf_counter()
-            self.frontier.mark_failed(
-                url,
-                retryable=True,
-                error="connection_error",
-                lease_token=task.lease_token,
-            )
-            timings.frontier_ms = _elapsed_ms(frontier_started)
-            timings.process_ms = _elapsed_ms(process_started)
-            return CrawlFailure(
-                url=url,
-                error="connection_error",
-                retryable=True,
-                depth=task.depth,
-                timings=timings,
+            backoff_seconds = self._record_error_runtime(url)
+            return _FailedTask(
+                task=task,
+                failure=CrawlFailure(
+                    url=url,
+                    error="connection_error",
+                    retryable=True,
+                    depth=task.depth,
+                    timings=timings,
+                ),
+                process_started=process_started,
+                record_error=True,
+                backoff_seconds=backoff_seconds,
             )
 
         except Exception as e:
             timings.fetch_ms = _elapsed_ms(fetch_started)
-            self.domain_manager.record_error(url)
+            backoff_seconds = self._record_error_runtime(url)
             retryable = self.domain_manager.should_retry(url)
-            frontier_started = time.perf_counter()
-            self.frontier.mark_failed(
-                url,
-                retryable=retryable,
-                error=str(e),
-                lease_token=task.lease_token,
-            )
-            timings.frontier_ms = _elapsed_ms(frontier_started)
-            timings.process_ms = _elapsed_ms(process_started)
-            return CrawlFailure(
-                url=url,
-                error=str(e),
-                retryable=False,
-                depth=task.depth,
-                timings=timings,
+            return _FailedTask(
+                task=task,
+                failure=CrawlFailure(
+                    url=url,
+                    error=str(e),
+                    retryable=retryable,
+                    depth=task.depth,
+                    timings=timings,
+                ),
+                process_started=process_started,
+                record_error=True,
+                backoff_seconds=backoff_seconds,
             )
 
     def _host_key_for_url(self, url: str) -> str:
@@ -589,22 +661,29 @@ class CrawlerEngine:
                 await self._release_page_slot(success=False)
                 continue
 
-            if result.timings is None:
-                result.timings = CrawlStageTimings()
-            result.timings.lease_ms = lease_ms
-
-            if isinstance(result, CrawlFailure):
-                result.timings.slot_ms = _elapsed_ms(slot_started)
+            if isinstance(result, _FailedTask):
+                result.failure.timings.lease_ms = lease_ms
+                result.failure.timings.slot_ms = _elapsed_ms(slot_started)
                 await self._release_page_slot(success=False)
-                category = categorize_crawl_error(result.error)
+                category = categorize_crawl_error(result.failure.error)
                 if category:
                     self._failure_counts[category] += 1
-                logger.warning(
-                    "Failed %s: %s (%s)",
-                    result.url,
-                    result.error,
-                    _format_timings(result.timings),
-                )
+                if self._finalize_queue is not None:
+                    queue_item = _FinalizeItem(
+                        failed=result,
+                        enqueued_at=time.perf_counter(),
+                        queue_depth=self._finalize_queue.qsize(),
+                    )
+                    self._enqueue_finalize_item(queue_item)
+                    await self._finalize_queue.put(queue_item)
+                else:
+                    failure = await self._finalize_failed_task(result)
+                    logger.warning(
+                        "Failed %s: %s (%s)",
+                        failure.url,
+                        failure.error,
+                        _format_timings(failure.timings),
+                    )
             else:
                 await self._release_page_slot(success=True)
                 result.timings.lease_ms = lease_ms
@@ -744,22 +823,40 @@ class CrawlerEngine:
                         _format_timings(finalized.timings),
                     )
             except Exception as exc:
-                self.domain_manager.record_error(fetched.task.url)
-                self.frontier.mark_failed(
-                    fetched.task.url,
-                    retryable=self.domain_manager.should_retry(fetched.task.url),
+                backoff_seconds = self._record_error_runtime(fetched.task.url)
+                failure = CrawlFailure(
+                    url=fetched.task.url,
                     error=str(exc),
-                    lease_token=fetched.task.lease_token,
+                    retryable=self.domain_manager.should_retry(fetched.task.url),
+                    depth=fetched.task.depth,
+                    timings=fetched.timings,
                 )
                 category = categorize_crawl_error(str(exc))
                 if category:
                     self._failure_counts[category] += 1
-                logger.warning(
-                    "Failed %s during parse: %s (%s)",
-                    fetched.task.url,
-                    exc,
-                    _format_timings(fetched.timings),
+                failed = _FailedTask(
+                    task=fetched.task,
+                    failure=failure,
+                    process_started=fetched.process_started,
+                    record_error=True,
+                    backoff_seconds=backoff_seconds,
                 )
+                if self._finalize_queue is not None:
+                    queue_item = _FinalizeItem(
+                        failed=failed,
+                        enqueued_at=time.perf_counter(),
+                        queue_depth=self._finalize_queue.qsize(),
+                    )
+                    self._enqueue_finalize_item(queue_item)
+                    await self._finalize_queue.put(queue_item)
+                else:
+                    finalized = await self._finalize_failed_task(failed)
+                    logger.warning(
+                        "Failed %s during parse: %s (%s)",
+                        fetched.task.url,
+                        exc,
+                        _format_timings(finalized.timings),
+                    )
             finally:
                 self._parse_queue.task_done()
 
@@ -824,41 +921,52 @@ class CrawlerEngine:
                 break
 
             queue_item = item
-            parsed = queue_item.parsed
-            parsed.result.timings.finalize_queue_wait_ms = (
-                _elapsed_ms(queue_item.enqueued_at) if queue_item.enqueued_at else 0.0
-            )
-            parsed.result.timings.finalize_queue_depth = queue_item.queue_depth
-            self._finalize_queue_wait_last_ms = parsed.result.timings.finalize_queue_wait_ms
+            queue_wait_ms = _elapsed_ms(queue_item.enqueued_at) if queue_item.enqueued_at else 0.0
+            self._finalize_queue_wait_last_ms = queue_wait_ms
             self._finalize_queue_wait_max_ms = max(
                 self._finalize_queue_wait_max_ms,
-                parsed.result.timings.finalize_queue_wait_ms,
+                queue_wait_ms,
             )
             self._finalize_queue_depth_max = max(
                 self._finalize_queue_depth_max,
                 queue_item.queue_depth,
             )
             try:
-                result = await self._finalize_parsed_page(parsed)
-                if self._publish_queue is not None:
-                    publish_item = _PublishItem(
-                        result=result,
-                        enqueued_at=time.perf_counter(),
-                        queue_depth=self._publish_queue.qsize(),
-                    )
-                    self._publish_queue_depth_max = max(
-                        self._publish_queue_depth_max,
-                        publish_item.queue_depth,
-                    )
-                    await self._publish_queue.put(publish_item)
+                if queue_item.parsed is not None:
+                    parsed = queue_item.parsed
+                    parsed.result.timings.finalize_queue_wait_ms = queue_wait_ms
+                    parsed.result.timings.finalize_queue_depth = queue_item.queue_depth
+                    result = await self._finalize_parsed_page(parsed)
+                    if self._publish_queue is not None:
+                        publish_item = _PublishItem(
+                            result=result,
+                            enqueued_at=time.perf_counter(),
+                            queue_depth=self._publish_queue.qsize(),
+                        )
+                        self._publish_queue_depth_max = max(
+                            self._publish_queue_depth_max,
+                            publish_item.queue_depth,
+                        )
+                        await self._publish_queue.put(publish_item)
+                    else:
+                        await self._publish_result(result)
+                        logger.info(
+                            "[%d/%d] %s (%s)",
+                            self.pages_crawled,
+                            self.max_pages,
+                            result.url,
+                            _format_timings(result.timings),
+                        )
                 else:
-                    await self._publish_result(result)
-                    logger.info(
-                        "[%d/%d] %s (%s)",
-                        self.pages_crawled,
-                        self.max_pages,
-                        result.url,
-                        _format_timings(result.timings),
+                    failed = queue_item.failed
+                    failed.failure.timings.finalize_queue_wait_ms = queue_wait_ms
+                    failed.failure.timings.finalize_queue_depth = queue_item.queue_depth
+                    failure = await self._finalize_failed_task(failed)
+                    logger.warning(
+                        "Failed %s: %s (%s)",
+                        failure.url,
+                        failure.error,
+                        _format_timings(failure.timings),
                     )
             finally:
                 self._finalize_queue.task_done()

@@ -223,6 +223,40 @@ async def test_crawler_marks_server_errors_failed():
 
 
 @pytest.mark.asyncio
+async def test_crawler_marks_parse_errors_failed():
+    frontier = FakeFrontier([CrawlTask(url="https://example.com/parse", depth=0)])
+    domain_manager = FakeDomainManager()
+    fetcher = FakeFetcher([
+        Response(
+            url="https://example.com/parse",
+            status=200,
+            content=b"<html>ok</html>",
+            headers={"content-type": "text/html"},
+        )
+    ])
+
+    async with CrawlerEngine(
+        max_pages=10,
+        frontier=frontier,
+        domain_manager=domain_manager,
+    ) as engine:
+        engine.fetcher = fetcher
+
+        def _raise_parse_error(task, response):
+            raise RuntimeError("parse boom")
+
+        engine._prepare_parsed_payload = _raise_parse_error
+        results = await engine.crawl()
+
+    assert results == []
+    assert engine.pages_crawled == 1
+    assert frontier.done == []
+    assert frontier.failed == ["https://example.com/parse"]
+    assert domain_manager.errors == ["https://example.com/parse"]
+    assert engine.failure_breakdown == {"other": 1}
+
+
+@pytest.mark.asyncio
 async def test_crawler_does_not_exceed_max_pages_with_concurrency():
     frontier = FakeFrontier(
         [
