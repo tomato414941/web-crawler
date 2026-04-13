@@ -23,12 +23,40 @@ MAX_HOST_BACKOFF_SECONDS = 600.0
 DomainState = RuntimeDomainState
 
 __all__ = [
+    "compute_host_budget",
     "DomainManager",
     "DomainState",
     "RuntimeDomainState",
     "PersistedDomainState",
     "ROBOTS_CACHE_TTL",
 ]
+
+
+def compute_host_budget(
+    *,
+    latency_ewma_ms: float,
+    consecutive_failures: int,
+    default_budget: int,
+    fast_latency_threshold_ms: float | None = None,
+    fast_host_budget: int | None = None,
+) -> int:
+    """Return the scheduler inflight budget for a host from compact host signals."""
+    budget = max(1, default_budget)
+    if consecutive_failures > 0:
+        return 1
+    threshold_ms = (
+        settings.fast_host_latency_threshold_ms
+        if fast_latency_threshold_ms is None
+        else fast_latency_threshold_ms
+    )
+    elevated_budget = (
+        settings.fast_host_max_inflight_requests_per_host
+        if fast_host_budget is None
+        else fast_host_budget
+    )
+    if latency_ewma_ms > 0 and latency_ewma_ms <= threshold_ms:
+        return max(budget, elevated_budget)
+    return budget
 
 
 class DomainManager:
@@ -256,19 +284,14 @@ class DomainManager:
 
     def get_host_budget(self, host_key: str, *, default_budget: int) -> int:
         """Return the allowed in-flight request count for a host."""
-        budget = max(1, default_budget)
         state = self._runtime_states.get(host_key)
         if state is None:
-            return budget
-        if state.consecutive_failures > 0:
-            return 1
-        latency_ewma_ms = state.latency_ewma_ms
-        if (
-            latency_ewma_ms > 0
-            and latency_ewma_ms <= settings.fast_host_latency_threshold_ms
-        ):
-            return max(budget, settings.fast_host_max_inflight_requests_per_host)
-        return budget
+            return max(1, default_budget)
+        return compute_host_budget(
+            latency_ewma_ms=state.latency_ewma_ms,
+            consecutive_failures=state.consecutive_failures,
+            default_budget=default_budget,
+        )
 
     def should_retry(self, url: str) -> bool:
         """Check if we should retry requests to this host key."""
