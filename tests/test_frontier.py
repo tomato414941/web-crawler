@@ -520,6 +520,14 @@ class TestFrontier:
         frontier.lease_next()
         assert frontier.pending_count() == 1
 
+    def test_pending_domain_count(self, frontier):
+        frontier.add(CrawlTask(url="http://example.com/1", depth=0))
+        frontier.add(CrawlTask(url="http://example.com/2", depth=0))
+        frontier.add(CrawlTask(url="http://other.com/1", depth=0))
+
+        assert frontier.pending_domain_count() == 2
+        assert frontier.pending_domain_count(queue_classes=[QUEUE_EXPLORATION]) == 2
+
     def test_ready_count_ignores_future_next_fetch(self, frontier):
         now = time.time()
         frontier.add(
