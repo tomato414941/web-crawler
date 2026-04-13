@@ -12,12 +12,14 @@ Already done:
 - Scheduler observability is split out of `frontier` into `frontier_observability.py`.
 - Retry quarantine policy is split out of `frontier` into `frontier_quarantine.py`.
 - Daemon pre-cycle scheduling policy is split out of `daemon.py` into `daemon_policy.py`.
+- The success path is split into explicit `fetch -> parse -> finalize -> persist` stages.
+- Scheduler mutations run in a dedicated finalizer queue with a dedicated connection / executor.
 
 Still not done:
 
-- Fetch / parse / publish are still too coupled inside one crawl worker path.
+- Failure handling still runs mostly in fetch workers instead of the same staged pipeline as success.
 - Scheduler policy is not yet latency-aware.
-- Postgres is still carrying too many synchronous responsibilities on the hot path.
+- Postgres is still carrying too many synchronous responsibilities on the scheduler path.
 
 ## Adopted principles
 
@@ -52,6 +54,7 @@ structure into `web-crawler`.
    - `frontier / scheduler`
    - `fetch workers`
    - `parse workers`
+   - `finalize workers`
    - `storage / publish workers`
    - `maintenance / recrawl / analytics`
    - Do not let one crawl slot own all of these steps end-to-end.
@@ -112,7 +115,8 @@ The hot path should not synchronously own:
 
 #### Stage 4: Publish / Storage
 
-- Writes parsed content and metadata.
+- Applies scheduler mutations after parse on a dedicated finalizer path.
+- Writes parsed content and metadata after finalization.
 - Admits outlinks back into the frontier.
 - Exposes results to APIs or downstream consumers.
 
@@ -125,6 +129,13 @@ The hot path should not synchronously own:
 - runbooks and operational tasks
 
 These must not block normal fetch throughput.
+
+### Current runtime delta vs target
+
+- Success path already follows `fetch -> parse -> finalize -> persist`.
+- Success-side scheduler mutations already run off the main event loop.
+- Failure-side state updates still happen in fetch workers.
+- Scheduling is still driven by retry/backoff and queue class policy more than measured latency.
 
 ### Scheduling model
 
@@ -154,11 +165,11 @@ Status: partially done.
 
 ### Phase 2: Split fetch from parse/publish
 
-Status: not done.
+Status: partially done.
 
-- This remains the biggest structural change still ahead.
-- The current worker still owns `fetch -> parse -> frontier update -> persist` end-to-end.
-- The next implementation step should introduce explicit stage boundaries before further scheduler tuning.
+- Success path stage boundaries are now explicit: `fetch -> parse -> finalize -> persist`.
+- Finalize-side DB mutations no longer run on the main event loop.
+- Remaining work is to move failure-side mutation handling into the same staged model and shrink the scheduler path further.
 
 ### Phase 3: Add latency-aware scheduling
 
