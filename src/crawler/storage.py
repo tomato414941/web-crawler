@@ -13,6 +13,7 @@ import psycopg2
 import psycopg2.extras
 
 from .error_stats import categorize_crawl_error
+from .domain_manager import compute_host_budget
 from .frontier import (
     BLOCKED_DOMAIN_BACKOFF_TABLE,
     DONE_STATUS,
@@ -24,6 +25,7 @@ from .frontier import (
     QUEUE_TABLE_BY_CLASS,
 )
 from .frontier_observability import FrontierObservability
+from .config import settings
 from .result import CrawlResult, result_to_dict
 from .schema import assert_public_table_columns
 
@@ -73,6 +75,7 @@ def _build_operator_summary(
     readiness: Mapping[str, object],
     runtime: Mapping[str, object],
     active_error_breakdown: Mapping[str, int],
+    host_budget_summary: Mapping[str, object],
 ) -> dict[str, object]:
     """Build a compact operator-facing metrics surface from detailed stats."""
     runtime_payload = runtime.get("payload") if isinstance(runtime.get("payload"), Mapping) else {}
@@ -109,6 +112,11 @@ def _build_operator_summary(
             "parse_queue_wait_max_ms": runtime_payload.get("parse_queue_wait_max_ms", 0.0),
             "finalize_queue_wait_max_ms": runtime_payload.get("finalize_queue_wait_max_ms", 0.0),
             "publish_queue_wait_max_ms": runtime_payload.get("publish_queue_wait_max_ms", 0.0),
+        },
+        "adaptive_budget": {
+            "eligible_hosts": int(host_budget_summary.get("eligible_hosts", 0) or 0),
+            "eligible_pending": int(host_budget_summary.get("eligible_pending", 0) or 0),
+            "max_budget": int(host_budget_summary.get("max_budget", 0) or 0),
         },
     }
 
@@ -326,10 +334,12 @@ class PgStorage:
                 top_pending_domains: list[dict[str, object]] = []
                 top_blocked_domains: list[dict[str, object]] = []
                 top_slow_domains: list[dict[str, object]] = []
+                top_budget_domains: list[dict[str, object]] = []
                 active_error_breakdown: dict[str, int] = {}
                 top_error_domains: list[dict[str, object]] = []
                 runtime: dict[str, object] = {}
                 operator_summary: dict[str, object] = {}
+                host_budget_summary: dict[str, object] = {}
                 pending_queue_sql = """SELECT queue_class, url, domain, next_fetch_at FROM (
                         SELECT 'exploration' AS queue_class, url, domain, next_fetch_at FROM public.frontier_queue_exploration
                         UNION ALL
@@ -565,6 +575,33 @@ class PgStorage:
                             recrawl_count,
                         ) in cur.fetchall()
                     ]
+                    elevated_budget_domains = []
+                    for domain_entry in top_slow_domains:
+                        host_budget = compute_host_budget(
+                            latency_ewma_ms=float(domain_entry["latency_ewma_ms"]),
+                            consecutive_failures=int(domain_entry["consecutive_failures"]),
+                            default_budget=settings.max_inflight_requests_per_host,
+                        )
+                        if host_budget <= settings.max_inflight_requests_per_host:
+                            continue
+                        elevated_budget_domains.append(
+                            {
+                                **domain_entry,
+                                "host_budget": host_budget,
+                            }
+                        )
+                    top_budget_domains = elevated_budget_domains[:10]
+                    host_budget_summary = {
+                        "eligible_hosts": len(elevated_budget_domains),
+                        "eligible_pending": sum(
+                            int(domain_entry["pending_count"])
+                            for domain_entry in elevated_budget_domains
+                        ),
+                        "max_budget": max(
+                            (int(domain_entry["host_budget"]) for domain_entry in elevated_budget_domains),
+                            default=settings.max_inflight_requests_per_host,
+                        ),
+                    }
 
                     cur.execute(
                         """SELECT last_error, COUNT(*)
@@ -624,6 +661,7 @@ class PgStorage:
             readiness=readiness,
             runtime=runtime,
             active_error_breakdown=active_error_breakdown,
+            host_budget_summary=host_budget_summary,
         )
 
         return {
@@ -644,6 +682,7 @@ class PgStorage:
             "top_pending_domains": top_pending_domains,
             "top_blocked_domains": top_blocked_domains,
             "top_slow_domains": top_slow_domains,
+            "top_budget_domains": top_budget_domains,
             "active_error_breakdown": active_error_breakdown,
             "top_error_domains": top_error_domains,
             "runtime": runtime,

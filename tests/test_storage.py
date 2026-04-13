@@ -219,6 +219,7 @@ def test_get_stats_includes_frontier_breakdown(pg_storage):
         {"domain": "other.com", "count": 1},
     ]
     assert stats["top_slow_domains"] == []
+    assert stats["top_budget_domains"] == []
     assert stats["active_error_breakdown"] == {}
     assert stats["top_error_domains"] == []
 
@@ -283,6 +284,11 @@ def test_get_stats_includes_runtime_snapshot(pg_storage):
             "parse_queue_wait_max_ms": 12.5,
             "finalize_queue_wait_max_ms": 8.0,
             "publish_queue_wait_max_ms": 4.5,
+        },
+        "adaptive_budget": {
+            "eligible_hosts": 0,
+            "eligible_pending": 0,
+            "max_budget": 1,
         },
     }
 
@@ -603,6 +609,25 @@ def test_get_stats_includes_top_slow_domains(pg_storage):
             },
         },
     ]
+    assert stats["top_budget_domains"] == [
+        {
+            "domain": "fast.example",
+            "pending_count": 1,
+            "latency_ewma_ms": 80.0,
+            "consecutive_failures": 0,
+            "queue_counts": {
+                "exploration": 1,
+                "backlog": 0,
+                "recrawl": 0,
+            },
+            "host_budget": 2,
+        }
+    ]
+    assert stats["operator_summary"]["adaptive_budget"] == {
+        "eligible_hosts": 1,
+        "eligible_pending": 1,
+        "max_budget": 2,
+    }
 
 
 def test_get_stats_includes_active_error_breakdown(pg_storage):
