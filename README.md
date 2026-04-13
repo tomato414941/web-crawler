@@ -200,9 +200,13 @@ URL → AdaptiveFetcher
 
 Current runtime note:
 
-- The worker path is still coupled as `lease -> fetch -> parse -> frontier update -> persist`.
-- The target design is to split this into explicit fetch / parse / publish stages.
-- Until that split lands, cycle throughput is still affected by parse and storage work inside crawl slots.
+- The success path is now split as `lease -> fetch -> parse -> finalize -> persist`.
+- `parse` builds parsed payloads only, `finalize` applies scheduler mutations, and `persist`
+  writes pages/output.
+- `finalize` uses a dedicated connection / executor so scheduler mutations no longer run on the
+  main event loop.
+- The remaining hot-path coupling is mostly on the failure side: fetch workers still record
+  failure state directly, and scheduling is still backoff-driven rather than latency-aware.
 
 ### Deduplication
 
@@ -231,6 +235,12 @@ Current module boundaries:
 - `frontier_observability.py` — queue and readiness snapshots
 - `frontier_quarantine.py` — host-backoff quarantine policy and state transitions
 - `daemon_policy.py` — pre-cycle frontier maintenance policy
+
+Current runtime queue stages exposed in daemon stats:
+
+- `parse_queue_*` — fetch to parse handoff
+- `finalize_queue_*` — parse to scheduler-mutation handoff
+- `publish_queue_*` — finalize to storage/output handoff
 
 `pending` in `/stats` should be read as "not done yet", not as "immediately runnable".
 For actual scheduler state, prefer `readiness`:
