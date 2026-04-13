@@ -96,6 +96,13 @@ class CrawlDaemon:
         self._min_exploration_ready = max(
             1, min(len(self._seeds), settings.daemon_min_exploration_ready)
         )
+        self._min_exploration_hosts = max(
+            1,
+            min(
+                len(self._seed_hosts) or len(self._seeds) or 1,
+                settings.daemon_min_exploration_hosts,
+            ),
+        )
         self._blocked_retry_budget = max(0, settings.daemon_blocked_retry_budget)
         self._blocked_retry_per_domain = max(1, settings.daemon_blocked_retry_per_domain)
         self._blocked_retry_max_consecutive_failures = settings.daemon_blocked_retry_max_consecutive_failures
@@ -116,6 +123,7 @@ class CrawlDaemon:
             seed_hosts=self._seed_hosts,
             cycle_pages=self._cycle_pages,
             min_exploration_ready=self._min_exploration_ready,
+            min_exploration_hosts=self._min_exploration_hosts,
             blocked_retry_budget=self._blocked_retry_budget,
             blocked_retry_per_domain=self._blocked_retry_per_domain,
             blocked_retry_max_consecutive_failures=self._blocked_retry_max_consecutive_failures,

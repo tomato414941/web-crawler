@@ -125,6 +125,15 @@ class FrontierObservability:
                 total += cur.fetchone()[0]
         return total
 
+    def pending_domain_count(self, queue_classes: list[str] | None = None) -> int:
+        pending_queue_sql = self._pending_queue_union_sql(queue_classes)
+        with self._conn.cursor() as cur:
+            cur.execute(
+                f"SELECT COUNT(DISTINCT domain) FROM ({pending_queue_sql}) AS pending_entries"
+            )
+            value = cur.fetchone()[0]
+        return int(value or 0)
+
     def blocked_count(self) -> int:
         with self._conn.cursor() as cur:
             cur.execute(f"SELECT COUNT(*) FROM {self._blocked_queue_table}")
