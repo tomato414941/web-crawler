@@ -114,8 +114,15 @@ def _build_operator_summary(
             "publish_queue_wait_max_ms": runtime_payload.get("publish_queue_wait_max_ms", 0.0),
         },
         "adaptive_budget": {
+            "observed_hosts": int(host_budget_summary.get("observed_hosts", 0) or 0),
             "eligible_hosts": int(host_budget_summary.get("eligible_hosts", 0) or 0),
             "eligible_pending": int(host_budget_summary.get("eligible_pending", 0) or 0),
+            "ineligible_due_to_failures": int(
+                host_budget_summary.get("ineligible_due_to_failures", 0) or 0
+            ),
+            "ineligible_due_to_latency": int(
+                host_budget_summary.get("ineligible_due_to_latency", 0) or 0
+            ),
             "max_budget": int(host_budget_summary.get("max_budget", 0) or 0),
         },
     }
@@ -576,13 +583,21 @@ class PgStorage:
                         ) in cur.fetchall()
                     ]
                     elevated_budget_domains = []
+                    observed_hosts = 0
+                    ineligible_due_to_failures = 0
+                    ineligible_due_to_latency = 0
                     for domain_entry in top_slow_domains:
+                        observed_hosts += 1
                         host_budget = compute_host_budget(
                             latency_ewma_ms=float(domain_entry["latency_ewma_ms"]),
                             consecutive_failures=int(domain_entry["consecutive_failures"]),
                             default_budget=settings.max_inflight_requests_per_host,
                         )
                         if host_budget <= settings.max_inflight_requests_per_host:
+                            if int(domain_entry["consecutive_failures"]) > 0:
+                                ineligible_due_to_failures += 1
+                            else:
+                                ineligible_due_to_latency += 1
                             continue
                         elevated_budget_domains.append(
                             {
@@ -592,11 +607,14 @@ class PgStorage:
                         )
                     top_budget_domains = elevated_budget_domains[:10]
                     host_budget_summary = {
+                        "observed_hosts": observed_hosts,
                         "eligible_hosts": len(elevated_budget_domains),
                         "eligible_pending": sum(
                             int(domain_entry["pending_count"])
                             for domain_entry in elevated_budget_domains
                         ),
+                        "ineligible_due_to_failures": ineligible_due_to_failures,
+                        "ineligible_due_to_latency": ineligible_due_to_latency,
                         "max_budget": max(
                             (int(domain_entry["host_budget"]) for domain_entry in elevated_budget_domains),
                             default=settings.max_inflight_requests_per_host,
