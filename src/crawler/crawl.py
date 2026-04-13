@@ -355,6 +355,17 @@ class CrawlerEngine:
         self.domain_manager.record_error(url)
         return 0.0
 
+    def _host_inflight_budget(self, host_key: str) -> int:
+        """Resolve the allowed concurrent in-flight requests for a host."""
+        default_budget = self.max_inflight_requests_per_host
+        if hasattr(self.domain_manager, "get_host_budget"):
+            budget = self.domain_manager.get_host_budget(
+                host_key,
+                default_budget=default_budget,
+            )
+            return max(1, int(budget))
+        return default_budget
+
     def _finalize_failed_sync(self, failed: _FailedTask) -> None:
         """Apply durable failure mutations on the dedicated finalizer connection."""
         frontier = self._finalizer_frontier or self.frontier
@@ -1029,7 +1040,7 @@ class CrawlerEngine:
             excluded_hosts = [
                 host
                 for host, count in self._active_host_counts.items()
-                if count >= self.max_inflight_requests_per_host
+                if count >= self._host_inflight_budget(host)
             ]
             excluded_domain_branches = list(self._active_branch_counts) if prioritize_breadth else []
             task = self.frontier.lease_next(
