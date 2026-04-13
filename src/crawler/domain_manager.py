@@ -228,6 +228,15 @@ class DomainManager:
                 )
                 self._apply_persisted_state(state, persisted_state)
 
+    def record_error_runtime(self, url: str) -> float:
+        """Advance in-memory failure state without touching durable storage."""
+        host_key = self._get_host_key(url)
+        if host_key in self._runtime_states:
+            state = self._runtime_states[host_key]
+            state.consecutive_failures += 1
+            return self._compute_host_backoff(state.consecutive_failures)
+        return self._compute_host_backoff(1)
+
     def record_success(self, url: str):
         """Record a successful request for a host key."""
         host_key = self._get_host_key(url)
