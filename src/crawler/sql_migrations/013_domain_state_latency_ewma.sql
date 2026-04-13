@@ -1,0 +1,2 @@
+ALTER TABLE public.domain_state
+    ADD COLUMN IF NOT EXISTS latency_ewma_ms DOUBLE PRECISION NOT NULL DEFAULT 0;

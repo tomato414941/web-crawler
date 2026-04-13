@@ -49,6 +49,7 @@ CREATE TABLE IF NOT EXISTS domain_state (
     next_request_at DOUBLE PRECISION NOT NULL DEFAULT 0,
     backoff_until DOUBLE PRECISION NOT NULL DEFAULT 0,
     consecutive_failures INTEGER NOT NULL DEFAULT 0,
+    latency_ewma_ms DOUBLE PRECISION NOT NULL DEFAULT 0,
     robots_checked_at DOUBLE PRECISION NOT NULL DEFAULT 0,
     updated_at DOUBLE PRECISION NOT NULL DEFAULT 0
 );

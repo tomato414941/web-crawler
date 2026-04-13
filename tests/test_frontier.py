@@ -365,6 +365,18 @@ class TestFrontier:
         assert result is not None
         assert result.url == "http://b.com/1"
 
+    def test_lease_next_prefers_lower_latency_host_when_priority_matches(self, frontier):
+        frontier.add(CrawlTask(url="http://slow.com/1", depth=0, priority=1.0, added_at=1000))
+        frontier.add(CrawlTask(url="http://fast.com/1", depth=0, priority=1.0, added_at=900))
+
+        self.domain_store.record_success("slow.com", now=time.time(), request_latency_ms=900.0)
+        self.domain_store.record_success("fast.com", now=time.time(), request_latency_ms=80.0)
+
+        result = frontier.lease_next()
+
+        assert result is not None
+        assert result.url == "http://fast.com/1"
+
     def test_lease_next_can_prefer_breadth_over_depth(self, frontier):
         for i in range(5):
             frontier.add(CrawlTask(url=f"http://a.com/{i}", depth=0, priority=1.0, added_at=1000 + i))

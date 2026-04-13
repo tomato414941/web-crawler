@@ -320,7 +320,12 @@ class CrawlerEngine:
         if self._owns_domain_manager:
             await self.domain_manager.close()
 
-    def _finalize_sync(self, task: CrawlTask, new_tasks: list[CrawlTask]) -> None:
+    def _finalize_sync(
+        self,
+        task: CrawlTask,
+        new_tasks: list[CrawlTask],
+        request_latency_ms: float | None,
+    ) -> None:
         """Apply durable scheduler mutations on the dedicated finalizer connection."""
         frontier = self._finalizer_frontier or self.frontier
         if new_tasks:
@@ -328,7 +333,10 @@ class CrawlerEngine:
 
         domain_store = self._finalizer_domain_store or self._domain_store_for_success_tracking()
         if domain_store is not None:
-            domain_store.record_success(self._host_key_for_url(task.url))
+            domain_store.record_success(
+                self._host_key_for_url(task.url),
+                request_latency_ms=request_latency_ms,
+            )
 
         frontier.mark_done(task.url, lease_token=task.lease_token)
 
@@ -871,6 +879,7 @@ class CrawlerEngine:
                 self._finalize_sync,
                 parsed.task,
                 parsed.new_tasks,
+                parsed.result.timings.fetch_request_ms or parsed.result.timings.fetch_ms,
             )
             if hasattr(self.domain_manager, "record_success_runtime"):
                 self.domain_manager.record_success_runtime(parsed.task.url)
