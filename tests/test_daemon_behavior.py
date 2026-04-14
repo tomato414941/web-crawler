@@ -680,6 +680,10 @@ def test_promote_blocked_retry_restores_small_subset_when_ready_is_thin():
             assert queue_classes is None
             return 3
 
+        def pending_domain_count(self, queue_classes=None):
+            assert queue_classes == ["exploration"]
+            return 3
+
         def promote_blocked_domain_backoff(self, limit, per_domain=1, max_consecutive_failures=None):
             self.calls.append((limit, per_domain, max_consecutive_failures))
             return 2
@@ -710,6 +714,10 @@ def test_promote_blocked_retry_surges_when_ready_is_zero():
         def ready_count(self, queue_classes=None, now=None):
             assert queue_classes is None
             return 0
+
+        def pending_domain_count(self, queue_classes=None):
+            assert queue_classes == ["exploration"]
+            return 3
 
         def promote_blocked_domain_backoff(self, limit, per_domain=1, max_consecutive_failures=None):
             self.calls.append((limit, per_domain, max_consecutive_failures))
@@ -742,6 +750,10 @@ def test_promote_blocked_retry_skips_when_ready_is_healthy():
             assert queue_classes is None
             return 20
 
+        def pending_domain_count(self, queue_classes=None):
+            assert queue_classes == ["exploration"]
+            return 3
+
         def promote_blocked_domain_backoff(self, limit, per_domain=1, max_consecutive_failures=None):
             self.calls.append((limit, per_domain, max_consecutive_failures))
             return 1
@@ -762,6 +774,41 @@ def test_promote_blocked_retry_skips_when_ready_is_healthy():
 
     assert promoted == 0
     assert frontier.calls == []
+
+
+def test_promote_blocked_retry_runs_when_ready_is_healthy_but_host_diversity_is_low():
+    class FakeFrontier:
+        def __init__(self):
+            self.calls = []
+
+        def ready_count(self, queue_classes=None, now=None):
+            assert queue_classes is None
+            return 20
+
+        def pending_domain_count(self, queue_classes=None):
+            assert queue_classes == ["exploration"]
+            return 1
+
+        def promote_blocked_domain_backoff(self, limit, per_domain=1, max_consecutive_failures=None):
+            self.calls.append((limit, per_domain, max_consecutive_failures))
+            return 3
+
+    daemon = CrawlDaemon(
+        seeds=[
+            "https://www.iana.org/",
+            "https://datatracker.ietf.org/",
+            "https://www.rfc-editor.org/",
+        ],
+        postgres_dsn="postgresql://unused",
+        cycle_pages=10,
+        recrawl_ttl=3600,
+    )
+    frontier = FakeFrontier()
+
+    promoted = daemon._promote_blocked_retry(frontier)
+
+    assert promoted == 3
+    assert frontier.calls == [(8, 1, 8)]
 
 
 def test_retire_blocked_retry_uses_configured_thresholds():

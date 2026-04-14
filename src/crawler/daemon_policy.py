@@ -92,11 +92,7 @@ class DaemonSchedulerPolicy:
 
         exploration_ready = frontier.ready_count(queue_classes=["exploration"])
         exploration_pending = frontier.pending_count(queue_classes=["exploration"])
-        exploration_hosts = (
-            frontier.pending_domain_count(queue_classes=["exploration"])
-            if hasattr(frontier, "pending_domain_count")
-            else exploration_pending
-        )
+        exploration_hosts = self._exploration_pending_hosts(frontier, exploration_pending)
         if (
             exploration_ready >= self._min_exploration_ready
             and exploration_hosts >= self._min_exploration_hosts
@@ -128,9 +124,12 @@ class DaemonSchedulerPolicy:
         if self._blocked_retry_budget <= 0:
             return 0
         ready_count = frontier.ready_count()
-        if ready_count >= self._min_exploration_ready:
+        ready_deficit = max(0, self._min_exploration_ready - ready_count)
+        exploration_hosts = self._exploration_pending_hosts(frontier)
+        host_deficit = max(0, self._min_exploration_hosts - exploration_hosts)
+        if ready_deficit <= 0 and host_deficit <= 0:
             return 0
-        deficit = max(1, self._min_exploration_ready - ready_count)
+        deficit = max(1, ready_deficit, host_deficit)
         limit = max(self._blocked_retry_budget, deficit)
         per_domain = self._blocked_retry_per_domain if ready_count > 0 else limit
         return frontier.promote_blocked_domain_backoff(
@@ -162,3 +161,10 @@ class DaemonSchedulerPolicy:
             return 0
         quarantined, _restored = frontier.rebalance_blocked_domain_backoff()
         return quarantined
+
+    def _exploration_pending_hosts(self, frontier, pending_count: int | None = None) -> int:
+        if pending_count is None:
+            pending_count = frontier.pending_count(queue_classes=["exploration"])
+        if hasattr(frontier, "pending_domain_count"):
+            return frontier.pending_domain_count(queue_classes=["exploration"])
+        return pending_count
