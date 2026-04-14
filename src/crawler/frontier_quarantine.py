@@ -208,7 +208,13 @@ class FrontierQuarantine:
                 else max_consecutive_failures
             )
             cur.execute(
-                f"""WITH ranked_candidates AS (
+                f"""WITH normal_pending_domains AS (
+                        SELECT DISTINCT domain FROM {self._queue_table_sql(self._queue_exploration)}
+                        UNION
+                        SELECT DISTINCT domain FROM {self._queue_table_sql(self._queue_backlog)}
+                        UNION
+                        SELECT DISTINCT domain FROM {self._queue_table_sql(self._queue_recrawl)}
+                    ), ranked_candidates AS (
                         SELECT
                             blocked.url,
                             blocked.domain,
@@ -217,6 +223,7 @@ class FrontierQuarantine:
                             blocked.added_at,
                             blocked.queue_class,
                             COALESCE(domain_state.consecutive_failures, 0) AS failure_count,
+                            CASE WHEN normal_pending_domains.domain IS NULL THEN 0 ELSE 1 END AS normal_pending_rank,
                             '{self._pending_status}' AS status,
                             ROW_NUMBER() OVER (
                                 PARTITION BY blocked.domain
@@ -228,6 +235,7 @@ class FrontierQuarantine:
                             ) AS domain_rownum
                         FROM {self._blocked_queue_table} AS blocked
                         LEFT JOIN domain_state ON domain_state.host_key = blocked.domain
+                        LEFT JOIN normal_pending_domains ON normal_pending_domains.domain = blocked.domain
                         WHERE COALESCE(domain_state.backoff_until, 0) <= %s
                           AND (
                                 %s IS NULL
@@ -237,7 +245,13 @@ class FrontierQuarantine:
                         SELECT url
                         FROM ranked_candidates
                         WHERE domain_rownum <= %s
-                        ORDER BY failure_count ASC, priority DESC, next_fetch_at ASC, added_at ASC, url ASC
+                        ORDER BY
+                            normal_pending_rank ASC,
+                            failure_count ASC,
+                            priority DESC,
+                            next_fetch_at ASC,
+                            added_at ASC,
+                            url ASC
                         LIMIT %s
                     )
                     DELETE FROM {self._blocked_queue_table} AS blocked
