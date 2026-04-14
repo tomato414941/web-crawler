@@ -664,6 +664,26 @@ class TestFrontier:
         assert leased is not None
         assert leased.url == "http://b.com/blocked"
 
+    def test_promote_blocked_domain_backoff_prefers_domains_missing_from_normal_pending(self, frontier):
+        now = time.time()
+        frontier.add(CrawlTask(url="http://a.com/blocked", depth=0, next_fetch_at=now))
+        frontier.add(CrawlTask(url="http://b.com/blocked", depth=0, next_fetch_at=now))
+        self.domain_store.record_failure("a.com", backoff_seconds=30.0, now=now)
+        self.domain_store.record_failure("b.com", backoff_seconds=30.0, now=now)
+        frontier.rebalance_blocked_domain_backoff(now=now)
+
+        frontier.add(CrawlTask(url="http://a.com/ready-2", depth=0, next_fetch_at=now + 31.0))
+        self.domain_store.record_success("a.com", now=now + 31.0)
+        self.domain_store.record_success("b.com", now=now + 31.0)
+
+        promoted = frontier.promote_blocked_domain_backoff(1, per_domain=1, now=now + 31.0)
+
+        assert promoted == 1
+        leased = frontier.lease_next(now=now + 31.0)
+        assert leased is not None
+        assert leased.url == "http://b.com/blocked"
+        assert frontier.blocked_domain_backoff_count() == 1
+
     def test_retire_blocked_domain_backoff_marks_old_high_failure_urls_failed(self, frontier):
         now = time.time()
         frontier.add(CrawlTask(url="http://a.com/blocked", depth=0, next_fetch_at=now))
