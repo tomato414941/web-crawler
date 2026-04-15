@@ -17,10 +17,7 @@ from .discovery import (
     ARCHETYPE_GENERIC_PAGE,
     ARCHETYPE_REDIRECT_HUB,
     ARCHETYPE_REGISTRY_LISTING,
-    DISCOVERY_EXTERNAL,
-    DISCOVERY_SAME_HOST,
     DISCOVERY_SEED,
-    DISCOVERY_SEED_HOST,
     discovery_rank,
 )
 from .frontier_observability import FrontierObservability, FrontierReadiness
@@ -388,16 +385,12 @@ class UrlLedger:
         """Map a task into the queue class used by the scheduler."""
         if task.queue_class in FRONTIER_ALLOWED_QUEUE_CLASSES:
             return task.queue_class
-        if task.discovery_kind == DISCOVERY_SEED:
+        if task.depth <= 0:
             return QUEUE_EXPLORATION
-        if task.discovery_kind in {DISCOVERY_SAME_HOST, DISCOVERY_SEED_HOST, DISCOVERY_EXTERNAL}:
-            return QUEUE_BACKLOG
         if task.archetype in {ARCHETYPE_REGISTRY_LISTING, ARCHETYPE_REDIRECT_HUB}:
             return QUEUE_BACKLOG
         if known_count >= EXPLORATION_DOMAIN_BUDGET:
             return QUEUE_BACKLOG
-        if task.depth <= 1:
-            return QUEUE_EXPLORATION
         return QUEUE_BACKLOG
 
     def _merge_queue_class(self, current: str | None, candidate: str | None) -> str:
