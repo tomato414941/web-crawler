@@ -582,6 +582,22 @@ class TestFrontier:
         frontier.lease_next()
         assert frontier.pending_count() == 1
 
+    def test_pending_membership_comes_from_queue_tables(self, frontier):
+        frontier.add(CrawlTask(url="http://example.com/1", depth=0))
+
+        with frontier._conn.cursor() as cur:
+            cur.execute(
+                "UPDATE frontier SET status = %s WHERE url = %s",
+                (DONE_STATUS, "http://example.com/1"),
+            )
+        frontier._conn.commit()
+
+        assert frontier.pending_count() == 1
+
+        leased = frontier.lease_next()
+        assert leased is not None
+        assert leased.url == "http://example.com/1"
+
     def test_pending_domain_count(self, frontier):
         frontier.add(CrawlTask(url="http://example.com/1", depth=0))
         frontier.add(CrawlTask(url="http://example.com/2", depth=0))

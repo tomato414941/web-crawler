@@ -1344,10 +1344,7 @@ class UrlLedger:
                                 ORDER BY queue.priority DESC, queue.next_fetch_at ASC, queue.added_at ASC, queue.url ASC
                             ) AS branch_rownum
                         FROM {self._queue_table_sql(QUEUE_BACKLOG)} AS queue
-                        JOIN frontier ON frontier.url = queue.url
-                        WHERE frontier.status = '{PENDING_STATUS}'
-                          AND frontier.queue_class = '{QUEUE_BACKLOG}'
-                          AND queue.next_fetch_at <= %s
+                        WHERE queue.next_fetch_at <= %s
                           AND queue.priority <= %s
                     ), deferred AS (
                         SELECT ranked.url
@@ -1472,7 +1469,6 @@ class UrlLedger:
                 f"""UPDATE frontier
                     SET queue_class = %s
                     WHERE url = ANY(%s)
-                      AND status = '{PENDING_STATUS}'
                       AND queue_class = '{QUEUE_BACKLOG}'
                     RETURNING url, domain, priority, next_fetch_at, added_at, queue_class, status""",
                 (QUEUE_EXPLORATION, promoted_urls),
@@ -1536,7 +1532,6 @@ class UrlLedger:
                 f"""UPDATE frontier
                     SET queue_class = %s
                     WHERE url = ANY(%s)
-                      AND status = '{PENDING_STATUS}'
                       AND queue_class = '{QUEUE_BACKLOG}'
                     RETURNING url, domain, priority, next_fetch_at, added_at, queue_class, status""",
                 (QUEUE_EXPLORATION, promoted_urls),
