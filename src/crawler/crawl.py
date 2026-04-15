@@ -503,24 +503,39 @@ class CrawlerEngine:
 
             if response.status >= 400:
                 if 400 <= response.status < 500:
-                    if hasattr(self.domain_manager, "record_success_runtime"):
-                        self.domain_manager.record_success_runtime(url)
+                    if response.status in {401, 403}:
+                        backoff_seconds = self._record_error_runtime(url)
+                        failed = _FailedTask(
+                            task=task,
+                            failure=CrawlFailure(
+                                url=response.url,
+                                error=f"http_{response.status}",
+                                retryable=False,
+                                depth=task.depth,
+                                timings=timings,
+                            ),
+                            process_started=process_started,
+                            record_error=True,
+                            backoff_seconds=backoff_seconds,
+                        )
                     else:
-                        self.domain_manager.record_success(url)
-                    retryable = False
-                    failed = _FailedTask(
-                        task=task,
-                        failure=CrawlFailure(
-                            url=response.url,
-                            error=f"http_{response.status}",
-                            retryable=False,
-                            depth=task.depth,
-                            timings=timings,
-                        ),
-                        process_started=process_started,
-                        mark_done=True,
-                        record_success=True,
-                    )
+                        if hasattr(self.domain_manager, "record_success_runtime"):
+                            self.domain_manager.record_success_runtime(url)
+                        else:
+                            self.domain_manager.record_success(url)
+                        failed = _FailedTask(
+                            task=task,
+                            failure=CrawlFailure(
+                                url=response.url,
+                                error=f"http_{response.status}",
+                                retryable=False,
+                                depth=task.depth,
+                                timings=timings,
+                            ),
+                            process_started=process_started,
+                            mark_done=True,
+                            record_success=True,
+                        )
                 else:
                     backoff_seconds = self._record_error_runtime(url)
                     retryable = True
