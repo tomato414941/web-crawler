@@ -1325,7 +1325,7 @@ class UrlLedger:
             cur.execute(
                 f"""WITH ranked AS (
                         SELECT
-                            frontier.url,
+                            queue.url,
                             ROW_NUMBER() OVER (
                                 PARTITION BY queue.domain
                                 ORDER BY queue.priority DESC, queue.next_fetch_at ASC, queue.added_at ASC, queue.url ASC
