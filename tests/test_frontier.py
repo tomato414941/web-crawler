@@ -1058,6 +1058,29 @@ class TestFrontier:
             "http://other.com/news/a",
         ]
 
+    def test_promote_backlog_host_heads_uses_queue_membership_not_frontier_queue_class(self, frontier):
+        frontier.add(CrawlTask(url="http://example.com/docs/a", depth=4, queue_class=QUEUE_BACKLOG))
+        frontier.add(CrawlTask(url="http://other.com/news/a", depth=4, queue_class=QUEUE_BACKLOG))
+
+        with frontier._conn.cursor() as cur:
+            cur.execute(
+                "UPDATE frontier SET queue_class = %s WHERE url IN (%s, %s)",
+                (QUEUE_RECRAWL, "http://example.com/docs/a", "http://other.com/news/a"),
+            )
+        frontier._conn.commit()
+
+        promoted = frontier.promote_backlog_host_heads(target_pending=2, per_domain=1, candidate_limit=10)
+
+        assert promoted == 2
+        with frontier._conn.cursor() as cur:
+            cur.execute("SELECT url FROM frontier_queue_exploration ORDER BY url")
+            promoted_urls = [url for (url,) in cur.fetchall()]
+
+        assert promoted_urls == [
+            "http://example.com/docs/a",
+            "http://other.com/news/a",
+        ]
+
     def test_recrawl_queue_class_can_be_leased_separately(self, frontier):
         frontier.add(CrawlTask(url="http://example.com", depth=0))
         leased = frontier.lease_next()
@@ -1066,6 +1089,26 @@ class TestFrontier:
 
         requeued = frontier.requeue_urls([leased.url], queue_class=QUEUE_RECRAWL, current_statuses=[DONE_STATUS])
         assert requeued == 1
+
+        recrawl = frontier.lease_next(queue_classes=[QUEUE_RECRAWL])
+        assert recrawl is not None
+        assert recrawl.url == leased.url
+
+    def test_lease_next_uses_queue_membership_not_frontier_queue_class(self, frontier):
+        frontier.add(CrawlTask(url="http://example.com", depth=0))
+        leased = frontier.lease_next()
+        assert leased is not None
+        frontier.mark_done(leased.url, lease_token=leased.lease_token)
+
+        requeued = frontier.requeue_urls([leased.url], queue_class=QUEUE_RECRAWL, current_statuses=[DONE_STATUS])
+        assert requeued == 1
+
+        with frontier._conn.cursor() as cur:
+            cur.execute(
+                "UPDATE frontier SET queue_class = %s WHERE url = %s",
+                (QUEUE_EXPLORATION, leased.url),
+            )
+        frontier._conn.commit()
 
         recrawl = frontier.lease_next(queue_classes=[QUEUE_RECRAWL])
         assert recrawl is not None

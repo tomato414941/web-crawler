@@ -1466,10 +1466,9 @@ class UrlLedger:
                 return 0
 
             cur.execute(
-                f"""UPDATE frontier
+                """UPDATE frontier
                     SET queue_class = %s
                     WHERE url = ANY(%s)
-                      AND queue_class = '{QUEUE_BACKLOG}'
                     RETURNING url, domain, priority, next_fetch_at, added_at, queue_class, status""",
                 (QUEUE_EXPLORATION, promoted_urls),
             )
@@ -1529,10 +1528,9 @@ class UrlLedger:
                 return 0
 
             cur.execute(
-                f"""UPDATE frontier
+                """UPDATE frontier
                     SET queue_class = %s
                     WHERE url = ANY(%s)
-                      AND queue_class = '{QUEUE_BACKLOG}'
                     RETURNING url, domain, priority, next_fetch_at, added_at, queue_class, status""",
                 (QUEUE_EXPLORATION, promoted_urls),
             )
