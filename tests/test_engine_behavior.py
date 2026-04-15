@@ -10,9 +10,6 @@ from crawler.discovery import (
     ARCHETYPE_DOCUMENT_PAGE,
     ARCHETYPE_GENERIC_PAGE,
     ARCHETYPE_REDIRECT_HUB,
-    DISCOVERY_EXTERNAL,
-    DISCOVERY_SAME_HOST,
-    DISCOVERY_SEED_HOST,
 )
 from crawler.frontier import CrawlTask
 
@@ -68,11 +65,7 @@ class FakeFrontier:
             known_count = domain_counts.get(domain, 0) + batch_counts.get(domain, 0)
             queue_class = task.queue_class
             if queue_class is None:
-                if task.discovery_kind == "seed":
-                    queue_class = "exploration"
-                elif task.discovery_kind in {"same_host", "seed_host", "external"}:
-                    queue_class = "backlog"
-                elif task.archetype in {"registry_listing", "redirect_hub"}:
+                if task.archetype in {"registry_listing", "redirect_hub"}:
                     queue_class = "backlog"
                 elif known_count >= 8:
                     queue_class = "backlog"
@@ -83,7 +76,6 @@ class FakeFrontier:
                 depth=task.depth,
                 priority=task.priority,
                 queue_class=queue_class,
-                discovery_kind=task.discovery_kind,
                 archetype=task.archetype,
                 source_url=task.source_url,
                 added_at=task.added_at,
@@ -407,17 +399,14 @@ async def test_crawler_assigns_discovery_metadata_to_outlinks():
     added = frontier.added_batches[0]
     by_url = {task.url: task for task in added}
 
-    assert by_url["https://example.com/domains"].discovery_kind == DISCOVERY_SAME_HOST
     assert by_url["https://example.com/domains"].archetype == ARCHETYPE_GENERIC_PAGE
     assert by_url["https://example.com/domains"].priority > by_url[
         "https://docs.example.com/guide"
     ].priority
-    assert by_url["https://docs.example.com/guide"].discovery_kind == DISCOVERY_SEED_HOST
     assert by_url["https://docs.example.com/guide"].archetype == ARCHETYPE_GENERIC_PAGE
     assert by_url["https://docs.example.com/guide"].priority > by_url[
         "https://external.example.net/project"
     ].priority
-    assert by_url["https://external.example.net/project"].discovery_kind == DISCOVERY_EXTERNAL
     assert by_url["https://external.example.net/project"].archetype == ARCHETYPE_GENERIC_PAGE
     assert by_url["https://docs.example.com/guide"].queue_class == "backlog"
     assert by_url["https://external.example.net/project"].queue_class == "backlog"

@@ -122,7 +122,7 @@ class CrawlTask:
     depth: int
     priority: float = 1.0
     queue_class: str | None = None
-    discovery_kind: str = DISCOVERY_SEED
+    discovery_kind: str = ""
     archetype: str = ARCHETYPE_GENERIC_PAGE
     source_url: str | None = None
     added_at: float = 0.0
