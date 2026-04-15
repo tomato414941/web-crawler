@@ -217,8 +217,8 @@ class TestFrontier:
         assert queue_class == QUEUE_EXPLORATION
         assert queue_count == 1
 
-    def test_add_classifies_same_host_urls_as_exploration_through_depth_two(self, frontier):
-        frontier.add(CrawlTask(url="http://example.com/guide", depth=2, discovery_kind=DISCOVERY_SAME_HOST))
+    def test_add_classifies_same_host_urls_as_exploration_through_depth_one(self, frontier):
+        frontier.add(CrawlTask(url="http://example.com/guide", depth=1, discovery_kind=DISCOVERY_SAME_HOST))
 
         with frontier._conn.cursor() as cur:
             cur.execute(
@@ -228,6 +228,18 @@ class TestFrontier:
             (queue_class,) = cur.fetchone()
 
         assert queue_class == QUEUE_EXPLORATION
+
+    def test_add_classifies_same_host_urls_as_backlog_from_depth_two(self, frontier):
+        frontier.add(CrawlTask(url="http://example.com/guide", depth=2, discovery_kind=DISCOVERY_SAME_HOST))
+
+        with frontier._conn.cursor() as cur:
+            cur.execute(
+                "SELECT queue_class FROM frontier WHERE url = %s",
+                ("http://example.com/guide",),
+            )
+            (queue_class,) = cur.fetchone()
+
+        assert queue_class == QUEUE_BACKLOG
 
     def test_add_classifies_seed_host_urls_as_exploration_through_depth_two(self, frontier):
         frontier.add(CrawlTask(url="http://docs.example.com/guide", depth=2, discovery_kind=DISCOVERY_SEED_HOST))
@@ -916,6 +928,32 @@ class TestFrontier:
             status, queue_class = cur.fetchone()
 
         assert status == "pending"
+        assert queue_class == QUEUE_EXPLORATION
+
+    def test_promote_seed_host_exploration_does_not_requeue_same_host_pages(self, frontier):
+        frontier.add(
+            CrawlTask(
+                url="http://example.com/guide",
+                depth=1,
+                discovery_kind=DISCOVERY_SAME_HOST,
+                source_url="http://example.com/",
+            )
+        )
+        leased = frontier.lease_next()
+        assert leased is not None
+        frontier.mark_done(leased.url, lease_token=leased.lease_token)
+
+        promoted = frontier.promote_seed_host_exploration(["example.com"], per_host=1, max_depth=2)
+
+        assert promoted == 0
+        with frontier._conn.cursor() as cur:
+            cur.execute(
+                "SELECT status, queue_class FROM frontier WHERE url = %s",
+                ("http://example.com/guide",),
+            )
+            status, queue_class = cur.fetchone()
+
+        assert status == "done"
         assert queue_class == QUEUE_EXPLORATION
 
     def test_promote_branch_novelty_exploration_promotes_distinct_backlog_branches(self, frontier):
