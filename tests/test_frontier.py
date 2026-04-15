@@ -217,8 +217,8 @@ class TestFrontier:
         assert queue_class == QUEUE_EXPLORATION
         assert queue_count == 1
 
-    def test_add_classifies_same_host_urls_as_exploration_through_depth_one(self, frontier):
-        frontier.add(CrawlTask(url="http://example.com/guide", depth=1, discovery_kind=DISCOVERY_SAME_HOST))
+    def test_add_classifies_same_host_urls_as_exploration_through_depth_three(self, frontier):
+        frontier.add(CrawlTask(url="http://example.com/guide", depth=3, discovery_kind=DISCOVERY_SAME_HOST))
 
         with frontier._conn.cursor() as cur:
             cur.execute(
@@ -229,8 +229,8 @@ class TestFrontier:
 
         assert queue_class == QUEUE_EXPLORATION
 
-    def test_add_classifies_same_host_urls_as_backlog_from_depth_two(self, frontier):
-        frontier.add(CrawlTask(url="http://example.com/guide", depth=2, discovery_kind=DISCOVERY_SAME_HOST))
+    def test_add_classifies_same_host_urls_as_backlog_from_depth_four(self, frontier):
+        frontier.add(CrawlTask(url="http://example.com/guide", depth=4, discovery_kind=DISCOVERY_SAME_HOST))
 
         with frontier._conn.cursor() as cur:
             cur.execute(
