@@ -112,20 +112,9 @@ class DaemonSchedulerPolicy:
                 per_domain=1,
             )
 
-        branch_promoted = host_promoted
-        if hasattr(frontier, "promote_branch_novelty_exploration"):
-            branch_promoted += frontier.promote_branch_novelty_exploration(
-                max(
-                    exploration_pending + max(needed, 0) + max(needed_hosts, 0),
-                    self._min_exploration_ready,
-                    self._min_exploration_hosts,
-                ),
-                per_domain=1,
-            )
-
-        if branch_promoted < needed:
+        if host_promoted < needed:
             frontier.upsert_seeds(self._seeds, priority=2.0)
-        if branch_promoted < needed and hasattr(frontier, "promote_seed_host_exploration") and self._seed_hosts:
+        if host_promoted < needed and hasattr(frontier, "promote_seed_host_exploration") and self._seed_hosts:
             frontier.promote_seed_host_exploration(self._seed_hosts, per_host=1, max_depth=2)
 
     def promote_blocked_retry(self, frontier) -> int:

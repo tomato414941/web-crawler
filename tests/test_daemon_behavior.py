@@ -424,7 +424,6 @@ def test_ensure_seeds_tops_up_when_exploration_queue_is_starved():
         def __init__(self):
             self.upsert_calls = []
             self.host_promote_calls = []
-            self.branch_promote_calls = []
 
         def pending_count(self, queue_classes=None):
             if queue_classes == ["exploration"]:
@@ -442,10 +441,6 @@ def test_ensure_seeds_tops_up_when_exploration_queue_is_starved():
 
         def promote_backlog_host_heads(self, target_pending, per_domain=1):
             self.host_promote_calls.append((target_pending, per_domain))
-            return 2
-
-        def promote_branch_novelty_exploration(self, target_pending, per_domain=1):
-            self.branch_promote_calls.append((target_pending, per_domain))
             return 2
 
         def upsert_seeds(self, urls, priority=2.0):
@@ -467,16 +462,14 @@ def test_ensure_seeds_tops_up_when_exploration_queue_is_starved():
     daemon._ensure_seeds(frontier)
 
     assert frontier.host_promote_calls == [(5, 1)]
-    assert frontier.branch_promote_calls == [(5, 1)]
     assert frontier.upsert_calls == []
 
 
-def test_ensure_seeds_falls_back_to_seed_reinsertion_when_branch_promotion_is_insufficient():
+def test_ensure_seeds_falls_back_to_seed_reinsertion_when_host_promotion_is_insufficient():
     class FakeFrontier:
         def __init__(self):
             self.upsert_calls = []
             self.host_promote_calls = []
-            self.branch_promote_calls = []
             self.seed_promote_calls = []
 
         def pending_count(self, queue_classes=None):
@@ -496,10 +489,6 @@ def test_ensure_seeds_falls_back_to_seed_reinsertion_when_branch_promotion_is_in
         def promote_backlog_host_heads(self, target_pending, per_domain=1):
             self.host_promote_calls.append((target_pending, per_domain))
             return 0
-
-        def promote_branch_novelty_exploration(self, target_pending, per_domain=1):
-            self.branch_promote_calls.append((target_pending, per_domain))
-            return 1
 
         def upsert_seeds(self, urls, priority=2.0):
             self.upsert_calls.append((list(urls), priority))
@@ -524,7 +513,6 @@ def test_ensure_seeds_falls_back_to_seed_reinsertion_when_branch_promotion_is_in
     daemon._ensure_seeds(frontier)
 
     assert frontier.host_promote_calls == [(5, 1)]
-    assert frontier.branch_promote_calls == [(5, 1)]
     assert frontier.upsert_calls == [
         ([
             "https://www.iana.org/",
@@ -582,7 +570,6 @@ def test_ensure_seeds_reinserts_when_exploration_pending_is_high_but_ready_is_ze
         def __init__(self):
             self.upsert_calls = []
             self.host_promote_calls = []
-            self.branch_promote_calls = []
 
         def pending_count(self, queue_classes=None):
             if queue_classes == ["exploration"]:
@@ -600,10 +587,6 @@ def test_ensure_seeds_reinserts_when_exploration_pending_is_high_but_ready_is_ze
 
         def promote_backlog_host_heads(self, target_pending, per_domain=1):
             self.host_promote_calls.append((target_pending, per_domain))
-            return 0
-
-        def promote_branch_novelty_exploration(self, target_pending, per_domain=1):
-            self.branch_promote_calls.append((target_pending, per_domain))
             return 0
 
         def upsert_seeds(self, urls, priority=2.0):
@@ -626,7 +609,6 @@ def test_ensure_seeds_reinserts_when_exploration_pending_is_high_but_ready_is_ze
     daemon._ensure_seeds(frontier)
 
     assert frontier.host_promote_calls == [(29, 1)]
-    assert frontier.branch_promote_calls == [(29, 1)]
     assert frontier.upsert_calls == [
         ([
             "https://www.wikipedia.org/",
@@ -642,7 +624,6 @@ def test_ensure_seeds_tops_up_when_exploration_host_diversity_is_low():
         def __init__(self):
             self.upsert_calls = []
             self.host_promote_calls = []
-            self.branch_promote_calls = []
 
         def pending_count(self, queue_classes=None):
             if queue_classes == ["exploration"]:
@@ -660,10 +641,6 @@ def test_ensure_seeds_tops_up_when_exploration_host_diversity_is_low():
 
         def promote_backlog_host_heads(self, target_pending, per_domain=1):
             self.host_promote_calls.append((target_pending, per_domain))
-            return 1
-
-        def promote_branch_novelty_exploration(self, target_pending, per_domain=1):
-            self.branch_promote_calls.append((target_pending, per_domain))
             return 1
 
         def upsert_seeds(self, urls, priority=2.0):
@@ -685,7 +662,6 @@ def test_ensure_seeds_tops_up_when_exploration_host_diversity_is_low():
     daemon._ensure_seeds(frontier)
 
     assert frontier.host_promote_calls == [(22, 1)]
-    assert frontier.branch_promote_calls == [(22, 1)]
     assert frontier.upsert_calls == [
         ([
             "https://www.iana.org/",
