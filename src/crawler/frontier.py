@@ -1353,52 +1353,6 @@ class UrlLedger:
         self._conn.commit()
         return count
 
-    def promote_seed_host_exploration(
-        self,
-        seed_hosts: list[str],
-        per_host: int = 1,
-        max_depth: int = 2,
-    ) -> int:
-        """Promote a small number of shallow seed-host pages back into exploration."""
-        if not seed_hosts or per_host <= 0:
-            return 0
-
-        now = time.time()
-        with self._conn.cursor() as cur:
-            cur.execute(
-                f"""WITH ranked AS (
-                        SELECT url,
-                               ROW_NUMBER() OVER (
-                                   PARTITION BY domain
-                                   ORDER BY COALESCE(last_success_at, added_at) ASC, added_at ASC, url ASC
-                               ) AS rownum
-                        FROM frontier
-                        WHERE domain = ANY(%s)
-                          AND status = '{DONE_STATUS}'
-                          AND depth <= %s
-                          AND discovery_kind = 'seed_host'
-                    )
-                    UPDATE frontier
-                    SET status = '{PENDING_STATUS}',
-                        queue_class = %s,
-                        next_fetch_at = %s,
-                        fail_streak = 0,
-                        last_error = NULL
-                    WHERE url IN (
-                        SELECT url
-                        FROM ranked
-                        WHERE rownum <= %s
-                    )
-                    RETURNING url, domain, priority, next_fetch_at, added_at, queue_class, status""",
-                (seed_hosts, max_depth, QUEUE_EXPLORATION, now, per_host),
-            )
-            rows = cur.fetchall()
-            self._replace_pending_queue_rows(cur, self._project_pending_queue_rows(rows))
-            self._delete_active_leases(cur, [row[0] for row in rows])
-            count = len(rows)
-        self._conn.commit()
-        return count
-
     def promote_branch_novelty_exploration(
         self,
         target_pending: int,
