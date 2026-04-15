@@ -144,7 +144,14 @@ class FakeDomainManager:
     def record_error(self, url: str):
         self.errors.append(url)
 
+    def record_error_runtime(self, url: str) -> float:
+        self.errors.append(url)
+        return 30.0
+
     def record_success(self, url: str):
+        self.successes.append(url)
+
+    def record_success_runtime(self, url: str):
         self.successes.append(url)
 
     def get_host_budget(self, host_key: str, *, default_budget: int) -> int:
@@ -195,6 +202,44 @@ async def test_crawler_marks_client_errors_done_without_saving():
     assert engine.pages_crawled == 0
     assert frontier.done == ["https://example.com/missing"]
     assert frontier.failed == []
+
+
+@pytest.mark.asyncio
+async def test_crawler_marks_auth_walls_failed_and_records_host_error():
+    frontier = FakeFrontier([CrawlTask(url="https://example.com/forbidden", depth=0)])
+    domain_manager = FakeDomainManager()
+    fetcher = FakeFetcher([
+        Response(
+            url="https://example.com/forbidden",
+            status=403,
+            content=b"<html>forbidden</html>",
+            headers={},
+        )
+    ])
+
+    async with CrawlerEngine(
+        max_pages=10,
+        frontier=frontier,
+        domain_manager=domain_manager,
+    ) as engine:
+        engine.fetcher = fetcher
+        results = await engine.crawl()
+
+    assert results == []
+    assert engine.pages_crawled == 0
+    assert frontier.done == []
+    assert frontier.failed == ["https://example.com/forbidden"]
+    assert frontier.failures == [
+        {
+            "url": "https://example.com/forbidden",
+            "retryable": False,
+            "error": "http_403",
+            "backoff_seconds": 30.0,
+            "lease_token": None,
+        }
+    ]
+    assert domain_manager.errors == ["https://example.com/forbidden"]
+    assert domain_manager.successes == []
 
 
 @pytest.mark.asyncio
