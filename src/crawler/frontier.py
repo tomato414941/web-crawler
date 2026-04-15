@@ -95,7 +95,7 @@ QUEUE_REQUIRED_COLUMNS = {
     "added_at",
     "branch_key",
 }
-LEASE_TABLE = "frontier_lease_active"
+LEASE_TABLE = "active_leases"
 LEASE_REQUIRED_COLUMNS = {
     "url",
     "domain",
