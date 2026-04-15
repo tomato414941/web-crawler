@@ -265,8 +265,20 @@ class TestFrontier:
 
         assert queue_class == QUEUE_BACKLOG
 
-    def test_add_keeps_seed_urls_in_exploration(self, frontier):
+    def test_add_defaults_implicit_urls_to_backlog(self, frontier):
         frontier.add(CrawlTask(url="http://example.com/seed", depth=0))
+
+        with frontier._conn.cursor() as cur:
+            cur.execute(
+                "SELECT queue_class FROM frontier WHERE url = %s",
+                ("http://example.com/seed",),
+            )
+            (queue_class,) = cur.fetchone()
+
+        assert queue_class == QUEUE_BACKLOG
+
+    def test_upsert_seeds_keeps_seed_urls_in_exploration(self, frontier):
+        frontier.upsert_seeds(["http://example.com/seed"])
 
         with frontier._conn.cursor() as cur:
             cur.execute(
