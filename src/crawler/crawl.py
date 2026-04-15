@@ -329,7 +329,7 @@ class CrawlerEngine:
         """Apply durable scheduler mutations on the dedicated finalizer connection."""
         frontier = self._finalizer_frontier or self.frontier
         if new_tasks:
-            frontier.add_many(new_tasks)
+            frontier.place_many(new_tasks)
 
         domain_store = self._finalizer_domain_store or self._domain_store_for_success_tracking()
         if domain_store is not None:
@@ -912,7 +912,7 @@ class CrawlerEngine:
                 self.domain_manager.record_success(parsed.task.url)
         else:
             if parsed.new_tasks:
-                self.frontier.add_many(parsed.new_tasks)
+                self.frontier.place_many(parsed.new_tasks)
             self.domain_manager.record_success(parsed.task.url)
             self.frontier.mark_done(parsed.task.url, lease_token=parsed.task.lease_token)
         result.timings.frontier_ms += _elapsed_ms(frontier_started)
@@ -1088,7 +1088,7 @@ class CrawlerEngine:
         self._publish_queue_depth_max = 0
 
         if self.start_url and self.frontier.pending_count() == 0:
-            self.frontier.add(self._build_seed_task(self.start_url))
+            self.frontier.place(self._build_seed_task(self.start_url))
 
         self._parse_queue = asyncio.Queue()
         self._finalize_queue = asyncio.Queue()
