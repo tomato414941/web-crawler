@@ -5,4 +5,5 @@ runtime overview.
 
 - [README.md](/home/dev/projects/web-crawler/README.md) — current project overview, runtime model, current queue stages, CLI/API usage, and deployment notes
 - [plan.md](/home/dev/projects/web-crawler/plan.md) — target architecture, migration phases, and the current gap between runtime and target design
+- [STATE_MODEL.md](/home/dev/projects/web-crawler/docs/STATE_MODEL.md) — target state model, source-of-truth boundaries, and URL/host state invariants
 - [CONTENT_POLICY.md](/home/dev/projects/web-crawler/docs/CONTENT_POLICY.md) — content handling, metadata-only resources, and deferred document extraction
