@@ -106,6 +106,7 @@ class TestFrontier:
         conn.autocommit = False
         with conn.cursor() as cur:
             cur.execute("DROP TABLE IF EXISTS schema_migrations")
+            cur.execute("DROP TABLE IF EXISTS active_leases")
             cur.execute("DROP TABLE IF EXISTS frontier_lease_active")
             cur.execute("DROP TABLE IF EXISTS frontier_queue_exploration")
             cur.execute("DROP TABLE IF EXISTS frontier_queue_backlog")
@@ -405,7 +406,7 @@ class TestFrontier:
         with frontier._conn.cursor() as cur:
             cur.execute("SELECT status FROM frontier WHERE url = %s", ("http://example.com/",))
             (status,) = cur.fetchone()
-            cur.execute("SELECT count(*) FROM frontier_lease_active WHERE url = %s", ("http://example.com/",))
+            cur.execute("SELECT count(*) FROM active_leases WHERE url = %s", ("http://example.com/",))
             (active_count,) = cur.fetchone()
 
         assert status == PENDING_STATUS
@@ -454,7 +455,7 @@ class TestFrontier:
         frontier.mark_done(result.url, lease_token=result.lease_token)
         assert frontier.stats().get("done", 0) == 1
         with frontier._conn.cursor() as cur:
-            cur.execute("SELECT count(*) FROM frontier_lease_active WHERE url = %s", (result.url,))
+            cur.execute("SELECT count(*) FROM active_leases WHERE url = %s", (result.url,))
             (active_count,) = cur.fetchone()
         assert active_count == 0
 
@@ -470,7 +471,7 @@ class TestFrontier:
             )
             status, lease_token, lease_expires_at = cur.fetchone()
             cur.execute(
-                "SELECT lease_token, lease_expires_at FROM frontier_lease_active WHERE url = %s",
+                "SELECT lease_token, lease_expires_at FROM active_leases WHERE url = %s",
                 (result.url,),
             )
             active_lease_token, active_lease_expires_at = cur.fetchone()
