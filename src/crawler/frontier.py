@@ -385,8 +385,6 @@ class UrlLedger:
         """Map a task into the queue class used by the scheduler."""
         if task.queue_class in FRONTIER_ALLOWED_QUEUE_CLASSES:
             return task.queue_class
-        if task.depth <= 0:
-            return QUEUE_EXPLORATION
         if task.archetype in {ARCHETYPE_REGISTRY_LISTING, ARCHETYPE_REDIRECT_HUB}:
             return QUEUE_BACKLOG
         if known_count >= EXPLORATION_DOMAIN_BUDGET:
