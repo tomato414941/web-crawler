@@ -1509,6 +1509,71 @@ class Frontier:
         self._conn.commit()
         return count
 
+    def promote_backlog_host_heads(
+        self,
+        target_pending: int,
+        *,
+        per_domain: int = 1,
+        candidate_limit: int = 200,
+    ) -> int:
+        """Promote one backlog head per host into exploration before using seed refill."""
+        if target_pending <= 0 or per_domain <= 0 or candidate_limit <= 0:
+            return 0
+
+        current_exploration = self.pending_count(queue_classes=[QUEUE_EXPLORATION])
+        needed = target_pending - current_exploration
+        if needed <= 0:
+            return 0
+
+        with self._conn.cursor() as cur:
+            cur.execute(
+                f"""SELECT DISTINCT domain
+                    FROM {self._queue_table_sql(QUEUE_EXPLORATION)}"""
+            )
+            existing_domains = {domain for (domain,) in cur.fetchall()}
+
+            cur.execute(
+                f"""SELECT url, domain
+                    FROM {self._queue_table_sql(QUEUE_BACKLOG)}
+                    ORDER BY priority DESC, added_at ASC, url ASC
+                    LIMIT %s""",
+                (max(candidate_limit, needed * 20),),
+            )
+            candidates = cur.fetchall()
+
+            promoted_urls: list[str] = []
+            domain_counts: Counter[str] = Counter()
+            for url, domain in candidates:
+                if domain in existing_domains:
+                    continue
+                if domain_counts[domain] >= per_domain:
+                    continue
+                promoted_urls.append(normalize_url(url))
+                existing_domains.add(domain)
+                domain_counts[domain] += 1
+                if len(promoted_urls) >= needed:
+                    break
+
+            if not promoted_urls:
+                return 0
+
+            cur.execute(
+                f"""UPDATE frontier
+                    SET queue_class = %s
+                    WHERE url = ANY(%s)
+                      AND status = '{PENDING_STATUS}'
+                      AND queue_class = '{QUEUE_BACKLOG}'
+                    RETURNING url, domain, priority, next_fetch_at, added_at, queue_class, lease_token, lease_expires_at, status""",
+                (QUEUE_EXPLORATION, promoted_urls),
+            )
+            rows = cur.fetchall()
+            self._replace_pending_queue_rows(cur, self._project_pending_queue_rows(rows))
+            self._replace_active_lease_rows(cur, [(row[0], row[1], row[5], row[6], row[7], row[8]) for row in rows])
+            count = len(rows)
+
+        self._conn.commit()
+        return count
+
     def upsert_seeds(self, urls: list[str], priority: float = 2.0) -> int:
         """Insert or requeue seed URLs."""
         if not urls:
