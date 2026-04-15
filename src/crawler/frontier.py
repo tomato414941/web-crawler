@@ -956,17 +956,28 @@ class Frontier:
                 exclude_branch_keys=exclude_branch_keys,
                 exclude_domain_branches=exclude_domain_branches,
             )
-            candidate_from = f"FROM {self._queue_table_sql(normalized_queue_classes[0])} AS candidate"
+            ranked_ready_sql = self._queue_ready_sql(
+                alias="ranked_source",
+                now=now,
+                domain=domain,
+                exclude_domains=exclude_domains,
+                exclude_branch_keys=exclude_branch_keys,
+                exclude_domain_branches=exclude_domain_branches,
+            )
+            candidate_from = self._branch_breadth_candidate_from_sql(
+                queue_class=normalized_queue_classes[0],
+                ranked_ready_sql=ranked_ready_sql,
+            )
             where_sql = (
                 f"{ready_sql.where} AND "
                 f"{self._host_first_domain_selector_sql(queue_class=normalized_queue_classes[0], ready_sql=host_ready_sql)}"
             )
-            candidate_from_params = list(host_ready_sql.params)
-            order_by = self._lease_order_by_sql("candidate", prioritize_breadth=True)
+            candidate_from_params = [*ranked_ready_sql.params, *host_ready_sql.params]
+            order_by = self._branch_breadth_order_by_sql("candidate")
         else:
             candidate_from = f"FROM {self._queue_table_sql(normalized_queue_classes[0])} AS candidate"
             order_by = self._lease_order_by_sql("candidate", prioritize_breadth=prioritize_breadth)
-        params: list[object] = [lease_token, lease_expires_at, *ready_sql.params, *candidate_from_params]
+        params: list[object] = [lease_token, lease_expires_at, *candidate_from_params, *ready_sql.params]
 
         try:
             self._recover_leased_locked(now, expired_only=True)
