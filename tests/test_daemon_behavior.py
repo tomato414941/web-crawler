@@ -419,7 +419,7 @@ async def test_daemon_persists_readiness_breakdown_while_waiting_for_ready():
     }
 
 
-def test_ensure_seeds_tops_up_when_exploration_queue_is_starved():
+def test_ensure_exploration_supply_tops_up_when_exploration_queue_is_starved():
     class FakeFrontier:
         def __init__(self):
             self.upsert_calls = []
@@ -459,13 +459,13 @@ def test_ensure_seeds_tops_up_when_exploration_queue_is_starved():
     )
     frontier = FakeFrontier()
 
-    daemon._ensure_seeds(frontier)
+    daemon._ensure_exploration_supply(frontier)
 
     assert frontier.host_promote_calls == [(5, 1)]
     assert frontier.upsert_calls == []
 
 
-def test_ensure_seeds_falls_back_to_seed_host_requeue_when_host_promotion_is_insufficient():
+def test_ensure_exploration_supply_falls_back_to_seed_host_requeue_when_host_promotion_is_insufficient():
     class FakeFrontier:
         def __init__(self):
             self.upsert_calls = []
@@ -510,7 +510,7 @@ def test_ensure_seeds_falls_back_to_seed_host_requeue_when_host_promotion_is_ins
     )
     frontier = FakeFrontier()
 
-    daemon._ensure_seeds(frontier)
+    daemon._ensure_exploration_supply(frontier)
 
     assert frontier.host_promote_calls == [(5, 1)]
     assert frontier.upsert_calls == []
@@ -519,7 +519,7 @@ def test_ensure_seeds_falls_back_to_seed_host_requeue_when_host_promotion_is_ins
     ]
 
 
-def test_ensure_seeds_does_not_top_up_when_exploration_queue_is_healthy():
+def test_ensure_exploration_supply_does_not_top_up_when_exploration_queue_is_healthy():
     class FakeFrontier:
         def __init__(self):
             self.upsert_calls = []
@@ -554,12 +554,12 @@ def test_ensure_seeds_does_not_top_up_when_exploration_queue_is_healthy():
     )
     frontier = FakeFrontier()
 
-    daemon._ensure_seeds(frontier)
+    daemon._ensure_exploration_supply(frontier)
 
     assert frontier.upsert_calls == []
 
 
-def test_ensure_seeds_does_not_reinsert_when_exploration_pending_is_high_but_ready_is_zero():
+def test_ensure_exploration_supply_does_not_reinsert_when_exploration_pending_is_high_but_ready_is_zero():
     class FakeFrontier:
         def __init__(self):
             self.upsert_calls = []
@@ -600,13 +600,13 @@ def test_ensure_seeds_does_not_reinsert_when_exploration_pending_is_high_but_rea
     )
     frontier = FakeFrontier()
 
-    daemon._ensure_seeds(frontier)
+    daemon._ensure_exploration_supply(frontier)
 
     assert frontier.host_promote_calls == [(29, 1)]
     assert frontier.upsert_calls == []
 
 
-def test_ensure_seeds_tops_up_when_exploration_host_diversity_is_low():
+def test_ensure_exploration_supply_tops_up_when_exploration_host_diversity_is_low():
     class FakeFrontier:
         def __init__(self):
             self.upsert_calls = []
@@ -646,7 +646,7 @@ def test_ensure_seeds_tops_up_when_exploration_host_diversity_is_low():
     )
     frontier = FakeFrontier()
 
-    daemon._ensure_seeds(frontier)
+    daemon._ensure_exploration_supply(frontier)
 
     assert frontier.host_promote_calls == [(22, 1)]
     assert frontier.upsert_calls == []
