@@ -435,6 +435,21 @@ class TestFrontier:
             "http://a.com/docs/rust/1",
         }
 
+    def test_lease_next_prioritizes_branch_breadth_within_selected_host(self, frontier):
+        frontier.add(CrawlTask(url="http://a.com/docs/python/1", depth=1, priority=1.0, added_at=1000))
+        frontier.add(CrawlTask(url="http://a.com/docs/python/2", depth=1, priority=1.0, added_at=1001))
+        frontier.add(CrawlTask(url="http://a.com/docs/rust/1", depth=1, priority=1.0, added_at=2000))
+        frontier.add(CrawlTask(url="http://b.com/1", depth=1, priority=1.5, added_at=5000))
+
+        first = frontier.lease_next(prioritize_breadth=True, queue_classes=[QUEUE_EXPLORATION])
+        assert first is not None
+        assert first.url == "http://a.com/docs/python/1"
+        frontier.mark_done(first.url, lease_token=first.lease_token)
+
+        second = frontier.lease_next(prioritize_breadth=True, queue_classes=[QUEUE_EXPLORATION])
+        assert second is not None
+        assert second.url == "http://a.com/docs/rust/1"
+
     def test_mark_done(self, frontier):
         frontier.add(CrawlTask(url="http://example.com", depth=0))
         result = frontier.lease_next()
