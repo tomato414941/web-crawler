@@ -307,6 +307,25 @@ Store them in a local `.env` on the server; do not commit runtime-specific value
 
 These production seeds are only bootstrap points. They do not define the full crawl scope.
 
+The committed seed catalog lives in `config/seeds.json`. Treat it as the operator-facing source
+of truth for which URLs are seeds and why they exist. Runtime `.env` files should only contain
+the rendered `CRAWL_SEED_URLS` string for the currently enabled subset.
+
+Render the current catalog into an env assignment with:
+
+```bash
+PYTHONPATH=src python scripts/render_seed_env.py
+```
+
+Each catalog entry stores:
+- `url` — the seed URL itself
+- `enabled` — whether it should appear in rendered runtime seed lists
+- `tags` — operator metadata such as `tech`, `media`, `culture`, `public-sector`
+- `notes` — short rationale for why the seed exists
+
+Tags are for operator understanding and seed-set maintenance. They are not currently used by
+runtime scheduling policy.
+
 `docker-compose.yml` consumes these `CRAWL_*` variables as CLI flags for `crawler daemon`.
 The application also exposes lower-level `CRAWLER_*` settings for scheduler tuning:
 

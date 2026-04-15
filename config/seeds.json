@@ -1,0 +1,184 @@
+{
+  "seeds": [
+    {
+      "url": "https://www.wikipedia.org/",
+      "enabled": true,
+      "tags": ["reference", "knowledge", "nonprofit"],
+      "notes": "Broad public knowledge entry point."
+    },
+    {
+      "url": "https://www.wikidata.org/",
+      "enabled": true,
+      "tags": ["reference", "knowledge", "structured-data"],
+      "notes": "Structured knowledge graph seed."
+    },
+    {
+      "url": "https://www.openstreetmap.org/",
+      "enabled": true,
+      "tags": ["maps", "geography", "nonprofit"],
+      "notes": "Public mapping and geographic data."
+    },
+    {
+      "url": "https://github.com/",
+      "enabled": true,
+      "tags": ["tech", "developer", "hosting"],
+      "notes": "General software collaboration hub."
+    },
+    {
+      "url": "https://docs.github.com/",
+      "enabled": true,
+      "tags": ["tech", "developer", "documentation"],
+      "notes": "Developer documentation entry point."
+    },
+    {
+      "url": "https://pypi.org/",
+      "enabled": true,
+      "tags": ["tech", "developer", "packages"],
+      "notes": "Public package index."
+    },
+    {
+      "url": "https://arxiv.org/",
+      "enabled": true,
+      "tags": ["research", "papers", "science"],
+      "notes": "Open preprint archive."
+    },
+    {
+      "url": "https://stackexchange.com/",
+      "enabled": true,
+      "tags": ["community", "questions", "developer"],
+      "notes": "Public Q&A network entry point."
+    },
+    {
+      "url": "https://www.mozilla.org/",
+      "enabled": true,
+      "tags": ["tech", "nonprofit", "web"],
+      "notes": "General public-facing web and browser content."
+    },
+    {
+      "url": "https://www.python.org/",
+      "enabled": true,
+      "tags": ["tech", "language", "documentation"],
+      "notes": "Programming language ecosystem root."
+    },
+    {
+      "url": "https://www.gnu.org/",
+      "enabled": true,
+      "tags": ["tech", "oss", "foundation"],
+      "notes": "Free software foundation content."
+    },
+    {
+      "url": "https://www.kernel.org/",
+      "enabled": true,
+      "tags": ["tech", "oss", "infrastructure"],
+      "notes": "Kernel and infrastructure ecosystem."
+    },
+    {
+      "url": "https://archive.org/",
+      "enabled": true,
+      "tags": ["archive", "culture", "nonprofit"],
+      "notes": "Large public archive entry point."
+    },
+    {
+      "url": "https://www.gutenberg.org/",
+      "enabled": true,
+      "tags": ["books", "literature", "archive"],
+      "notes": "Public-domain books."
+    },
+    {
+      "url": "https://www.bbc.com/",
+      "enabled": true,
+      "tags": ["media", "news", "general"],
+      "notes": "General public media site."
+    },
+    {
+      "url": "https://www.nasa.gov/",
+      "enabled": true,
+      "tags": ["science", "space", "public-sector"],
+      "notes": "Public science and space agency content."
+    },
+    {
+      "url": "https://www.who.int/",
+      "enabled": true,
+      "tags": ["health", "international", "public-sector"],
+      "notes": "Global public health organization."
+    },
+    {
+      "url": "https://www.si.edu/",
+      "enabled": true,
+      "tags": ["culture", "museum", "education"],
+      "notes": "Museum and cultural institution root."
+    },
+    {
+      "url": "https://www.nist.gov/",
+      "enabled": true,
+      "tags": ["standards", "science", "public-sector"],
+      "notes": "Standards and scientific publications."
+    },
+    {
+      "url": "https://www.census.gov/",
+      "enabled": true,
+      "tags": ["data", "demographics", "public-sector"],
+      "notes": "Public demographic and survey data."
+    },
+    {
+      "url": "https://www.usgs.gov/",
+      "enabled": true,
+      "tags": ["science", "geography", "public-sector"],
+      "notes": "Geological and mapping information."
+    },
+    {
+      "url": "https://www.usa.gov/",
+      "enabled": true,
+      "tags": ["public-sector", "portal", "general"],
+      "notes": "General U.S. public information portal."
+    },
+    {
+      "url": "https://www.apache.org/",
+      "enabled": true,
+      "tags": ["tech", "oss", "foundation"],
+      "notes": "Open-source foundation entry point."
+    },
+    {
+      "url": "https://www.w3.org/",
+      "enabled": true,
+      "tags": ["web", "standards", "tech"],
+      "notes": "Web standards body root."
+    },
+    {
+      "url": "https://www.debian.org/",
+      "enabled": true,
+      "tags": ["tech", "oss", "community"],
+      "notes": "General Linux distribution project root."
+    },
+    {
+      "url": "https://www.metmuseum.org/",
+      "enabled": true,
+      "tags": ["culture", "museum", "arts"],
+      "notes": "Art museum and cultural archive."
+    },
+    {
+      "url": "https://www.khanacademy.org/",
+      "enabled": true,
+      "tags": ["education", "learning", "nonprofit"],
+      "notes": "Broad public educational content."
+    },
+    {
+      "url": "https://www.ted.com/",
+      "enabled": true,
+      "tags": ["talks", "ideas", "media"],
+      "notes": "General public talks and essays."
+    },
+    {
+      "url": "https://www.britannica.com/",
+      "enabled": true,
+      "tags": ["reference", "education", "general"],
+      "notes": "General reference and encyclopedia content."
+    },
+    {
+      "url": "https://www.goodreads.com/",
+      "enabled": true,
+      "tags": ["books", "community", "culture"],
+      "notes": "General public books and reading community."
+    }
+  ]
+}
