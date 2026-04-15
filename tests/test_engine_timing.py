@@ -25,11 +25,17 @@ class _FakeFrontier:
     def mark_failed(self, url, retryable, error, lease_token=None):
         raise AssertionError(f"unexpected failure for {url}: {error}")
 
-    def add(self, task):
+    def place(self, task):
         self.added.append(task)
 
-    def add_many(self, tasks):
+    def place_many(self, tasks):
         self.added.extend(tasks)
+
+    def add(self, task):
+        self.place(task)
+
+    def add_many(self, tasks):
+        self.place_many(tasks)
 
     def pending_count(self):
         return 0
@@ -116,9 +122,9 @@ async def test_crawler_engine_records_stage_timings():
 
 
 class _SlowFrontier(_FakeFrontier):
-    def add_many(self, tasks):
+    def place_many(self, tasks):
         time.sleep(0.25)
-        super().add_many(tasks)
+        super().place_many(tasks)
 
 
 @pytest.mark.asyncio

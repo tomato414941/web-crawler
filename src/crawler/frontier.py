@@ -869,13 +869,21 @@ class UrlLedger:
         """Return normalized tasks with queue classes applied without writing them."""
         return self._prepare_tasks(tasks)
 
-    def add(self, task: CrawlTask) -> bool:
-        """Add a URL to the frontier. Returns True if inserted or metadata improved."""
+    def place(self, task: CrawlTask) -> bool:
+        """Place one discovered URL candidate into scheduler storage."""
         return self._upsert_tasks([task]) > 0
 
-    def add_many(self, tasks: list[CrawlTask]) -> int:
-        """Add multiple URLs. Existing rows are promoted when a better discovery wins."""
+    def place_many(self, tasks: list[CrawlTask]) -> int:
+        """Place multiple discovered URL candidates into scheduler storage."""
         return self._upsert_tasks(tasks)
+
+    def add(self, task: CrawlTask) -> bool:
+        """Backward-compatible alias for place()."""
+        return self.place(task)
+
+    def add_many(self, tasks: list[CrawlTask]) -> int:
+        """Backward-compatible alias for place_many()."""
+        return self.place_many(tasks)
 
     def lease_next(
         self,
