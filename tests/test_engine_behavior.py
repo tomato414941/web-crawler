@@ -70,14 +70,12 @@ class FakeFrontier:
             if queue_class is None:
                 if task.discovery_kind == "seed":
                     queue_class = "exploration"
+                elif task.discovery_kind in {"same_host", "seed_host", "external"}:
+                    queue_class = "backlog"
                 elif task.archetype in {"registry_listing", "redirect_hub"}:
                     queue_class = "backlog"
                 elif known_count >= 8:
                     queue_class = "backlog"
-                elif task.discovery_kind == "same_host":
-                    queue_class = "exploration" if task.depth <= 2 else "backlog"
-                elif task.discovery_kind in {"seed_host", "external"}:
-                    queue_class = "exploration" if task.depth <= 3 else "backlog"
                 else:
                     queue_class = "backlog"
             prepared.append(CrawlTask(
@@ -421,8 +419,8 @@ async def test_crawler_assigns_discovery_metadata_to_outlinks():
     ].priority
     assert by_url["https://external.example.net/project"].discovery_kind == DISCOVERY_EXTERNAL
     assert by_url["https://external.example.net/project"].archetype == ARCHETYPE_GENERIC_PAGE
-    assert by_url["https://docs.example.com/guide"].queue_class == "exploration"
-    assert by_url["https://external.example.net/project"].queue_class == "exploration"
+    assert by_url["https://docs.example.com/guide"].queue_class == "backlog"
+    assert by_url["https://external.example.net/project"].queue_class == "backlog"
 
 
 @pytest.mark.asyncio
