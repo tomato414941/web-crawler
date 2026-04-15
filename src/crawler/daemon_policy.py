@@ -101,9 +101,20 @@ class DaemonSchedulerPolicy:
 
         needed = self._min_exploration_ready - exploration_ready
         needed_hosts = self._min_exploration_hosts - exploration_hosts
-        branch_promoted = 0
+        host_promoted = 0
+        if hasattr(frontier, "promote_backlog_host_heads"):
+            host_promoted = frontier.promote_backlog_host_heads(
+                max(
+                    exploration_pending + max(needed, 0) + max(needed_hosts, 0),
+                    self._min_exploration_ready,
+                    self._min_exploration_hosts,
+                ),
+                per_domain=1,
+            )
+
+        branch_promoted = host_promoted
         if hasattr(frontier, "promote_branch_novelty_exploration"):
-            branch_promoted = frontier.promote_branch_novelty_exploration(
+            branch_promoted += frontier.promote_branch_novelty_exploration(
                 max(
                     exploration_pending + max(needed, 0) + max(needed_hosts, 0),
                     self._min_exploration_ready,
