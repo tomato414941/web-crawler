@@ -322,7 +322,7 @@ class UrlLedger:
                         WHERE {where}
                     )
                     UPDATE frontier
-                    SET status = '{PENDING_STATUS}',
+                    SET status = status
                     WHERE url IN (SELECT url FROM active_leases)
                     RETURNING url, domain, priority, next_fetch_at, added_at, queue_class, status""",
                 params,
@@ -972,7 +972,7 @@ class UrlLedger:
             with self._conn.cursor() as cur:
                 cur.execute(
                     f"""UPDATE frontier
-                        SET status = '{LEASED_STATUS}'
+                        SET status = status
                         WHERE url = (
                             SELECT candidate.url
                             {candidate_from}
@@ -1099,7 +1099,7 @@ class UrlLedger:
             with self._conn.cursor() as cur:
                 cur.execute(
                     f"""UPDATE frontier
-                        SET status = '{LEASED_STATUS}'
+                        SET status = status
                         WHERE url IN (
                             SELECT candidate.url
                             {candidate_from}
@@ -1252,7 +1252,7 @@ class UrlLedger:
             cur.execute(
                 """UPDATE frontier
                    SET status = %s,
-                       next_fetch_at = %s,
+                       next_fetch_at = %s
                    WHERE status = %s
                    RETURNING url, domain, priority, next_fetch_at, added_at, queue_class, status""",
                 (PENDING_STATUS, now, FAILED_STATUS),
