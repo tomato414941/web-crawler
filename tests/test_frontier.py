@@ -472,6 +472,29 @@ class TestFrontier:
             (active_count,) = cur.fetchone()
         assert active_count == 0
 
+    def test_lease_state_lives_only_in_active_lease_table(self, frontier):
+        frontier.add(CrawlTask(url="http://example.com", depth=0))
+
+        result = frontier.lease_next()
+
+        with frontier._conn.cursor() as cur:
+            cur.execute(
+                "SELECT status, lease_token, lease_expires_at FROM frontier WHERE url = %s",
+                (result.url,),
+            )
+            status, lease_token, lease_expires_at = cur.fetchone()
+            cur.execute(
+                "SELECT lease_token, lease_expires_at FROM frontier_lease_active WHERE url = %s",
+                (result.url,),
+            )
+            active_lease_token, active_lease_expires_at = cur.fetchone()
+
+        assert status == "leased"
+        assert lease_token is None
+        assert lease_expires_at is None
+        assert active_lease_token == result.lease_token
+        assert active_lease_expires_at == result.lease_expires_at
+
     def test_mark_done_uses_active_lease_table_for_token_validation(self, frontier):
         frontier.add(CrawlTask(url="http://example.com", depth=0))
         result = frontier.lease_next()

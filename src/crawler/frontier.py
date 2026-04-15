@@ -323,15 +323,13 @@ class UrlLedger:
                     )
                     UPDATE frontier
                     SET status = '{PENDING_STATUS}',
-                        lease_token = NULL,
-                        lease_expires_at = NULL
                     WHERE url IN (SELECT url FROM active_leases)
-                    RETURNING url, domain, priority, next_fetch_at, added_at, queue_class, lease_token, lease_expires_at, status""",
+                    RETURNING url, domain, priority, next_fetch_at, added_at, queue_class, status""",
                 params,
             )
             rows = cur.fetchall()
             self._replace_pending_queue_rows(cur, self._project_pending_queue_rows(rows))
-            self._replace_active_lease_rows(cur, [(row[0], row[1], row[5], row[6], row[7], row[8]) for row in rows])
+            self._delete_active_leases(cur, [row[0] for row in rows])
             return len(rows)
 
     def _assert_current_schema(self) -> None:
@@ -705,31 +703,16 @@ class UrlLedger:
             return
         cur.execute(f"DELETE FROM {LEASE_TABLE} WHERE url = ANY(%s)", (urls,))
 
-    def _replace_active_lease_rows(
+    def _upsert_active_leases(
         self,
         cur,
-        rows: list[tuple[str, str, str, str | None, float | None, str]],
+        rows: list[tuple[str, str, str, str, float]],
     ) -> None:
-        """Replace active lease rows using returned frontier state."""
+        """Replace active lease rows using explicit lease-table state."""
         normalized_urls = sorted({normalize_url(url) for url, *_ in rows if url})
         if not normalized_urls:
             return
         self._delete_active_leases(cur, normalized_urls)
-
-        active_rows: list[tuple[str, str, str, str, float]] = []
-        for url, domain, queue_class, lease_token, lease_expires_at, status in rows:
-            if status != LEASED_STATUS or not lease_token or lease_expires_at is None:
-                continue
-            active_rows.append((
-                normalize_url(url),
-                domain,
-                self._normalize_queue_class(queue_class),
-                lease_token,
-                lease_expires_at,
-            ))
-
-        if not active_rows:
-            return
         psycopg2.extras.execute_values(
             cur,
             f"""INSERT INTO {LEASE_TABLE}
@@ -740,7 +723,16 @@ class UrlLedger:
                     queue_class = EXCLUDED.queue_class,
                     lease_token = EXCLUDED.lease_token,
                     lease_expires_at = EXCLUDED.lease_expires_at""",
-            active_rows,
+            [
+                (
+                    normalize_url(url),
+                    domain,
+                    self._normalize_queue_class(queue_class),
+                    lease_token,
+                    lease_expires_at,
+                )
+                for url, domain, queue_class, lease_token, lease_expires_at in rows
+            ],
             page_size=200,
         )
 
@@ -797,16 +789,14 @@ class UrlLedger:
                     SET status = '{PENDING_STATUS}',
                         queue_class = %s,
                         next_fetch_at = %s,
-                        lease_token = NULL,
-                        lease_expires_at = NULL
                     WHERE url = ANY(%s)
                       AND status = ANY(%s)
-                    RETURNING url, domain, priority, next_fetch_at, added_at, queue_class, lease_token, lease_expires_at, status""",
+                    RETURNING url, domain, priority, next_fetch_at, added_at, queue_class, status""",
                 (queue_class, scheduled_at, normalized_urls, statuses),
             )
             rows = cur.fetchall()
             self._replace_pending_queue_rows(cur, self._project_pending_queue_rows(rows))
-            self._replace_active_lease_rows(cur, [(row[0], row[1], row[5], row[6], row[7], row[8]) for row in rows])
+            self._delete_active_leases(cur, [row[0] for row in rows])
             count = len(rows)
 
         self._conn.commit()
@@ -879,13 +869,13 @@ class UrlLedger:
                            OR EXCLUDED.depth < frontier.depth
                            OR (frontier.source_url IS NULL AND EXCLUDED.source_url IS NOT NULL)
                            OR EXCLUDED.next_fetch_at < frontier.next_fetch_at
-                       RETURNING url, domain, priority, next_fetch_at, added_at, queue_class, lease_token, lease_expires_at, status""",
+                       RETURNING url, domain, priority, next_fetch_at, added_at, queue_class, status""",
                     rows,
                     page_size=200,
                 )
                 frontier_rows = cur.fetchall()
                 self._replace_pending_queue_rows(cur, self._project_pending_queue_rows(frontier_rows))
-                self._replace_active_lease_rows(cur, [(row[0], row[1], row[5], row[6], row[7], row[8]) for row in frontier_rows])
+                self._delete_active_leases(cur, [row[0] for row in frontier_rows])
                 return len(frontier_rows)
         except Exception:
             self._conn.rollback()
@@ -975,16 +965,14 @@ class UrlLedger:
         else:
             candidate_from = f"FROM {self._queue_table_sql(normalized_queue_classes[0])} AS candidate"
             order_by = self._lease_order_by_sql("candidate", prioritize_breadth=prioritize_breadth)
-        params: list[object] = [lease_token, lease_expires_at, *candidate_from_params, *ready_sql.params]
+        params: list[object] = [*candidate_from_params, *ready_sql.params]
 
         try:
             self._recover_leased_locked(now, expired_only=True)
             with self._conn.cursor() as cur:
                 cur.execute(
                     f"""UPDATE frontier
-                        SET status = '{LEASED_STATUS}',
-                            lease_token = %s,
-                            lease_expires_at = %s
+                        SET status = '{LEASED_STATUS}'
                         WHERE url = (
                             SELECT candidate.url
                             {candidate_from}
@@ -1003,15 +991,14 @@ class UrlLedger:
                             added_at,
                             next_fetch_at,
                             queue_class,
-                            lease_token,
-                            lease_expires_at,
+                            domain,
                             status""",
                     params,
                 )
                 row = cur.fetchone()
                 if row:
                     self._delete_queue_entries(cur, [row[0]])
-                    self._replace_active_lease_rows(cur, [(row[0], row[1], row[8], row[9], row[10], row[11])])
+                    self._upsert_active_leases(cur, [(row[0], row[9], row[8], lease_token, lease_expires_at)])
             self._conn.commit()
         except Exception:
             self._conn.rollback()
@@ -1029,8 +1016,7 @@ class UrlLedger:
                 added_at,
                 next_fetch_at,
                 _queue_class,
-                lease_token,
-                lease_expires_at,
+                _domain,
                 _status,
             ) = row
             return CrawlTask(
@@ -1106,16 +1092,14 @@ class UrlLedger:
             order_by = self._branch_breadth_order_by_sql("candidate")
         else:
             order_by = self._lease_order_by_sql("candidate", prioritize_breadth=prioritize_breadth)
-        params: list[object] = [lease_token, lease_expires_at, *candidate_from_params, *ready_sql.params, count]
+        params: list[object] = [*candidate_from_params, *ready_sql.params, count]
 
         try:
             self._recover_leased_locked(now, expired_only=True)
             with self._conn.cursor() as cur:
                 cur.execute(
                     f"""UPDATE frontier
-                        SET status = '{LEASED_STATUS}',
-                            lease_token = %s,
-                            lease_expires_at = %s
+                        SET status = '{LEASED_STATUS}'
                         WHERE url IN (
                             SELECT candidate.url
                             {candidate_from}
@@ -1134,15 +1118,17 @@ class UrlLedger:
                             added_at,
                             next_fetch_at,
                             queue_class,
-                            lease_token,
-                            lease_expires_at,
+                            domain,
                             status""",
                     params,
                 )
                 rows = cur.fetchall()
                 if rows:
                     self._delete_queue_entries(cur, [row[0] for row in rows])
-                    self._replace_active_lease_rows(cur, [(row[0], row[1], row[8], row[9], row[10], row[11]) for row in rows])
+                    self._upsert_active_leases(
+                        cur,
+                        [(row[0], row[9], row[8], lease_token, lease_expires_at) for row in rows],
+                    )
             self._conn.commit()
         except Exception:
             self._conn.rollback()
@@ -1159,8 +1145,8 @@ class UrlLedger:
                 source_url=source_url,
                 added_at=added_at,
                 next_fetch_at=next_fetch_at,
-                lease_token=row_lease_token,
-                lease_expires_at=row_lease_expires_at,
+                lease_token=lease_token,
+                lease_expires_at=lease_expires_at,
             )
             for (
                 url,
@@ -1172,8 +1158,7 @@ class UrlLedger:
                 added_at,
                 next_fetch_at,
                 _queue_class,
-                row_lease_token,
-                row_lease_expires_at,
+                _domain,
                 _status,
             ) in rows
         ]
@@ -1191,16 +1176,14 @@ class UrlLedger:
                         next_fetch_at = %s,
                         last_success_at = %s,
                         fail_streak = 0,
-                        lease_token = NULL,
-                        lease_expires_at = NULL,
                         last_error = NULL
                     WHERE url = %s{lease_sql}
-                    RETURNING url, domain, queue_class, lease_token, lease_expires_at, status""",
+                    RETURNING url, domain, queue_class, status""",
                 (now, now, normalized, *lease_params),
             )
             rows = cur.fetchall()
             self._delete_queue_entries(cur, [row[0] for row in rows])
-            self._replace_active_lease_rows(cur, rows)
+            self._delete_active_leases(cur, [row[0] for row in rows])
             updated = bool(rows)
         self._conn.commit()
         return updated
@@ -1242,11 +1225,9 @@ class UrlLedger:
                         next_fetch_at = %s,
                         fail_streak = %s,
                         priority = %s,
-                        last_error = %s,
-                        lease_token = NULL,
-                        lease_expires_at = NULL
+                        last_error = %s
                     WHERE url = %s{lease_sql}
-                    RETURNING url, domain, priority, next_fetch_at, added_at, queue_class, lease_token, lease_expires_at, status""",
+                    RETURNING url, domain, priority, next_fetch_at, added_at, queue_class, status""",
                 (
                     status,
                     next_fetch_at,
@@ -1259,7 +1240,7 @@ class UrlLedger:
             )
             rows = cur.fetchall()
             self._replace_pending_queue_rows(cur, self._project_pending_queue_rows(rows))
-            self._replace_active_lease_rows(cur, [(row[0], row[1], row[5], row[6], row[7], row[8]) for row in rows])
+            self._delete_active_leases(cur, [row[0] for row in rows])
             updated = bool(rows)
         self._conn.commit()
         return updated
@@ -1272,15 +1253,13 @@ class UrlLedger:
                 """UPDATE frontier
                    SET status = %s,
                        next_fetch_at = %s,
-                       lease_token = NULL,
-                       lease_expires_at = NULL
                    WHERE status = %s
-                   RETURNING url, domain, priority, next_fetch_at, added_at, queue_class, lease_token, lease_expires_at, status""",
+                   RETURNING url, domain, priority, next_fetch_at, added_at, queue_class, status""",
                 (PENDING_STATUS, now, FAILED_STATUS),
             )
             rows = cur.fetchall()
             self._replace_pending_queue_rows(cur, self._project_pending_queue_rows(rows))
-            self._replace_active_lease_rows(cur, [(row[0], row[1], row[5], row[6], row[7], row[8]) for row in rows])
+            self._delete_active_leases(cur, [row[0] for row in rows])
             count = len(rows)
         self._conn.commit()
         return count
@@ -1379,7 +1358,7 @@ class UrlLedger:
                     UPDATE frontier
                     SET next_fetch_at = GREATEST(next_fetch_at, %s)
                     WHERE url IN (SELECT url FROM deferred)
-                    RETURNING url, domain, priority, next_fetch_at, added_at, queue_class, lease_token, lease_expires_at, status""",
+                    RETURNING url, domain, priority, next_fetch_at, added_at, queue_class, status""",
                 (
                     now,
                     low_priority_threshold,
@@ -1390,7 +1369,6 @@ class UrlLedger:
             )
             rows = cur.fetchall()
             self._replace_pending_queue_rows(cur, self._project_pending_queue_rows(rows))
-            self._replace_active_lease_rows(cur, [(row[0], row[1], row[5], row[6], row[7], row[8]) for row in rows])
             count = len(rows)
         self._conn.commit()
         return count
@@ -1425,20 +1403,18 @@ class UrlLedger:
                         queue_class = %s,
                         next_fetch_at = %s,
                         fail_streak = 0,
-                        last_error = NULL,
-                        lease_token = NULL,
-                        lease_expires_at = NULL
+                        last_error = NULL
                     WHERE url IN (
                         SELECT url
                         FROM ranked
                         WHERE rownum <= %s
                     )
-                    RETURNING url, domain, priority, next_fetch_at, added_at, queue_class, lease_token, lease_expires_at, status""",
+                    RETURNING url, domain, priority, next_fetch_at, added_at, queue_class, status""",
                 (seed_hosts, max_depth, QUEUE_EXPLORATION, now, per_host),
             )
             rows = cur.fetchall()
             self._replace_pending_queue_rows(cur, self._project_pending_queue_rows(rows))
-            self._replace_active_lease_rows(cur, [(row[0], row[1], row[5], row[6], row[7], row[8]) for row in rows])
+            self._delete_active_leases(cur, [row[0] for row in rows])
             count = len(rows)
         self._conn.commit()
         return count
@@ -1498,12 +1474,11 @@ class UrlLedger:
                     WHERE url = ANY(%s)
                       AND status = '{PENDING_STATUS}'
                       AND queue_class = '{QUEUE_BACKLOG}'
-                    RETURNING url, domain, priority, next_fetch_at, added_at, queue_class, lease_token, lease_expires_at, status""",
+                    RETURNING url, domain, priority, next_fetch_at, added_at, queue_class, status""",
                 (QUEUE_EXPLORATION, promoted_urls),
             )
             rows = cur.fetchall()
             self._replace_pending_queue_rows(cur, self._project_pending_queue_rows(rows))
-            self._replace_active_lease_rows(cur, [(row[0], row[1], row[5], row[6], row[7], row[8]) for row in rows])
             count = len(rows)
 
         self._conn.commit()
@@ -1563,12 +1538,11 @@ class UrlLedger:
                     WHERE url = ANY(%s)
                       AND status = '{PENDING_STATUS}'
                       AND queue_class = '{QUEUE_BACKLOG}'
-                    RETURNING url, domain, priority, next_fetch_at, added_at, queue_class, lease_token, lease_expires_at, status""",
+                    RETURNING url, domain, priority, next_fetch_at, added_at, queue_class, status""",
                 (QUEUE_EXPLORATION, promoted_urls),
             )
             rows = cur.fetchall()
             self._replace_pending_queue_rows(cur, self._project_pending_queue_rows(rows))
-            self._replace_active_lease_rows(cur, [(row[0], row[1], row[5], row[6], row[7], row[8]) for row in rows])
             count = len(rows)
 
         self._conn.commit()
@@ -1610,17 +1584,15 @@ class UrlLedger:
                        next_fetch_at = EXCLUDED.next_fetch_at,
                        priority = EXCLUDED.priority,
                        fail_streak = 0,
-                       last_error = NULL,
-                       lease_token = NULL,
-                       lease_expires_at = NULL
-                   RETURNING url, domain, priority, next_fetch_at, added_at, queue_class, lease_token, lease_expires_at, status""",
+                       last_error = NULL
+                   RETURNING url, domain, priority, next_fetch_at, added_at, queue_class, status""",
                 rows,
                 template="(%s, %s, %s, %s, %s, %s, %s, NULL, %s, %s, 'pending')",
                 page_size=200,
             )
             frontier_rows = cur.fetchall()
             self._replace_pending_queue_rows(cur, self._project_pending_queue_rows(frontier_rows))
-            self._replace_active_lease_rows(cur, [(row[0], row[1], row[5], row[6], row[7], row[8]) for row in frontier_rows])
+            self._delete_active_leases(cur, [row[0] for row in frontier_rows])
             affected = len(frontier_rows)
         self._conn.commit()
         return affected
