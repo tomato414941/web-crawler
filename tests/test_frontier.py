@@ -18,7 +18,7 @@ from crawler.frontier import (
     CrawlTask,
     DONE_STATUS,
     Frontier,
-    LEASED_STATUS,
+    PENDING_STATUS,
     QUEUE_BACKLOG,
     QUEUE_EXPLORATION,
     QUEUE_RECRAWL,
@@ -422,7 +422,7 @@ class TestFrontier:
             cur.execute("SELECT count(*) FROM frontier_lease_active WHERE url = %s", ("http://example.com/",))
             (active_count,) = cur.fetchone()
 
-        assert status == LEASED_STATUS
+        assert status == PENDING_STATUS
         assert active_count == 1
 
     def test_lease_batch(self, frontier):
@@ -489,7 +489,7 @@ class TestFrontier:
             )
             active_lease_token, active_lease_expires_at = cur.fetchone()
 
-        assert status == "leased"
+        assert status == PENDING_STATUS
         assert lease_token is None
         assert lease_expires_at is None
         assert active_lease_token == result.lease_token
