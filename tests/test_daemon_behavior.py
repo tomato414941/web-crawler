@@ -465,12 +465,11 @@ def test_ensure_exploration_supply_tops_up_when_exploration_queue_is_starved():
     assert frontier.upsert_calls == []
 
 
-def test_ensure_exploration_supply_falls_back_to_seed_host_requeue_when_host_promotion_is_insufficient():
+def test_ensure_exploration_supply_stays_idle_when_host_promotion_is_insufficient():
     class FakeFrontier:
         def __init__(self):
             self.upsert_calls = []
             self.host_promote_calls = []
-            self.seed_promote_calls = []
 
         def pending_count(self, queue_classes=None):
             if queue_classes == ["exploration"]:
@@ -494,10 +493,6 @@ def test_ensure_exploration_supply_falls_back_to_seed_host_requeue_when_host_pro
             self.upsert_calls.append((list(urls), priority))
             return len(urls)
 
-        def promote_seed_host_exploration(self, seed_hosts, per_host=1, max_depth=2):
-            self.seed_promote_calls.append((list(seed_hosts), per_host, max_depth))
-            return 1
-
     daemon = CrawlDaemon(
         seeds=[
             "https://www.iana.org/",
@@ -514,9 +509,6 @@ def test_ensure_exploration_supply_falls_back_to_seed_host_requeue_when_host_pro
 
     assert frontier.host_promote_calls == [(5, 1)]
     assert frontier.upsert_calls == []
-    assert frontier.seed_promote_calls == [
-        (["datatracker.ietf.org", "www.iana.org", "www.rfc-editor.org"], 1, 2)
-    ]
 
 
 def test_ensure_exploration_supply_does_not_top_up_when_exploration_queue_is_healthy():

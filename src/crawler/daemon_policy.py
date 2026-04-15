@@ -101,9 +101,8 @@ class DaemonSchedulerPolicy:
 
         needed = self._min_exploration_ready - exploration_ready
         needed_hosts = self._min_exploration_hosts - exploration_hosts
-        host_promoted = 0
         if hasattr(frontier, "promote_backlog_host_heads"):
-            host_promoted = frontier.promote_backlog_host_heads(
+            frontier.promote_backlog_host_heads(
                 max(
                     exploration_pending + max(needed, 0) + max(needed_hosts, 0),
                     self._min_exploration_ready,
@@ -111,9 +110,6 @@ class DaemonSchedulerPolicy:
                 ),
                 per_domain=1,
             )
-
-        if host_promoted < needed and hasattr(frontier, "promote_seed_host_exploration") and self._seed_hosts:
-            frontier.promote_seed_host_exploration(self._seed_hosts, per_host=1, max_depth=2)
 
     def promote_blocked_retry(self, frontier) -> int:
         """Restore a small cooled-down subset from blocked retry queue when ready work is thin."""
