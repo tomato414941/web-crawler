@@ -537,6 +537,49 @@ class Frontier:
             "ELSE 0 END"
         )
 
+    def _host_head_order_by_sql(self, alias: str) -> str:
+        """Return ORDER BY used to compare the best ready URL for each host."""
+        latency_penalty = self._latency_penalty_sql(alias)
+        return (
+            f"{alias}.next_fetch_at ASC, "
+            f"{latency_penalty} ASC, "
+            f"{alias}.added_at ASC, "
+            f"{alias}.priority DESC, "
+            f"{alias}.url ASC"
+        )
+
+    def _host_first_domain_selector_sql(
+        self,
+        *,
+        queue_class: str,
+        ready_sql: _ReadySql,
+    ) -> str:
+        """Return SQL that selects the next host to lease from before choosing a URL."""
+        table_name = self._queue_table_sql(queue_class)
+        host_head_order = self._host_head_order_by_sql("host_source")
+        return f"""candidate.domain = (
+                    SELECT selected.domain
+                    FROM (
+                        SELECT DISTINCT ON (host_source.domain)
+                            host_source.domain,
+                            host_source.next_fetch_at,
+                            {self._latency_penalty_sql("host_source")} AS latency_penalty,
+                            host_source.added_at,
+                            host_source.priority,
+                            host_source.url
+                        FROM {table_name} AS host_source
+                        WHERE {ready_sql.where}
+                        ORDER BY host_source.domain, {host_head_order}
+                    ) AS selected
+                    ORDER BY
+                        selected.next_fetch_at ASC,
+                        selected.latency_penalty ASC,
+                        selected.added_at ASC,
+                        selected.priority DESC,
+                        selected.url ASC
+                    LIMIT 1
+                )"""
+
     def _branch_breadth_candidate_from_sql(
         self,
         *,
@@ -903,27 +946,27 @@ class Frontier:
             exclude_branch_keys=exclude_branch_keys,
             exclude_domain_branches=exclude_domain_branches,
         )
+        where_sql = ready_sql.where
         if prioritize_breadth:
-            ranked_ready_sql = self._queue_ready_sql(
-                alias="ranked_source",
+            host_ready_sql = self._queue_ready_sql(
+                alias="host_source",
                 now=now,
                 domain=domain,
                 exclude_domains=exclude_domains,
                 exclude_branch_keys=exclude_branch_keys,
                 exclude_domain_branches=exclude_domain_branches,
             )
-            candidate_from = self._branch_breadth_candidate_from_sql(
-                queue_class=normalized_queue_classes[0],
-                ranked_ready_sql=ranked_ready_sql,
+            candidate_from = f"FROM {self._queue_table_sql(normalized_queue_classes[0])} AS candidate"
+            where_sql = (
+                f"{ready_sql.where} AND "
+                f"{self._host_first_domain_selector_sql(queue_class=normalized_queue_classes[0], ready_sql=host_ready_sql)}"
             )
-            candidate_from_params = list(ranked_ready_sql.params)
+            candidate_from_params = list(host_ready_sql.params)
+            order_by = self._lease_order_by_sql("candidate", prioritize_breadth=True)
         else:
             candidate_from = f"FROM {self._queue_table_sql(normalized_queue_classes[0])} AS candidate"
-        if prioritize_breadth:
-            order_by = self._branch_breadth_order_by_sql("candidate")
-        else:
             order_by = self._lease_order_by_sql("candidate", prioritize_breadth=prioritize_breadth)
-        params: list[object] = [lease_token, lease_expires_at, *candidate_from_params, *ready_sql.params]
+        params: list[object] = [lease_token, lease_expires_at, *ready_sql.params, *candidate_from_params]
 
         try:
             self._recover_leased_locked(now, expired_only=True)
@@ -936,7 +979,7 @@ class Frontier:
                         WHERE url = (
                             SELECT candidate.url
                             {candidate_from}
-                            WHERE {ready_sql.where}
+                            WHERE {where_sql}
                             ORDER BY {order_by}
                             LIMIT 1
                             FOR UPDATE OF candidate SKIP LOCKED
