@@ -396,9 +396,7 @@ class Frontier:
             return QUEUE_BACKLOG
         if known_count >= EXPLORATION_DOMAIN_BUDGET:
             return QUEUE_BACKLOG
-        if task.discovery_kind == DISCOVERY_SAME_HOST:
-            return QUEUE_EXPLORATION if task.depth <= 1 else QUEUE_BACKLOG
-        if task.discovery_kind in {DISCOVERY_SEED_HOST, DISCOVERY_EXTERNAL}:
+        if task.discovery_kind in {DISCOVERY_SAME_HOST, DISCOVERY_SEED_HOST, DISCOVERY_EXTERNAL}:
             return QUEUE_EXPLORATION if task.depth <= 3 else QUEUE_BACKLOG
         if task.depth <= 1:
             return QUEUE_EXPLORATION
