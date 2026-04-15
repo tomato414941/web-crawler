@@ -18,7 +18,6 @@ from .discovery import (
     ARCHETYPE_REDIRECT_HUB,
     ARCHETYPE_REGISTRY_LISTING,
     DISCOVERY_SEED,
-    discovery_rank,
 )
 from .frontier_observability import FrontierObservability, FrontierReadiness
 from .frontier_quarantine import FrontierQuarantine
@@ -401,23 +400,21 @@ class UrlLedger:
             return QUEUE_BACKLOG
         return QUEUE_RECRAWL
 
-    def _is_better_task(self, candidate: CrawlTask, current: CrawlTask) -> bool:
-        """Return True when candidate should replace current task metadata."""
-        if candidate.priority != current.priority:
-            return candidate.priority > current.priority
-        return discovery_rank(candidate.discovery_kind) > discovery_rank(current.discovery_kind)
-
     def _merge_task(self, current: CrawlTask, candidate: CrawlTask) -> CrawlTask:
         """Merge duplicate task metadata before bulk upsert."""
-        preferred = candidate if self._is_better_task(candidate, current) else current
         return CrawlTask(
-            url=preferred.url,
+            url=current.url,
             depth=min(current.depth, candidate.depth),
-            priority=preferred.priority,
+            priority=max(current.priority, candidate.priority),
             queue_class=self._merge_queue_class(current.queue_class, candidate.queue_class),
-            discovery_kind=preferred.discovery_kind,
-            archetype=preferred.archetype,
-            source_url=preferred.source_url or current.source_url or candidate.source_url,
+            discovery_kind=current.discovery_kind,
+            archetype=(
+                candidate.archetype
+                if current.archetype == ARCHETYPE_GENERIC_PAGE
+                and candidate.archetype != ARCHETYPE_GENERIC_PAGE
+                else current.archetype
+            ),
+            source_url=current.source_url or candidate.source_url,
             added_at=min(current.added_at, candidate.added_at),
             next_fetch_at=min(current.next_fetch_at, candidate.next_fetch_at),
         )
@@ -817,8 +814,6 @@ class UrlLedger:
                 )
             )
 
-        existing_rank = self._discovery_rank_sql("frontier.discovery_kind")
-        new_rank = self._discovery_rank_sql("EXCLUDED.discovery_kind")
         try:
             with self._conn.cursor() as cur:
                 psycopg2.extras.execute_values(
@@ -838,15 +833,9 @@ class UrlLedger:
                                    THEN '{QUEUE_BACKLOG}'
                                ELSE '{QUEUE_RECRAWL}'
                            END,
-                           discovery_kind = CASE
-                               WHEN {new_rank} > {existing_rank}
-                                   THEN EXCLUDED.discovery_kind
-                               ELSE frontier.discovery_kind
-                           END,
                            archetype = CASE
-                               WHEN EXCLUDED.priority > frontier.priority
-                                   THEN EXCLUDED.archetype
-                               WHEN {new_rank} > {existing_rank}
+                               WHEN frontier.archetype = '{ARCHETYPE_GENERIC_PAGE}'
+                                    AND EXCLUDED.archetype != '{ARCHETYPE_GENERIC_PAGE}'
                                    THEN EXCLUDED.archetype
                                ELSE frontier.archetype
                            END,
@@ -856,8 +845,11 @@ class UrlLedger:
                            next_fetch_at = LEAST(frontier.next_fetch_at, EXCLUDED.next_fetch_at)
                        WHERE
                            EXCLUDED.priority > frontier.priority
-                           OR {new_rank} > {existing_rank}
                            OR EXCLUDED.depth < frontier.depth
+                           OR (
+                               frontier.archetype = '{ARCHETYPE_GENERIC_PAGE}'
+                               AND EXCLUDED.archetype != '{ARCHETYPE_GENERIC_PAGE}'
+                           )
                            OR (frontier.source_url IS NULL AND EXCLUDED.source_url IS NOT NULL)
                            OR EXCLUDED.next_fetch_at < frontier.next_fetch_at
                        RETURNING url, domain, priority, next_fetch_at, added_at, queue_class, status""",

@@ -152,7 +152,7 @@ class TestFrontier:
         ]
         assert frontier.add_many(tasks) == 2
 
-    def test_add_upgrades_existing_metadata_when_better_discovery_arrives(self, frontier):
+    def test_add_preserves_first_seen_discovery_kind_when_priority_improves(self, frontier):
         assert frontier.add(
             CrawlTask(
                 url="http://example.com/page",
@@ -181,7 +181,7 @@ class TestFrontier:
             priority, discovery_kind, source_url = cur.fetchone()
 
         assert priority == 1.25
-        assert discovery_kind == DISCOVERY_SAME_HOST
+        assert discovery_kind == DISCOVERY_EXTERNAL
         assert source_url == "http://other.com"
 
     def test_add_persists_discovery_kind(self, frontier):
