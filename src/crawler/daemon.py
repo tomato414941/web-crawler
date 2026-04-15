@@ -420,19 +420,19 @@ class CrawlDaemon:
         finally:
             runtime_storage.close()
 
-    def _ensure_seeds(self, frontier: Frontier):
-        """Bootstrap seeds, then top up exploration from novel backlog branches."""
+    def _ensure_exploration_supply(self, frontier: Frontier):
+        """Keep exploration supplied from existing pending work and bootstrap when empty."""
         before_pending = frontier.pending_count()
         before_ready = frontier.ready_count(queue_classes=["exploration"])
         before_exploration_pending = frontier.pending_count(queue_classes=["exploration"])
-        self._policy.ensure_seeds(frontier)
+        self._policy.ensure_exploration_supply(frontier)
         after_pending = frontier.pending_count()
         after_ready = frontier.ready_count(queue_classes=["exploration"])
         after_exploration_pending = frontier.pending_count(queue_classes=["exploration"])
         if after_pending == before_pending and after_ready == before_ready:
             return
         logger.info(
-            "Topped up exploration: pending_total=%d->%d ready_exploration=%d->%d pending_exploration=%d->%d target_ready=%d",
+            "Ensured exploration supply: pending_total=%d->%d ready_exploration=%d->%d pending_exploration=%d->%d target_ready=%d",
             before_pending,
             after_pending,
             before_ready,

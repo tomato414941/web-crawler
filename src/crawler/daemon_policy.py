@@ -53,7 +53,7 @@ class DaemonSchedulerPolicy:
         }
 
         metrics["rebalanced_before"] = self._rebalance_blocked(frontier)
-        self.ensure_seeds(frontier)
+        self.ensure_exploration_supply(frontier)
         if recrawl_stale is not None:
             recrawl_stale()
         metrics["deferred"] = frontier.defer_overcrowded_backlog(
@@ -84,8 +84,8 @@ class DaemonSchedulerPolicy:
             "promoted": promoted,
         }
 
-    def ensure_seeds(self, frontier) -> None:
-        """Bootstrap seeds, then top up exploration from novel backlog branches."""
+    def ensure_exploration_supply(self, frontier) -> None:
+        """Bootstrap an empty frontier, then keep exploration supplied from existing pending work."""
         if frontier.pending_count() == 0:
             frontier.upsert_seeds(self._seeds, priority=2.0)
             return
