@@ -52,18 +52,18 @@ _META_ROBOTS_PATTERN = re.compile(
 
 
 def _split_worker_pools(concurrency: int) -> tuple[int, int, int]:
-    """Split worker capacity into exploration, backlog, and recrawl pools."""
+    """Split worker capacity into exploration and recrawl pools."""
     total = max(1, concurrency)
     if total == 1:
         return 1, 0, 0
     if total == 2:
-        return 1, 1, 0
+        return 1, 0, 1
     if total == 3:
-        return 2, 1, 0
-    exploration = max(2, math.ceil(total * 0.67))
-    exploration = min(exploration, total - 2)
-    backlog = 1
-    recrawl = total - exploration - backlog
+        return 2, 0, 1
+    exploration = max(2, math.ceil(total * 0.75))
+    exploration = min(exploration, total - 1)
+    backlog = 0
+    recrawl = total - exploration
     if recrawl <= 0:
         recrawl = 1
         exploration = total - backlog - recrawl
