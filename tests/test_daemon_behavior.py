@@ -465,7 +465,7 @@ def test_ensure_seeds_tops_up_when_exploration_queue_is_starved():
     assert frontier.upsert_calls == []
 
 
-def test_ensure_seeds_falls_back_to_seed_reinsertion_when_host_promotion_is_insufficient():
+def test_ensure_seeds_falls_back_to_seed_host_requeue_when_host_promotion_is_insufficient():
     class FakeFrontier:
         def __init__(self):
             self.upsert_calls = []
@@ -513,13 +513,7 @@ def test_ensure_seeds_falls_back_to_seed_reinsertion_when_host_promotion_is_insu
     daemon._ensure_seeds(frontier)
 
     assert frontier.host_promote_calls == [(5, 1)]
-    assert frontier.upsert_calls == [
-        ([
-            "https://www.iana.org/",
-            "https://datatracker.ietf.org/",
-            "https://www.rfc-editor.org/",
-        ], 2.0)
-    ]
+    assert frontier.upsert_calls == []
     assert frontier.seed_promote_calls == [
         (["datatracker.ietf.org", "www.iana.org", "www.rfc-editor.org"], 1, 2)
     ]
@@ -565,7 +559,7 @@ def test_ensure_seeds_does_not_top_up_when_exploration_queue_is_healthy():
     assert frontier.upsert_calls == []
 
 
-def test_ensure_seeds_reinserts_when_exploration_pending_is_high_but_ready_is_zero():
+def test_ensure_seeds_does_not_reinsert_when_exploration_pending_is_high_but_ready_is_zero():
     class FakeFrontier:
         def __init__(self):
             self.upsert_calls = []
@@ -609,14 +603,7 @@ def test_ensure_seeds_reinserts_when_exploration_pending_is_high_but_ready_is_ze
     daemon._ensure_seeds(frontier)
 
     assert frontier.host_promote_calls == [(29, 1)]
-    assert frontier.upsert_calls == [
-        ([
-            "https://www.wikipedia.org/",
-            "https://www.wikidata.org/",
-            "https://www.openstreetmap.org/",
-            "https://github.com/",
-        ], 2.0)
-    ]
+    assert frontier.upsert_calls == []
 
 
 def test_ensure_seeds_tops_up_when_exploration_host_diversity_is_low():
@@ -662,13 +649,7 @@ def test_ensure_seeds_tops_up_when_exploration_host_diversity_is_low():
     daemon._ensure_seeds(frontier)
 
     assert frontier.host_promote_calls == [(22, 1)]
-    assert frontier.upsert_calls == [
-        ([
-            "https://www.iana.org/",
-            "https://datatracker.ietf.org/",
-            "https://www.rfc-editor.org/",
-        ], 2.0)
-    ]
+    assert frontier.upsert_calls == []
 
 
 def test_promote_blocked_retry_restores_small_subset_when_ready_is_thin():
