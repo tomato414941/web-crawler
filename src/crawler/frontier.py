@@ -397,7 +397,7 @@ class Frontier:
         if known_count >= EXPLORATION_DOMAIN_BUDGET:
             return QUEUE_BACKLOG
         if task.discovery_kind == DISCOVERY_SAME_HOST:
-            return QUEUE_EXPLORATION if task.depth <= 2 else QUEUE_BACKLOG
+            return QUEUE_EXPLORATION if task.depth <= 1 else QUEUE_BACKLOG
         if task.discovery_kind in {DISCOVERY_SEED_HOST, DISCOVERY_EXTERNAL}:
             return QUEUE_EXPLORATION if task.depth <= 3 else QUEUE_BACKLOG
         if task.depth <= 1:
@@ -1366,7 +1366,7 @@ class Frontier:
                         WHERE domain = ANY(%s)
                           AND status = '{DONE_STATUS}'
                           AND depth <= %s
-                          AND discovery_kind IN ('seed_host', 'same_host')
+                          AND discovery_kind = 'seed_host'
                     )
                     UPDATE frontier
                     SET status = '{PENDING_STATUS}',
