@@ -112,8 +112,6 @@ class DaemonSchedulerPolicy:
                 per_domain=1,
             )
 
-        if host_promoted < needed:
-            frontier.upsert_seeds(self._seeds, priority=2.0)
         if host_promoted < needed and hasattr(frontier, "promote_seed_host_exploration") and self._seed_hosts:
             frontier.promote_seed_host_exploration(self._seed_hosts, per_host=1, max_depth=2)
 
