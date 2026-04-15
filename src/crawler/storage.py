@@ -47,7 +47,6 @@ PAGES_REQUIRED_COLUMNS = {
 FRONTIER_STATS_REQUIRED_COLUMNS = {
     "status",
     "queue_class",
-    "discovery_kind",
     "archetype",
     "domain",
     "last_error",
@@ -336,7 +335,6 @@ class PgStorage:
                 pending_queue_classes: dict[str, int] = {}
                 blocked_queue_classes: dict[str, int] = {}
                 readiness: dict[str, object] = {}
-                discovery_kinds: dict[str, int] = {}
                 archetypes: dict[str, int] = {}
                 top_pending_domains: list[dict[str, object]] = []
                 top_blocked_domains: list[dict[str, object]] = []
@@ -399,13 +397,6 @@ class PgStorage:
                            GROUP BY queue_class"""
                     )
                     queue_classes = {queue_class: count for queue_class, count in cur.fetchall()}
-
-                    cur.execute(
-                        """SELECT discovery_kind, COUNT(*)
-                           FROM public.frontier
-                           GROUP BY discovery_kind"""
-                    )
-                    discovery_kinds = {kind: count for kind, count in cur.fetchall()}
 
                     cur.execute(
                         """SELECT archetype, COUNT(*)
@@ -694,7 +685,6 @@ class PgStorage:
             "pending_queue_classes": pending_queue_classes,
             "blocked_queue_classes": blocked_queue_classes,
             "readiness": readiness,
-            "discovery_kinds": discovery_kinds,
             "archetypes": archetypes,
             "top_page_domains": top_page_domains,
             "top_pending_domains": top_pending_domains,

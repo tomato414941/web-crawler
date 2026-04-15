@@ -10,9 +10,6 @@ from crawler.domain_store import DomainStore
 from crawler.discovery import (
     ARCHETYPE_REDIRECT_HUB,
     ARCHETYPE_REGISTRY_LISTING,
-    DISCOVERY_EXTERNAL,
-    DISCOVERY_SAME_HOST,
-    DISCOVERY_SEED_HOST,
 )
 from crawler.frontier import (
     CrawlTask,
@@ -152,13 +149,12 @@ class TestFrontier:
         ]
         assert frontier.add_many(tasks) == 2
 
-    def test_add_preserves_first_seen_discovery_kind_when_priority_improves(self, frontier):
+    def test_add_preserves_first_seen_source_url_when_priority_improves(self, frontier):
         assert frontier.add(
             CrawlTask(
                 url="http://example.com/page",
                 depth=1,
                 priority=0.8,
-                discovery_kind=DISCOVERY_EXTERNAL,
                 source_url="http://other.com",
             )
         )
@@ -168,42 +164,22 @@ class TestFrontier:
                 url="http://example.com/page",
                 depth=1,
                 priority=1.25,
-                discovery_kind=DISCOVERY_SAME_HOST,
                 source_url="http://example.com/",
             )
         )
 
         with frontier._conn.cursor() as cur:
             cur.execute(
-                "SELECT priority, discovery_kind, source_url FROM frontier WHERE url = %s",
+                "SELECT priority, source_url FROM frontier WHERE url = %s",
                 ("http://example.com/page",),
             )
-            priority, discovery_kind, source_url = cur.fetchone()
+            priority, source_url = cur.fetchone()
 
         assert priority == 1.25
-        assert discovery_kind == DISCOVERY_EXTERNAL
         assert source_url == "http://other.com"
 
-    def test_add_persists_discovery_kind(self, frontier):
-        frontier.add(
-            CrawlTask(
-                url="http://example.com",
-                depth=0,
-                discovery_kind=DISCOVERY_SEED_HOST,
-            )
-        )
-
-        with frontier._conn.cursor() as cur:
-            cur.execute(
-                "SELECT discovery_kind FROM frontier WHERE url = %s",
-                ("http://example.com/",),
-            )
-            (discovery_kind,) = cur.fetchone()
-
-        assert discovery_kind == DISCOVERY_SEED_HOST
-
     def test_add_classifies_shallow_urls_as_backlog(self, frontier):
-        frontier.add(CrawlTask(url="http://example.com", depth=1, discovery_kind=DISCOVERY_SAME_HOST))
+        frontier.add(CrawlTask(url="http://example.com", depth=1))
 
         with frontier._conn.cursor() as cur:
             cur.execute(
@@ -218,7 +194,7 @@ class TestFrontier:
         assert queue_count == 0
 
     def test_add_classifies_same_host_urls_as_backlog_through_depth_three(self, frontier):
-        frontier.add(CrawlTask(url="http://example.com/guide", depth=3, discovery_kind=DISCOVERY_SAME_HOST))
+        frontier.add(CrawlTask(url="http://example.com/guide", depth=3))
 
         with frontier._conn.cursor() as cur:
             cur.execute(
@@ -230,7 +206,7 @@ class TestFrontier:
         assert queue_class == QUEUE_BACKLOG
 
     def test_add_classifies_same_host_urls_as_backlog_from_depth_four(self, frontier):
-        frontier.add(CrawlTask(url="http://example.com/guide", depth=4, discovery_kind=DISCOVERY_SAME_HOST))
+        frontier.add(CrawlTask(url="http://example.com/guide", depth=4))
 
         with frontier._conn.cursor() as cur:
             cur.execute(
@@ -242,7 +218,7 @@ class TestFrontier:
         assert queue_class == QUEUE_BACKLOG
 
     def test_add_classifies_seed_host_urls_as_backlog_through_depth_two(self, frontier):
-        frontier.add(CrawlTask(url="http://docs.example.com/guide", depth=2, discovery_kind=DISCOVERY_SEED_HOST))
+        frontier.add(CrawlTask(url="http://docs.example.com/guide", depth=2))
 
         with frontier._conn.cursor() as cur:
             cur.execute(
@@ -254,7 +230,7 @@ class TestFrontier:
         assert queue_class == QUEUE_BACKLOG
 
     def test_add_classifies_seed_host_urls_as_backlog_through_depth_three(self, frontier):
-        frontier.add(CrawlTask(url="http://docs.example.com/guide", depth=3, discovery_kind=DISCOVERY_SEED_HOST))
+        frontier.add(CrawlTask(url="http://docs.example.com/guide", depth=3))
 
         with frontier._conn.cursor() as cur:
             cur.execute(
@@ -294,7 +270,6 @@ class TestFrontier:
             CrawlTask(
                 url="http://example.com/index",
                 depth=1,
-                discovery_kind=DISCOVERY_SAME_HOST,
                 archetype=ARCHETYPE_REGISTRY_LISTING,
             )
         )
@@ -310,9 +285,9 @@ class TestFrontier:
 
     def test_add_classifies_known_domains_as_backlog_even_when_shallow(self, frontier):
         for i in range(8):
-            frontier.add(CrawlTask(url=f"http://example.com/known-{i}", depth=0, discovery_kind=DISCOVERY_SAME_HOST))
+            frontier.add(CrawlTask(url=f"http://example.com/known-{i}", depth=0))
 
-        frontier.add(CrawlTask(url="http://example.com/new-branch", depth=1, discovery_kind=DISCOVERY_SAME_HOST))
+        frontier.add(CrawlTask(url="http://example.com/new-branch", depth=1))
 
         with frontier._conn.cursor() as cur:
             cur.execute(
@@ -328,7 +303,6 @@ class TestFrontier:
             CrawlTask(
                 url="http://example.com/go/rfc",
                 depth=1,
-                discovery_kind=DISCOVERY_EXTERNAL,
                 archetype=ARCHETYPE_REDIRECT_HUB,
             )
         )
@@ -343,7 +317,7 @@ class TestFrontier:
         assert queue_class == QUEUE_BACKLOG
 
     def test_add_classifies_external_deep_urls_as_backlog(self, frontier):
-        frontier.add(CrawlTask(url="http://external.example.com/deep", depth=3, discovery_kind=DISCOVERY_EXTERNAL))
+        frontier.add(CrawlTask(url="http://external.example.com/deep", depth=3))
 
         with frontier._conn.cursor() as cur:
             cur.execute(
@@ -355,7 +329,7 @@ class TestFrontier:
         assert queue_class == QUEUE_BACKLOG
 
     def test_add_classifies_deep_urls_as_backlog(self, frontier):
-        frontier.add(CrawlTask(url="http://example.com/deep", depth=3, discovery_kind=DISCOVERY_SAME_HOST))
+        frontier.add(CrawlTask(url="http://example.com/deep", depth=3))
 
         with frontier._conn.cursor() as cur:
             cur.execute(
@@ -563,15 +537,9 @@ class TestFrontier:
         assert frontier.pending_count() == 1
 
         with frontier._conn.cursor() as cur:
-            cur.execute(
-                "SELECT discovery_kind FROM frontier WHERE url = %s",
-                ("http://example.com/",),
-            )
-            (discovery_kind,) = cur.fetchone()
             cur.execute("SELECT COUNT(*) FROM frontier_queue_exploration WHERE url = %s", ("http://example.com/",))
             (queue_count,) = cur.fetchone()
 
-        assert discovery_kind == "seed"
         assert queue_count == 1
 
     def test_stats(self, frontier):
