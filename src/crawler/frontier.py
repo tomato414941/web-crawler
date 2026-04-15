@@ -150,8 +150,8 @@ class _ReadySql:
     ready_at: str
 
 
-class Frontier:
-    """URL frontier with PostgreSQL persistence. Dedup via ON CONFLICT."""
+class UrlLedger:
+    """Durable URL ledger with PostgreSQL persistence. Dedup via ON CONFLICT."""
 
     def __init__(
         self,
@@ -1674,3 +1674,7 @@ class Frontier:
         with self._conn.cursor() as cur:
             cur.execute("SELECT 1 FROM frontier WHERE url = %s LIMIT 1", (normalized,))
             return cur.fetchone() is not None
+
+
+# Temporary compatibility alias while callers migrate away from the frontier name.
+Frontier = UrlLedger
