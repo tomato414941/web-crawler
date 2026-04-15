@@ -21,12 +21,6 @@ SAME_HOST_PRIORITY = 1.25
 SEED_HOST_PRIORITY = 1.1
 EXTERNAL_PRIORITY = 0.8
 
-_DISCOVERY_RANKS = {
-    DISCOVERY_EXTERNAL: 1,
-    DISCOVERY_SEED_HOST: 2,
-    DISCOVERY_SAME_HOST: 3,
-    DISCOVERY_SEED: 4,
-}
 _ARCHETYPE_ADJUSTMENTS = {
     ARCHETYPE_GENERIC_PAGE: 0.0,
     ARCHETYPE_DOCUMENT_PAGE: 0.15,
@@ -78,10 +72,9 @@ class PageSignals:
 
 @dataclass(frozen=True)
 class EnqueueDecision:
-    """Priority and provenance assigned when enqueueing a URL."""
+    """Priority and archetype assigned when enqueueing a URL."""
 
     priority: float
-    discovery_kind: str
     archetype: str
 
 
@@ -93,11 +86,6 @@ def host_key(url: str) -> str:
 def seed_hosts_from_urls(urls: list[str]) -> set[str]:
     """Extract normalized host keys from seed URLs."""
     return {host for host in (host_key(url) for url in urls) if host}
-
-
-def discovery_rank(discovery_kind: str) -> int:
-    """Return an ordering score for discovery provenance."""
-    return _DISCOVERY_RANKS.get(discovery_kind, 0)
 
 
 def _normalized_path(url: str) -> str:
@@ -217,7 +205,6 @@ def rank_seed_url(url: str) -> EnqueueDecision:
     """Assign the highest priority to explicit seed URLs."""
     return EnqueueDecision(
         priority=SEED_PRIORITY,
-        discovery_kind=DISCOVERY_SEED,
         archetype=classify_url_archetype(url),
     )
 
@@ -243,7 +230,6 @@ def rank_discovered_url(
         )
         return EnqueueDecision(
             priority=priority,
-            discovery_kind=DISCOVERY_SAME_HOST,
             archetype=archetype,
         )
 
@@ -256,7 +242,6 @@ def rank_discovered_url(
         )
         return EnqueueDecision(
             priority=priority,
-            discovery_kind=DISCOVERY_SEED_HOST,
             archetype=archetype,
         )
 
@@ -268,6 +253,5 @@ def rank_discovered_url(
     )
     return EnqueueDecision(
         priority=priority,
-        discovery_kind=DISCOVERY_EXTERNAL,
         archetype=archetype,
     )

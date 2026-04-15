@@ -421,7 +421,6 @@ class CrawlerEngine:
             depth=0,
             priority=decision.priority,
             queue_class=QUEUE_EXPLORATION,
-            discovery_kind=decision.discovery_kind,
             archetype=decision.archetype,
         )
 
@@ -468,7 +467,6 @@ class CrawlerEngine:
                     url=link,
                     depth=depth,
                     priority=decision.priority,
-                    discovery_kind=decision.discovery_kind,
                     archetype=decision.archetype,
                     source_url=parent_url,
                 )
