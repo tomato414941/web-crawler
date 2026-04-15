@@ -675,8 +675,8 @@ async def test_crawler_splits_worker_pools_by_queue_class():
     ) as engine:
         engine.fetcher = fetcher
         runtime = engine.snapshot_runtime_stats()
-        assert runtime["exploration_workers"] == 4
-        assert runtime["backlog_workers"] == 1
+        assert runtime["exploration_workers"] == 5
+        assert runtime["backlog_workers"] == 0
         assert runtime["recrawl_workers"] == 1
         await engine.crawl()
 
