@@ -84,14 +84,20 @@ class FakeFrontier:
             batch_counts[domain] = batch_counts.get(domain, 0) + 1
         return prepared
 
-    def add(self, task: CrawlTask):
+    def place(self, task: CrawlTask):
         self.tasks.append(task)
         return True
 
-    def add_many(self, tasks: list[CrawlTask]):
+    def place_many(self, tasks: list[CrawlTask]):
         self.added_batches.append(tasks)
         self.tasks.extend(tasks)
         return len(tasks)
+
+    def add(self, task: CrawlTask):
+        return self.place(task)
+
+    def add_many(self, tasks: list[CrawlTask]):
+        return self.place_many(tasks)
 
     def mark_done(self, url: str, lease_token: str | None = None):
         self.done.append(url)
