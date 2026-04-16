@@ -411,18 +411,23 @@ class TestUrlLedger:
 
         with frontier._conn.cursor() as cur:
             cur.execute(
-                f"SELECT lease_token, lease_expires_at FROM {URL_LEDGER_TABLE} WHERE url = %s",
-                (result.url,),
+                """
+                SELECT column_name
+                FROM information_schema.columns
+                WHERE table_schema = 'public'
+                  AND table_name = 'url_ledger'
+                  AND column_name IN ('lease_token', 'lease_expires_at')
+                ORDER BY column_name
+                """
             )
-            lease_token, lease_expires_at = cur.fetchone()
+            lease_columns = [column_name for (column_name,) in cur.fetchall()]
             cur.execute(
                 "SELECT lease_token, lease_expires_at FROM active_leases WHERE url = %s",
                 (result.url,),
             )
             active_lease_token, active_lease_expires_at = cur.fetchone()
 
-        assert lease_token is None
-        assert lease_expires_at is None
+        assert lease_columns == []
         assert active_lease_token == result.lease_token
         assert active_lease_expires_at == result.lease_expires_at
 
@@ -432,12 +437,12 @@ class TestUrlLedger:
 
         with frontier._conn.cursor() as cur:
             cur.execute(
-                f"UPDATE {URL_LEDGER_TABLE} SET lease_token = %s WHERE url = %s",
+                "UPDATE active_leases SET lease_token = %s WHERE url = %s",
                 ("tampered", result.url),
             )
         frontier._conn.commit()
 
-        assert frontier.mark_done(result.url, lease_token=result.lease_token) is True
+        assert frontier.mark_done(result.url, lease_token=result.lease_token) is False
 
     def test_recover_leased_uses_active_lease_table(self, frontier):
         frontier.add(CrawlTask(url="http://example.com"))
@@ -445,7 +450,7 @@ class TestUrlLedger:
 
         with frontier._conn.cursor() as cur:
             cur.execute(
-                f"UPDATE {URL_LEDGER_TABLE} SET lease_expires_at = %s WHERE url = %s",
+                "UPDATE active_leases SET lease_expires_at = %s WHERE url = %s",
                 (time.time() + 3600, result.url),
             )
         frontier._conn.commit()

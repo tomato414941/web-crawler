@@ -15,14 +15,43 @@ CREATE INDEX IF NOT EXISTS idx_frontier_lease_active_expiry
 
 DELETE FROM frontier_lease_active;
 
-INSERT INTO frontier_lease_active (url, domain, queue_class, lease_token, lease_expires_at)
-SELECT url, domain, queue_class, lease_token, lease_expires_at
-FROM url_ledger
-WHERE status = 'leased'
-  AND lease_token IS NOT NULL
-  AND lease_expires_at IS NOT NULL
-ON CONFLICT (url) DO UPDATE
-SET domain = EXCLUDED.domain,
-    queue_class = EXCLUDED.queue_class,
-    lease_token = EXCLUDED.lease_token,
-    lease_expires_at = EXCLUDED.lease_expires_at;
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1
+        FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND table_name = 'url_ledger'
+          AND column_name = 'queue_class'
+    ) AND EXISTS (
+        SELECT 1
+        FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND table_name = 'url_ledger'
+          AND column_name = 'status'
+    ) AND EXISTS (
+        SELECT 1
+        FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND table_name = 'url_ledger'
+          AND column_name = 'lease_token'
+    ) AND EXISTS (
+        SELECT 1
+        FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND table_name = 'url_ledger'
+          AND column_name = 'lease_expires_at'
+    ) THEN
+        INSERT INTO frontier_lease_active (url, domain, queue_class, lease_token, lease_expires_at)
+        SELECT url, domain, queue_class, lease_token, lease_expires_at
+        FROM url_ledger
+        WHERE status = 'leased'
+          AND lease_token IS NOT NULL
+          AND lease_expires_at IS NOT NULL
+        ON CONFLICT (url) DO UPDATE
+        SET domain = EXCLUDED.domain,
+            queue_class = EXCLUDED.queue_class,
+            lease_token = EXCLUDED.lease_token,
+            lease_expires_at = EXCLUDED.lease_expires_at;
+    END IF;
+END $$;

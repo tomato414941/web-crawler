@@ -1,6 +1,10 @@
 # Crawler State Model
 
-This document defines the minimal durable state the crawler needs in order to make correct scheduling decisions. It is conceptual and is meant to guide future refactors, not to describe the current implementation.
+This document defines a practical state model for future refactors. It does not describe the current implementation directly, but it is also not the top-level idealized model. Its job is to describe which states the system should treat as source-of-truth in order to make correct scheduling decisions.
+
+The higher-level principles live in [crawler-model.md](/home/dev/projects/web-crawler/docs/crawler-model.md).
+
+This document should be read as a transition/convergence model that helps move the current crawler toward that ideal.
 
 ## Goals
 
@@ -8,6 +12,7 @@ This document defines the minimal durable state the crawler needs in order to ma
 - Separate durable facts from current scheduling state.
 - Make it obvious which values are source-of-truth and which are derived.
 - Avoid storing the same meaning in multiple places.
+- Provide a practical intermediate model for moving the current crawler toward the ideal one.
 
 ## Core Rule
 

@@ -26,8 +26,6 @@ CREATE TABLE IF NOT EXISTS url_ledger (
     next_fetch_at DOUBLE PRECISION NOT NULL DEFAULT 0,
     last_success_at DOUBLE PRECISION,
     fail_streak INTEGER NOT NULL DEFAULT 0,
-    lease_token TEXT,
-    lease_expires_at DOUBLE PRECISION,
     last_error TEXT
 );
 
@@ -37,8 +35,6 @@ CREATE INDEX IF NOT EXISTS idx_url_ledger_pending
     ON url_ledger(priority DESC, next_fetch_at ASC, added_at ASC) WHERE status = 'pending';
 CREATE INDEX IF NOT EXISTS idx_url_ledger_pending_domain
     ON url_ledger(domain) WHERE status = 'pending';
-CREATE INDEX IF NOT EXISTS idx_url_ledger_leased_expiry
-    ON url_ledger(lease_expires_at) WHERE status = 'leased';
 
 CREATE TABLE IF NOT EXISTS domain_state (
     host_key TEXT PRIMARY KEY,
