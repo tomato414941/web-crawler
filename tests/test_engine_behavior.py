@@ -12,7 +12,6 @@ from crawler.url_ledger import CrawlTask
 class FakeFrontier:
     def __init__(self, tasks: list[CrawlTask], known_counts: dict[str, int] | None = None):
         self.tasks = list(tasks)
-        self.known_counts = known_counts or {}
         self.done: list[str] = []
         self.failed: list[str] = []
         self.failures: list[dict] = []
@@ -39,22 +38,12 @@ class FakeFrontier:
             return self.tasks.pop(index)
         return None
 
-    def get_domain_known_counts(self, domains: set[str]):
-        return {domain: self.known_counts.get(domain, 0) for domain in domains}
-
     def preview_tasks(self, tasks: list[CrawlTask]):
         prepared = []
-        domain_counts = {task.url.split('/')[2]: self.known_counts.get(task.url.split('/')[2], 0) for task in tasks}
-        batch_counts = {}
         for task in tasks:
-            domain = task.url.split('/')[2]
-            known_count = domain_counts.get(domain, 0) + batch_counts.get(domain, 0)
             queue_class = task.queue_class
             if queue_class is None:
-                if known_count >= 8:
-                    queue_class = "backlog"
-                else:
-                    queue_class = "backlog"
+                queue_class = "backlog"
             prepared.append(CrawlTask(
                 url=task.url,
                 priority=task.priority,
@@ -63,7 +52,6 @@ class FakeFrontier:
                 added_at=task.added_at,
                 next_fetch_at=task.next_fetch_at,
             ))
-            batch_counts[domain] = batch_counts.get(domain, 0) + 1
         return prepared
 
     def place(self, task: CrawlTask):

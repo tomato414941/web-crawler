@@ -110,8 +110,6 @@ class FrontierQuarantine:
                     )
                     UPDATE url_ledger
                     SET next_fetch_at = %s,
-                        lease_token = NULL,
-                        lease_expires_at = NULL,
                         last_error = COALESCE(last_error, 'retry_quarantine_retired'),
                         terminal_reason = COALESCE(terminal_reason, last_error, 'retry_quarantine_retired'),
                         terminalized_at = COALESCE(terminalized_at, %s)
