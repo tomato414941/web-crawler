@@ -4,7 +4,6 @@ ALTER TABLE frontier
 UPDATE frontier
 SET queue_class = CASE
     WHEN status = 'done' THEN 'recrawl'
-    WHEN discovery_kind = 'seed' THEN 'exploration'
     WHEN depth <= 1 THEN 'exploration'
     ELSE 'backlog'
 END

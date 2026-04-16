@@ -21,7 +21,6 @@ CREATE TABLE IF NOT EXISTS frontier (
     domain TEXT NOT NULL,
     depth INTEGER NOT NULL,
     priority REAL NOT NULL DEFAULT 1.0,
-    discovery_kind TEXT NOT NULL DEFAULT 'seed',
     archetype TEXT NOT NULL DEFAULT 'generic_page',
     source_url TEXT,
     added_at DOUBLE PRECISION NOT NULL,

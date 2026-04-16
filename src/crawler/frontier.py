@@ -387,17 +387,6 @@ class UrlLedger:
             batch_counts[domain] += 1
         return prepared
 
-    def _discovery_rank_sql(self, column: str) -> str:
-        """Return SQL that maps discovery kind to a comparable rank."""
-        return (
-            f"CASE {column} "
-            f"WHEN 'external' THEN 1 "
-            f"WHEN 'seed_host' THEN 2 "
-            f"WHEN 'same_host' THEN 3 "
-            f"WHEN 'seed' THEN 4 "
-            f"ELSE 0 END"
-        )
-
     def get_domain_known_counts(self, domains: set[str]) -> dict[str, int]:
         """Return known URL counts per domain from the frontier."""
         known_domains = {domain for domain in domains if domain}
