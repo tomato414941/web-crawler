@@ -1,5 +1,5 @@
 CREATE TABLE IF NOT EXISTS frontier_queue_blocked_domain_backoff (
-    url TEXT PRIMARY KEY REFERENCES frontier(url) ON DELETE CASCADE,
+    url TEXT PRIMARY KEY REFERENCES url_ledger(url) ON DELETE CASCADE,
     domain TEXT NOT NULL,
     queue_class TEXT NOT NULL,
     priority REAL NOT NULL DEFAULT 1.0,

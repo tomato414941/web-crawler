@@ -6,6 +6,7 @@ import psycopg2
 import pytest
 
 from crawler.migrate import apply_migrations
+from crawler.url_ledger import URL_LEDGER_TABLE
 
 pytestmark = pytest.mark.skipif(
     not os.environ.get("TEST_POSTGRES_DSN"),
@@ -26,7 +27,7 @@ def _reset_schema(dsn: str) -> None:
             cur.execute("DROP TABLE IF EXISTS public.frontier_queue_blocked_domain_backoff")
             cur.execute("DROP TABLE IF EXISTS public.active_leases")
             cur.execute("DROP TABLE IF EXISTS public.frontier_lease_active")
-            cur.execute("DROP TABLE IF EXISTS public.frontier")
+            cur.execute(f"DROP TABLE IF EXISTS public.{URL_LEDGER_TABLE}")
             cur.execute("DROP TABLE IF EXISTS public.crawler_runtime_stats")
             cur.execute("DROP TABLE IF EXISTS public.pages")
         conn.commit()
@@ -65,6 +66,7 @@ def test_apply_migrations_creates_expected_tables(migrated_dsn):
         "017_drop_frontier_status.sql",
         "018_drop_frontier_discovery_kind.sql",
         "019_drop_frontier_archetype.sql",
+        "020_rename_frontier_to_url_ledger.sql",
     ]
 
     conn = psycopg2.connect(migrated_dsn)
@@ -73,7 +75,7 @@ def test_apply_migrations_creates_expected_tables(migrated_dsn):
             cur.execute(
                 """
                 SELECT to_regclass('public.pages'),
-                       to_regclass('public.frontier'),
+                       to_regclass('public.url_ledger'),
                        to_regclass('public.domain_state'),
                        to_regclass('public.schema_migrations'),
                        to_regclass('public.crawler_runtime_stats'),
@@ -86,7 +88,7 @@ def test_apply_migrations_creates_expected_tables(migrated_dsn):
             )
             assert cur.fetchone() == (
                 "pages",
-                "frontier",
+                "url_ledger",
                 "domain_state",
                 "schema_migrations",
                 "crawler_runtime_stats",
@@ -100,7 +102,7 @@ def test_apply_migrations_creates_expected_tables(migrated_dsn):
         conn.close()
 
 
-def test_apply_migrations_drops_legacy_frontier_columns(migrated_dsn):
+def test_apply_migrations_drops_legacy_url_ledger_columns(migrated_dsn):
     apply_migrations(migrated_dsn)
 
     conn = psycopg2.connect(migrated_dsn)
@@ -110,7 +112,7 @@ def test_apply_migrations_drops_legacy_frontier_columns(migrated_dsn):
                 """
                 SELECT column_name
                 FROM information_schema.columns
-                WHERE table_schema = 'public' AND table_name = 'frontier'
+                WHERE table_schema = 'public' AND table_name = 'url_ledger'
                 ORDER BY ordinal_position
                 """
             )

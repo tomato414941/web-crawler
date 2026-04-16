@@ -8,7 +8,7 @@ import psycopg2
 import pytest
 
 from crawler.daemon import CrawlDaemon, _format_error_breakdown
-from crawler.frontier import CrawlTask, Frontier
+from crawler.url_ledger import CrawlTask, URL_LEDGER_TABLE, UrlLedger
 from crawler.migrate import apply_migrations
 from crawler.storage import PgStorage
 
@@ -26,7 +26,7 @@ def _reset_schema(dsn: str) -> None:
             cur.execute("DROP TABLE IF EXISTS public.schema_migrations")
             cur.execute("DROP TABLE IF EXISTS public.domain_state")
             cur.execute("DROP TABLE IF EXISTS public.frontier_queue_blocked_domain_backoff")
-            cur.execute("DROP TABLE IF EXISTS public.frontier")
+            cur.execute(f"DROP TABLE IF EXISTS public.{URL_LEDGER_TABLE}")
             cur.execute("DROP TABLE IF EXISTS public.crawler_runtime_stats")
             cur.execute("DROP TABLE IF EXISTS public.pages")
         conn.commit()
@@ -41,7 +41,7 @@ def pg_resources():
     apply_migrations(dsn)
 
     storage = PgStorage(dsn)
-    frontier = Frontier(storage.conn)
+    frontier = UrlLedger(storage.conn)
 
     yield dsn, storage, frontier
 

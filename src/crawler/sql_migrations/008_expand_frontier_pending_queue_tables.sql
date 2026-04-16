@@ -14,25 +14,25 @@ ALTER TABLE frontier_queue_recrawl
     ADD COLUMN IF NOT EXISTS added_at DOUBLE PRECISION NOT NULL DEFAULT 0;
 
 UPDATE frontier_queue_exploration AS queue
-SET priority = frontier.priority,
-    next_fetch_at = frontier.next_fetch_at,
-    added_at = frontier.added_at
-FROM frontier
-WHERE frontier.url = queue.url;
+SET priority = url_ledger.priority,
+    next_fetch_at = url_ledger.next_fetch_at,
+    added_at = url_ledger.added_at
+FROM url_ledger
+WHERE url_ledger.url = queue.url;
 
 UPDATE frontier_queue_backlog AS queue
-SET priority = frontier.priority,
-    next_fetch_at = frontier.next_fetch_at,
-    added_at = frontier.added_at
-FROM frontier
-WHERE frontier.url = queue.url;
+SET priority = url_ledger.priority,
+    next_fetch_at = url_ledger.next_fetch_at,
+    added_at = url_ledger.added_at
+FROM url_ledger
+WHERE url_ledger.url = queue.url;
 
 UPDATE frontier_queue_recrawl AS queue
-SET priority = frontier.priority,
-    next_fetch_at = frontier.next_fetch_at,
-    added_at = frontier.added_at
-FROM frontier
-WHERE frontier.url = queue.url;
+SET priority = url_ledger.priority,
+    next_fetch_at = url_ledger.next_fetch_at,
+    added_at = url_ledger.added_at
+FROM url_ledger
+WHERE url_ledger.url = queue.url;
 
 CREATE INDEX IF NOT EXISTS idx_frontier_queue_exploration_ready
     ON frontier_queue_exploration(priority DESC, next_fetch_at ASC, added_at ASC);
