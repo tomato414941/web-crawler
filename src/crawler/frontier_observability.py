@@ -87,9 +87,9 @@ class FrontierObservability:
         with self._conn.cursor() as cur:
             cur.execute(f"SELECT COUNT(*) FROM {self._lease_table}")
             leased = cur.fetchone()[0]
-            cur.execute("SELECT COUNT(*) FROM frontier WHERE last_success_at IS NOT NULL")
+            cur.execute("SELECT COUNT(*) FROM url_ledger WHERE last_success_at IS NOT NULL")
             done = cur.fetchone()[0]
-            cur.execute("SELECT COUNT(*) FROM frontier WHERE terminal_reason IS NOT NULL")
+            cur.execute("SELECT COUNT(*) FROM url_ledger WHERE terminal_reason IS NOT NULL")
             failed = cur.fetchone()[0]
 
         pending = sum(pending_queue_tables.values()) + sum(blocked_queue_classes.values())

@@ -16,7 +16,7 @@ CREATE TABLE IF NOT EXISTS pages (
 CREATE INDEX IF NOT EXISTS idx_pages_domain ON pages(domain);
 CREATE INDEX IF NOT EXISTS idx_pages_crawled_at ON pages(crawled_at);
 
-CREATE TABLE IF NOT EXISTS frontier (
+CREATE TABLE IF NOT EXISTS url_ledger (
     url TEXT PRIMARY KEY,
     domain TEXT NOT NULL,
     depth INTEGER NOT NULL,
@@ -33,14 +33,14 @@ CREATE TABLE IF NOT EXISTS frontier (
     last_error TEXT
 );
 
-CREATE INDEX IF NOT EXISTS idx_frontier_status ON frontier(status);
-CREATE INDEX IF NOT EXISTS idx_frontier_domain ON frontier(domain);
-CREATE INDEX IF NOT EXISTS idx_frontier_pending
-    ON frontier(priority DESC, next_fetch_at ASC, added_at ASC) WHERE status = 'pending';
-CREATE INDEX IF NOT EXISTS idx_frontier_pending_domain
-    ON frontier(domain) WHERE status = 'pending';
-CREATE INDEX IF NOT EXISTS idx_frontier_leased_expiry
-    ON frontier(lease_expires_at) WHERE status = 'leased';
+CREATE INDEX IF NOT EXISTS idx_url_ledger_status ON url_ledger(status);
+CREATE INDEX IF NOT EXISTS idx_url_ledger_domain ON url_ledger(domain);
+CREATE INDEX IF NOT EXISTS idx_url_ledger_pending
+    ON url_ledger(priority DESC, next_fetch_at ASC, added_at ASC) WHERE status = 'pending';
+CREATE INDEX IF NOT EXISTS idx_url_ledger_pending_domain
+    ON url_ledger(domain) WHERE status = 'pending';
+CREATE INDEX IF NOT EXISTS idx_url_ledger_leased_expiry
+    ON url_ledger(lease_expires_at) WHERE status = 'leased';
 
 CREATE TABLE IF NOT EXISTS domain_state (
     host_key TEXT PRIMARY KEY,

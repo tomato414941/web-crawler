@@ -6,7 +6,7 @@ import pytest
 
 from crawler.core import Response
 from crawler.crawl import CrawlerEngine
-from crawler.frontier import CrawlTask
+from crawler.url_ledger import CrawlTask
 
 
 class FakeFrontier:

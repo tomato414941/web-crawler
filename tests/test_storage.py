@@ -8,6 +8,7 @@ import psycopg2
 from psycopg2.extensions import TRANSACTION_STATUS_IDLE
 
 from crawler.migrate import apply_migrations
+from crawler.url_ledger import URL_LEDGER_TABLE
 
 # Skip all tests if no Postgres available
 pytestmark = pytest.mark.skipif(
@@ -29,7 +30,7 @@ def _reset_schema(dsn: str) -> None:
             cur.execute("DROP TABLE IF EXISTS public.frontier_queue_blocked_domain_backoff")
             cur.execute("DROP TABLE IF EXISTS public.active_leases")
             cur.execute("DROP TABLE IF EXISTS public.frontier_lease_active")
-            cur.execute("DROP TABLE IF EXISTS public.frontier")
+            cur.execute(f"DROP TABLE IF EXISTS public.{URL_LEDGER_TABLE}")
             cur.execute("DROP TABLE IF EXISTS public.crawler_runtime_stats")
             cur.execute("DROP TABLE IF EXISTS public.pages")
         conn.commit()
@@ -144,30 +145,9 @@ def test_get_stats_includes_frontier_breakdown(pg_storage):
         pg_storage.save(result)
 
     with pg_storage._conn.cursor() as cur:
-        cur.execute("DROP TABLE IF EXISTS public.frontier")
         cur.execute(
-            """
-            CREATE TABLE IF NOT EXISTS frontier (
-                url TEXT PRIMARY KEY,
-                domain TEXT NOT NULL,
-                depth INTEGER NOT NULL,
-                priority REAL NOT NULL DEFAULT 1.0,
-                source_url TEXT,
-                added_at DOUBLE PRECISION NOT NULL,
-                next_fetch_at DOUBLE PRECISION NOT NULL DEFAULT 0,
-                last_success_at DOUBLE PRECISION,
-                fail_streak INTEGER NOT NULL DEFAULT 0,
-                lease_token TEXT,
-                lease_expires_at DOUBLE PRECISION,
-                last_error TEXT,
-                terminal_reason TEXT,
-                terminalized_at DOUBLE PRECISION
-            )
-            """
-        )
-        cur.execute(
-            """
-            INSERT INTO frontier (url, domain, depth, priority, source_url, added_at, next_fetch_at)
+            f"""
+            INSERT INTO {URL_LEDGER_TABLE} (url, domain, depth, priority, source_url, added_at, next_fetch_at)
             VALUES
                 ('https://example.com/page1', 'example.com', 0, 2.0, NULL, 1710000000.0, 1710000000.0),
                 ('https://example.com/page2', 'example.com', 1, 1.25, 'https://example.com/page1', 1710000002.0, 1710000002.0),
@@ -296,7 +276,7 @@ def test_get_stats_includes_readiness_breakdown(pg_storage):
     with pg_storage._conn.cursor() as cur:
         cur.execute(
             """
-            INSERT INTO frontier (
+            INSERT INTO url_ledger (
                 url, domain, depth, priority,
                 source_url, added_at, next_fetch_at
             )
@@ -387,7 +367,7 @@ def test_get_stats_prioritizes_domains_blocked_by_backoff(pg_storage):
     with pg_storage._conn.cursor() as cur:
         cur.execute(
             """
-            INSERT INTO frontier (
+            INSERT INTO url_ledger (
                 url, domain, depth, priority,
                 source_url, added_at, next_fetch_at
             )
@@ -452,7 +432,7 @@ def test_get_stats_counts_blocked_queue_classes(pg_storage):
     with pg_storage._conn.cursor() as cur:
         cur.execute(
             """
-            INSERT INTO frontier (
+            INSERT INTO url_ledger (
                 url, domain, depth, priority,
                 source_url, added_at, next_fetch_at
             )
@@ -526,7 +506,7 @@ def test_get_stats_includes_top_slow_domains(pg_storage):
     with pg_storage._conn.cursor() as cur:
         cur.execute(
             """
-            INSERT INTO frontier (
+            INSERT INTO url_ledger (
                 url, domain, depth, priority,
                 source_url, added_at, next_fetch_at
             )
@@ -635,7 +615,7 @@ def test_get_stats_includes_active_error_breakdown(pg_storage):
     with pg_storage._conn.cursor() as cur:
         cur.execute(
             """
-            INSERT INTO frontier (
+            INSERT INTO url_ledger (
                 url, domain, depth, priority, source_url,
                 added_at, next_fetch_at, fail_streak, last_error
             )
@@ -679,13 +659,13 @@ def test_get_stats_rejects_legacy_frontier_schema(pg_storage):
     pg_storage.save(result)
 
     with pg_storage._conn.cursor() as cur:
-        cur.execute("DROP TABLE IF EXISTS public.frontier")
+        cur.execute(f"DROP TABLE IF EXISTS public.{URL_LEDGER_TABLE} CASCADE")
     pg_storage._conn.commit()
 
     with pg_storage._conn.cursor() as cur:
         cur.execute(
             """
-            CREATE TABLE public.frontier (
+            CREATE TABLE public.url_ledger (
                 url TEXT PRIMARY KEY,
                 domain TEXT NOT NULL,
                 depth INTEGER NOT NULL,
@@ -697,13 +677,13 @@ def test_get_stats_rejects_legacy_frontier_schema(pg_storage):
         )
         cur.execute(
             """
-            INSERT INTO frontier (url, domain, depth, priority, source_url, added_at)
+            INSERT INTO url_ledger (url, domain, depth, priority, source_url, added_at)
             VALUES ('https://example.com/page2', 'example.com', 1, 1.0, 'https://example.com/page1', 1710000001.0)
             """
         )
     pg_storage._conn.commit()
 
-    with pytest.raises(RuntimeError, match="frontier schema is outdated"):
+    with pytest.raises(RuntimeError, match="url_ledger schema is outdated"):
         pg_storage.get_stats()
 
 

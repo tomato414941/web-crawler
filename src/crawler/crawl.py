@@ -23,12 +23,12 @@ from .discovery import PageSignals, rank_discovered_url, rank_seed_url, seed_hos
 from .domain_manager import DomainManager
 from .domain_store import DomainStore
 from .error_stats import categorize_crawl_error
-from .frontier import (
+from .url_ledger import (
     CrawlTask,
-    Frontier,
     QUEUE_BACKLOG,
     QUEUE_EXPLORATION,
     QUEUE_RECRAWL,
+    UrlLedger,
 )
 from .output import StreamingOutputWriter
 from .result import CrawlFailure, CrawlResult, CrawlStageTimings
@@ -173,7 +173,7 @@ class CrawlerEngine:
         concurrency: int = 5,
         output_writer: StreamingOutputWriter | None = None,
         pg_storage: "PgStorage | None" = None,
-        frontier: Frontier | None = None,
+        frontier: UrlLedger | None = None,
         domain_manager: DomainManager | None = None,
         domain_store: DomainStore | None = None,
         seed_urls: list[str] | None = None,
@@ -197,7 +197,7 @@ class CrawlerEngine:
         self._publisher_storage = None
         self._finalizer_executor: concurrent.futures.ThreadPoolExecutor | None = None
         self._finalizer_storage = None
-        self._finalizer_frontier: Frontier | None = None
+        self._finalizer_frontier: UrlLedger | None = None
         self._finalizer_domain_store: DomainStore | None = None
 
         self.start_domain = urlparse(start_url).netloc if start_url else ""
@@ -207,7 +207,7 @@ class CrawlerEngine:
         if frontier:
             self.frontier = frontier
         elif pg_storage:
-            self.frontier = Frontier(pg_storage.conn)
+            self.frontier = UrlLedger(pg_storage.conn)
         else:
             raise ValueError("Postgres connection required for frontier")
 
@@ -1076,7 +1076,7 @@ class CrawlerEngine:
 
             self._publisher_storage = PgStorage(publisher_dsn)
             self._finalizer_storage = PgStorage(publisher_dsn)
-            self._finalizer_frontier = Frontier(self._finalizer_storage.conn)
+            self._finalizer_frontier = UrlLedger(self._finalizer_storage.conn)
             self._finalizer_domain_store = DomainStore(
                 self._finalizer_storage.conn,
                 default_delay=self.domain_manager.default_delay,

@@ -8,6 +8,7 @@ import pytest
 
 from crawler.domain_store import DomainStore
 from crawler.migrate import apply_migrations
+from crawler.url_ledger import URL_LEDGER_TABLE
 
 PG_DSN = os.environ.get("TEST_POSTGRES_DSN", "postgresql://crawler:crawler@localhost/crawldb_test")
 
@@ -33,7 +34,7 @@ class TestDomainStore:
         with conn.cursor() as cur:
             cur.execute("DROP TABLE IF EXISTS schema_migrations")
             cur.execute("DROP TABLE IF EXISTS domain_state")
-            cur.execute("DROP TABLE IF EXISTS frontier")
+            cur.execute(f"DROP TABLE IF EXISTS {URL_LEDGER_TABLE}")
             cur.execute("DROP TABLE IF EXISTS pages")
         conn.commit()
         conn.close()

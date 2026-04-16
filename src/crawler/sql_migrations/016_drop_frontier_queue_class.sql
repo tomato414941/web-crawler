@@ -1,5 +1,5 @@
-DROP INDEX IF EXISTS idx_frontier_pending_queue_class;
-DROP INDEX IF EXISTS idx_frontier_pending_queue_domain;
+DROP INDEX IF EXISTS idx_url_ledger_pending_queue_class;
+DROP INDEX IF EXISTS idx_url_ledger_pending_queue_domain;
 
-ALTER TABLE frontier
+ALTER TABLE url_ledger
     DROP COLUMN IF EXISTS queue_class;

@@ -108,7 +108,7 @@ class FrontierQuarantine:
                         WHERE blocked.url = doomed.url
                         RETURNING blocked.url
                     )
-                    UPDATE frontier
+                    UPDATE url_ledger
                     SET next_fetch_at = %s,
                         lease_token = NULL,
                         lease_expires_at = NULL,
