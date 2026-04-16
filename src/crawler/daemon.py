@@ -49,7 +49,6 @@ class CrawlDaemon:
         postgres_dsn: str,
         cycle_pages: int = 500,
         recrawl_ttl: int = 86400,
-        max_depth: int = 3,
         concurrency: int = 5,
         delay: float = 1.0,
         cycle_pause: float = 5.0,
@@ -64,7 +63,6 @@ class CrawlDaemon:
         self._postgres_dsn = postgres_dsn
         self._cycle_pages = cycle_pages
         self._recrawl_ttl = recrawl_ttl
-        self._max_depth = max_depth
         self._concurrency = concurrency
         self._delay = delay
         self._cycle_pause = cycle_pause
@@ -384,7 +382,6 @@ class CrawlDaemon:
         try:
             async with CrawlerEngine(
                 max_pages=self._cycle_pages,
-                max_depth=self._max_depth,
                 same_domain=False,
                 delay=self._delay,
                 concurrency=self._concurrency,

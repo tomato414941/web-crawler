@@ -58,7 +58,6 @@ def test_save_page(pg_storage):
         "url": "https://example.com/page1",
         "status": 200,
         "content_length": 1000,
-        "depth": 0,
         "source_url": None,
         "timestamp": 1710000000.0,
         "content": "<html><title>Test Page</title><body>Hello</body></html>",
@@ -79,7 +78,6 @@ def test_upsert_on_conflict(pg_storage):
         "url": "https://example.com/page1",
         "status": 200,
         "content_length": 1000,
-        "depth": 0,
         "timestamp": 1710000000.0,
         "content": "<html><title>V1</title><body>First</body></html>",
         "outlinks": [],
@@ -102,7 +100,6 @@ def test_save_drops_nul_content_to_metadata_only(pg_storage):
         "url": "https://example.com/file.pdf",
         "status": 200,
         "content_length": 1000,
-        "depth": 0,
         "timestamp": 1710000000.0,
         "content": "prefix\x00suffix",
         "outlinks": [],
@@ -126,7 +123,6 @@ def test_get_stats_includes_frontier_breakdown(pg_storage):
             "url": "https://example.com/page1",
             "status": 200,
             "content_length": 100,
-            "depth": 0,
             "timestamp": 1710000000.0,
             "content": "<html><title>Example</title></html>",
             "outlinks": [],
@@ -135,7 +131,6 @@ def test_get_stats_includes_frontier_breakdown(pg_storage):
             "url": "https://other.com/page1",
             "status": 200,
             "content_length": 50,
-            "depth": 0,
             "timestamp": 1710000001.0,
             "content": "<html><title>Other</title></html>",
             "outlinks": [],
@@ -147,11 +142,11 @@ def test_get_stats_includes_frontier_breakdown(pg_storage):
     with pg_storage._conn.cursor() as cur:
         cur.execute(
             f"""
-            INSERT INTO {URL_LEDGER_TABLE} (url, domain, depth, priority, source_url, added_at, next_fetch_at)
+            INSERT INTO {URL_LEDGER_TABLE} (url, domain, priority, source_url, added_at, next_fetch_at)
             VALUES
-                ('https://example.com/page1', 'example.com', 0, 2.0, NULL, 1710000000.0, 1710000000.0),
-                ('https://example.com/page2', 'example.com', 1, 1.25, 'https://example.com/page1', 1710000002.0, 1710000002.0),
-                ('https://other.com/page1', 'other.com', 1, 0.8, 'https://example.com/page1', 1710000003.0, 1710000003.0)
+                ('https://example.com/page1', 'example.com', 2.0, NULL, 1710000000.0, 1710000000.0),
+                ('https://example.com/page2', 'example.com', 1.25, 'https://example.com/page1', 1710000002.0, 1710000002.0),
+                ('https://other.com/page1', 'other.com', 0.8, 'https://example.com/page1', 1710000003.0, 1710000003.0)
             """
         )
         cur.execute(
@@ -277,13 +272,13 @@ def test_get_stats_includes_readiness_breakdown(pg_storage):
         cur.execute(
             """
             INSERT INTO url_ledger (
-                url, domain, depth, priority,
+                url, domain, priority,
                 source_url, added_at, next_fetch_at
             )
             VALUES
-                ('https://ready.example/', 'ready.example', 0, 1.0, %s, %s),
-                ('https://future.example/', 'future.example', 0, 1.0, %s, %s),
-                ('https://backoff.example/', 'backoff.example', 0, 1.0, %s, %s)
+                ('https://ready.example/', 'ready.example', 1.0, %s, %s),
+                ('https://future.example/', 'future.example', 1.0, %s, %s),
+                ('https://backoff.example/', 'backoff.example', 1.0, %s, %s)
             """,
             (now, now, now, now + 30.0, now, now),
         )
@@ -368,13 +363,13 @@ def test_get_stats_prioritizes_domains_blocked_by_backoff(pg_storage):
         cur.execute(
             """
             INSERT INTO url_ledger (
-                url, domain, depth, priority,
+                url, domain, priority,
                 source_url, added_at, next_fetch_at
             )
             VALUES
-                ('https://backoff.example/a', 'backoff.example', 0, 1.0, %s, %s),
-                ('https://backoff.example/b', 'backoff.example', 0, 1.0, %s, %s),
-                ('https://slot.example/', 'slot.example', 0, 1.0, %s, %s)
+                ('https://backoff.example/a', 'backoff.example', 1.0, %s, %s),
+                ('https://backoff.example/b', 'backoff.example', 1.0, %s, %s),
+                ('https://slot.example/', 'slot.example', 1.0, %s, %s)
             """,
             (now, now, now, now, now, now),
         )
@@ -433,12 +428,12 @@ def test_get_stats_counts_blocked_queue_classes(pg_storage):
         cur.execute(
             """
             INSERT INTO url_ledger (
-                url, domain, depth, priority,
+                url, domain, priority,
                 source_url, added_at, next_fetch_at
             )
             VALUES
-                ('https://blocked.example/explore', 'blocked.example', 0, 1.0, %s, %s),
-                ('https://blocked.example/backlog', 'blocked.example', 3, 1.0, %s, %s)
+                ('https://blocked.example/explore', 'blocked.example', 1.0, %s, %s),
+                ('https://blocked.example/backlog', 'blocked.example', 1.0, %s, %s)
             """,
             (now, now, now, now),
         )
@@ -507,13 +502,13 @@ def test_get_stats_includes_top_slow_domains(pg_storage):
         cur.execute(
             """
             INSERT INTO url_ledger (
-                url, domain, depth, priority,
+                url, domain, priority,
                 source_url, added_at, next_fetch_at
             )
             VALUES
-                ('https://slow.example/a', 'slow.example', 0, 1.0, %s, %s),
-                ('https://slow.example/b', 'slow.example', 0, 1.0, %s, %s),
-                ('https://fast.example/', 'fast.example', 0, 1.0, %s, %s)
+                ('https://slow.example/a', 'slow.example', 1.0, %s, %s),
+                ('https://slow.example/b', 'slow.example', 1.0, %s, %s),
+                ('https://fast.example/', 'fast.example', 1.0, %s, %s)
             """,
             (now, now, now, now, now, now),
         )
@@ -616,16 +611,16 @@ def test_get_stats_includes_active_error_breakdown(pg_storage):
         cur.execute(
             """
             INSERT INTO url_ledger (
-                url, domain, depth, priority, source_url,
+                url, domain, priority, source_url,
                 added_at, next_fetch_at, fail_streak, last_error
             )
             VALUES
-                ('https://example.com/404', 'example.com', 0, 1.0, NULL, 1710000000.0, 1710000000.0, 1, 'http_404'),
-                ('https://example.com/503', 'example.com', 0, 1.0, NULL, 1710000001.0, 1710000001.0, 1, 'http_503'),
-                ('https://other.com/timeout', 'other.com', 0, 1.0, NULL, 1710000002.0, 1710000002.0, 2, 'timeout'),
-                ('https://other.com/disconnect', 'other.com', 0, 1.0, NULL, 1710000003.0, 1710000003.0, 3, 'Server disconnected without sending a response.'),
-                ('https://third.com/connect', 'third.com', 0, 1.0, NULL, 1710000004.0, 1710000004.0, 1, 'connection_error'),
-                ('https://third.com/other', 'third.com', 0, 1.0, NULL, 1710000005.0, 1710000005.0, 1, 'weird_error')
+                ('https://example.com/404', 'example.com', 1.0, NULL, 1710000000.0, 1710000000.0, 1, 'http_404'),
+                ('https://example.com/503', 'example.com', 1.0, NULL, 1710000001.0, 1710000001.0, 1, 'http_503'),
+                ('https://other.com/timeout', 'other.com', 1.0, NULL, 1710000002.0, 1710000002.0, 2, 'timeout'),
+                ('https://other.com/disconnect', 'other.com', 1.0, NULL, 1710000003.0, 1710000003.0, 3, 'Server disconnected without sending a response.'),
+                ('https://third.com/connect', 'third.com', 1.0, NULL, 1710000004.0, 1710000004.0, 1, 'connection_error'),
+                ('https://third.com/other', 'third.com', 1.0, NULL, 1710000005.0, 1710000005.0, 1, 'weird_error')
             """
         )
     pg_storage._conn.commit()
@@ -651,7 +646,6 @@ def test_get_stats_rejects_legacy_frontier_schema(pg_storage):
         "url": "https://example.com/page1",
         "status": 200,
         "content_length": 100,
-        "depth": 0,
         "timestamp": 1710000000.0,
         "content": "<html><title>Example</title></html>",
         "outlinks": [],
@@ -668,7 +662,6 @@ def test_get_stats_rejects_legacy_frontier_schema(pg_storage):
             CREATE TABLE public.url_ledger (
                 url TEXT PRIMARY KEY,
                 domain TEXT NOT NULL,
-                depth INTEGER NOT NULL,
                 priority REAL NOT NULL DEFAULT 1.0,
                 source_url TEXT,
                 added_at DOUBLE PRECISION NOT NULL
@@ -677,8 +670,8 @@ def test_get_stats_rejects_legacy_frontier_schema(pg_storage):
         )
         cur.execute(
             """
-            INSERT INTO url_ledger (url, domain, depth, priority, source_url, added_at)
-            VALUES ('https://example.com/page2', 'example.com', 1, 1.0, 'https://example.com/page1', 1710000001.0)
+            INSERT INTO url_ledger (url, domain, priority, source_url, added_at)
+            VALUES ('https://example.com/page2', 'example.com', 1.0, 'https://example.com/page1', 1710000001.0)
             """
         )
     pg_storage._conn.commit()
@@ -692,7 +685,6 @@ def test_read_methods_leave_connection_idle(pg_storage):
         "url": "https://example.com/page1",
         "status": 200,
         "content_length": 100,
-        "depth": 0,
         "timestamp": 1710000000.0,
         "content": "<html><title>Example</title></html>",
         "outlinks": [],

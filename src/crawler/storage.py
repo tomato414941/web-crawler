@@ -34,7 +34,6 @@ PAGES_REQUIRED_COLUMNS = {
     "title",
     "content",
     "content_length",
-    "depth",
     "source_url",
     "outlinks",
     "crawled_at",
@@ -156,8 +155,8 @@ class PgStorage:
             with self._conn.cursor() as cur:
                 cur.execute(
                     """INSERT INTO pages (url_hash, url, domain, title, content, status,
-                           content_length, depth, source_url, outlinks, crawled_at)
-                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                           content_length, source_url, outlinks, crawled_at)
+                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                        ON CONFLICT (url_hash) DO UPDATE SET
                            content = EXCLUDED.content,
                            title = EXCLUDED.title,
@@ -173,7 +172,6 @@ class PgStorage:
                         content,
                         data.get("status"),
                         data.get("content_length"),
-                        data.get("depth"),
                         data.get("source_url"),
                         outlinks,
                         data.get("timestamp", time.time()),
@@ -292,7 +290,7 @@ class PgStorage:
             with self._conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
                 cur.execute(
                     """SELECT url_hash, url, domain, title, content, status,
-                              content_length, depth, source_url, outlinks, crawled_at
+                              content_length, source_url, outlinks, crawled_at
                        FROM pages WHERE url_hash = %s""",
                     (url_hash,),
                 )

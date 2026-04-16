@@ -140,12 +140,6 @@ They are not a long-term scheduler category.
 
 Once admitted into the system, seed-derived URLs should be treated by the same discovered-to-runnable rules as any other URLs.
 
-## What depth is
-
-Depth is optional metadata.
-
-It may be useful for debugging or observability, but it should not be a core scheduler input. A broad web crawler should schedule based on host, branch, latency, failure, and freshness rather than distance from a seed.
-
 ## Target Interpretation For Current Concepts
 
 Current concepts should converge toward this meaning:
@@ -164,4 +158,4 @@ This is a convergence target, not a claim about current implementation quality.
 2. Queue membership should become the only truth for live scheduler state.
 3. `ready` should remain derived.
 4. Bootstrap should be separated from normal exploration supply.
-5. Seed and depth should lose most scheduler-specific special treatment.
+5. Seed-derived special treatment should disappear from the scheduler.

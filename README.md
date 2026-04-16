@@ -91,7 +91,6 @@ crawler crawl <url> [options]
 
 Options:
   -n, --max-pages     Max pages to crawl (default: 100)
-  -d, --max-depth     Link depth limit (default: 3)
   -c, --concurrency   Concurrent workers (default: 5)
   --delay             Per-domain delay in seconds (default: 1.0)
   --same-domain       Stay on the same domain (default)
@@ -296,7 +295,6 @@ Recommended production `.env`:
 CRAWL_SEED_URLS="https://www.iana.org/ https://datatracker.ietf.org/ https://www.rfc-editor.org/"
 CRAWL_CYCLE_PAGES=300
 CRAWL_RECRAWL_TTL=2592000
-CRAWL_MAX_DEPTH=2
 CRAWL_CONCURRENCY=6
 CRAWL_DELAY=0.5
 ```

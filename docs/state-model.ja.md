@@ -140,12 +140,6 @@ seed は bootstrap 用の input set にすぎない。
 
 一度 system に入ったら、seed 由来 URL も他の URL と同じ discovered-to-runnable ルールで扱うべきである。
 
-## What Depth Is
-
-depth は optional metadata である。
-
-debug や observability には有用かもしれないが、scheduler の中心的な入力にするべきではない。broad web crawler は、seed から何ホップ離れているかではなく、host、branch、latency、failure、freshness に基づいて scheduling するべきである。
-
 ## Target Interpretation For Current Concepts
 
 現在の概念は次の意味へ収束させるべきである。
@@ -164,4 +158,4 @@ debug や observability には有用かもしれないが、scheduler の中心�
 2. live scheduler state の唯一の正本は queue membership になるべきである
 3. `ready` は派生値のままにするべきである
 4. bootstrap は通常の exploration supply から分離するべきである
-5. seed と depth の scheduler 上の特別扱いはさらに減らすべきである
+5. seed 由来の特別扱いは scheduler から消えるべきである

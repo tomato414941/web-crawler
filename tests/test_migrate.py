@@ -67,6 +67,7 @@ def test_apply_migrations_creates_expected_tables(migrated_dsn):
         "018_drop_frontier_discovery_kind.sql",
         "019_drop_frontier_archetype.sql",
         "020_rename_frontier_to_url_ledger.sql",
+        "021_drop_depth_columns.sql",
     ]
 
     conn = psycopg2.connect(migrated_dsn)
@@ -122,6 +123,24 @@ def test_apply_migrations_drops_legacy_url_ledger_columns(migrated_dsn):
 
     assert "discovery_kind" not in columns
     assert "archetype" not in columns
+    assert "depth" not in columns
+
+    conn = psycopg2.connect(migrated_dsn)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT column_name
+                FROM information_schema.columns
+                WHERE table_schema = 'public' AND table_name = 'pages'
+                ORDER BY ordinal_position
+                """
+            )
+            page_columns = [column_name for (column_name,) in cur.fetchall()]
+    finally:
+        conn.close()
+
+    assert "depth" not in page_columns
 
 
 def test_apply_migrations_is_idempotent(migrated_dsn):

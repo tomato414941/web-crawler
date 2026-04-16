@@ -4,7 +4,6 @@ ALTER TABLE url_ledger
 UPDATE url_ledger
 SET queue_class = CASE
     WHEN status = 'done' THEN 'recrawl'
-    WHEN depth <= 1 THEN 'exploration'
     ELSE 'backlog'
 END
 WHERE queue_class IS NULL;

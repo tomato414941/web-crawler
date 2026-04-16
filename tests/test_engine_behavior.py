@@ -57,7 +57,6 @@ class FakeFrontier:
                     queue_class = "backlog"
             prepared.append(CrawlTask(
                 url=task.url,
-                depth=task.depth,
                 priority=task.priority,
                 queue_class=queue_class,
                 source_url=task.source_url,
@@ -158,7 +157,7 @@ class FakeFetcher:
 
 @pytest.mark.asyncio
 async def test_crawler_marks_client_errors_done_without_saving():
-    frontier = FakeFrontier([CrawlTask(url="https://example.com/missing", depth=0)])
+    frontier = FakeFrontier([CrawlTask(url="https://example.com/missing")])
     domain_manager = FakeDomainManager()
     fetcher = FakeFetcher([
         Response(
@@ -185,7 +184,7 @@ async def test_crawler_marks_client_errors_done_without_saving():
 
 @pytest.mark.asyncio
 async def test_crawler_marks_auth_walls_failed_and_records_host_error():
-    frontier = FakeFrontier([CrawlTask(url="https://example.com/forbidden", depth=0)])
+    frontier = FakeFrontier([CrawlTask(url="https://example.com/forbidden")])
     domain_manager = FakeDomainManager()
     fetcher = FakeFetcher([
         Response(
@@ -223,7 +222,7 @@ async def test_crawler_marks_auth_walls_failed_and_records_host_error():
 
 @pytest.mark.asyncio
 async def test_crawler_marks_server_errors_failed():
-    frontier = FakeFrontier([CrawlTask(url="https://example.com/error", depth=0)])
+    frontier = FakeFrontier([CrawlTask(url="https://example.com/error")])
     domain_manager = FakeDomainManager()
     fetcher = FakeFetcher([
         Response(
@@ -252,7 +251,7 @@ async def test_crawler_marks_server_errors_failed():
 
 @pytest.mark.asyncio
 async def test_crawler_marks_parse_errors_failed():
-    frontier = FakeFrontier([CrawlTask(url="https://example.com/parse", depth=0)])
+    frontier = FakeFrontier([CrawlTask(url="https://example.com/parse")])
     domain_manager = FakeDomainManager()
     fetcher = FakeFetcher([
         Response(
@@ -288,9 +287,9 @@ async def test_crawler_marks_parse_errors_failed():
 async def test_crawler_does_not_exceed_max_pages_with_concurrency():
     frontier = FakeFrontier(
         [
-            CrawlTask(url="https://example.com/1", depth=0),
-            CrawlTask(url="https://example.com/2", depth=0),
-            CrawlTask(url="https://example.com/3", depth=0),
+            CrawlTask(url="https://example.com/1"),
+            CrawlTask(url="https://example.com/2"),
+            CrawlTask(url="https://example.com/3"),
         ]
     )
     domain_manager = FakeDomainManager()
@@ -321,8 +320,8 @@ async def test_crawler_does_not_exceed_max_pages_with_concurrency():
 async def test_crawler_collects_failure_breakdown():
     frontier = FakeFrontier(
         [
-            CrawlTask(url="https://example.com/missing", depth=0),
-            CrawlTask(url="https://example.com/error", depth=0),
+            CrawlTask(url="https://example.com/missing"),
+            CrawlTask(url="https://example.com/error"),
         ]
     )
     domain_manager = FakeDomainManager()
@@ -357,7 +356,7 @@ async def test_crawler_collects_failure_breakdown():
 
 @pytest.mark.asyncio
 async def test_crawler_assigns_discovery_metadata_to_outlinks():
-    frontier = FakeFrontier([CrawlTask(url="https://example.com/", depth=0)])
+    frontier = FakeFrontier([CrawlTask(url="https://example.com/")])
     domain_manager = FakeDomainManager()
     fetcher = FakeFetcher(
         [
@@ -376,7 +375,6 @@ async def test_crawler_assigns_discovery_metadata_to_outlinks():
 
     async with CrawlerEngine(
         max_pages=1,
-        max_depth=1,
         same_domain=False,
         frontier=frontier,
         domain_manager=domain_manager,
@@ -402,7 +400,7 @@ async def test_crawler_assigns_discovery_metadata_to_outlinks():
 @pytest.mark.asyncio
 async def test_crawler_assigns_known_hosts_to_backlog_queue():
     frontier = FakeFrontier(
-        [CrawlTask(url="https://example.com/", depth=0)],
+        [CrawlTask(url="https://example.com/")],
         known_counts={"example.com": 8},
     )
     domain_manager = FakeDomainManager()
@@ -419,7 +417,6 @@ async def test_crawler_assigns_known_hosts_to_backlog_queue():
 
     async with CrawlerEngine(
         max_pages=1,
-        max_depth=1,
         same_domain=False,
         frontier=frontier,
         domain_manager=domain_manager,
@@ -435,7 +432,7 @@ async def test_crawler_assigns_known_hosts_to_backlog_queue():
 
 @pytest.mark.asyncio
 async def test_crawler_treats_pdf_as_metadata_only():
-    frontier = FakeFrontier([CrawlTask(url="https://example.com/spec.pdf", depth=0)])
+    frontier = FakeFrontier([CrawlTask(url="https://example.com/spec.pdf")])
     domain_manager = FakeDomainManager()
     fetcher = FakeFetcher(
         [
@@ -469,8 +466,8 @@ async def test_crawler_treats_pdf_as_metadata_only():
 async def test_crawler_reserves_some_leases_for_breadth():
     frontier = FakeFrontier(
         [
-            CrawlTask(url="https://example.com/1", depth=0),
-            CrawlTask(url="https://example.com/2", depth=0),
+            CrawlTask(url="https://example.com/1"),
+            CrawlTask(url="https://example.com/2"),
         ]
     )
     domain_manager = FakeDomainManager()
@@ -508,7 +505,7 @@ async def test_crawler_reserves_some_leases_for_breadth():
 @pytest.mark.asyncio
 @pytest.mark.asyncio
 async def test_crawler_prefers_exploration_before_backlog_and_recrawl():
-    frontier = FakeFrontier([CrawlTask(url="https://example.com/page", depth=0)])
+    frontier = FakeFrontier([CrawlTask(url="https://example.com/page")])
     domain_manager = FakeDomainManager()
     fetcher = FakeFetcher([
         Response(url="https://example.com/page", status=200, content=b"<html></html>", headers={}),
@@ -530,9 +527,9 @@ async def test_crawler_prefers_exploration_before_backlog_and_recrawl():
 async def test_crawler_avoids_leasing_same_host_while_request_in_flight():
     frontier = FakeFrontier(
         [
-            CrawlTask(url="https://a.com/1", depth=0),
-            CrawlTask(url="https://a.com/2", depth=0),
-            CrawlTask(url="https://b.com/1", depth=0),
+            CrawlTask(url="https://a.com/1"),
+            CrawlTask(url="https://a.com/2"),
+            CrawlTask(url="https://b.com/1"),
         ]
     )
     domain_manager = FakeDomainManager()
@@ -562,9 +559,9 @@ async def test_crawler_avoids_leasing_same_host_while_request_in_flight():
 async def test_crawler_allows_second_inflight_for_fast_host_budget():
     frontier = FakeFrontier(
         [
-            CrawlTask(url="https://a.com/1", depth=0),
-            CrawlTask(url="https://a.com/2", depth=0),
-            CrawlTask(url="https://b.com/1", depth=0),
+            CrawlTask(url="https://a.com/1"),
+            CrawlTask(url="https://a.com/2"),
+            CrawlTask(url="https://b.com/1"),
         ]
     )
     domain_manager = FakeDomainManager(budgets={"a.com": 2})
@@ -594,7 +591,7 @@ async def test_crawler_allows_second_inflight_for_fast_host_budget():
 
 @pytest.mark.asyncio
 async def test_crawler_splits_worker_pools_by_queue_class():
-    frontier = FakeFrontier([CrawlTask(url="https://example.com/page", depth=0, queue_class="exploration")])
+    frontier = FakeFrontier([CrawlTask(url="https://example.com/page", queue_class="exploration")])
     domain_manager = FakeDomainManager()
     fetcher = FakeFetcher([
         Response(url="https://example.com/page", status=200, content=b"<html></html>", headers={}),

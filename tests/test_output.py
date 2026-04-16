@@ -83,7 +83,6 @@ class TestStreamingOutputWriter:
         result = {
             "url": "http://example.com",
             "status": 200,
-            "depth": 1,
             "timestamp": 1234567890.0,
         }
         with StreamingOutputWriter(output_file) as writer:
@@ -120,7 +119,6 @@ class TestStreamingOutputWriter:
             url="http://example.com",
             status=200,
             content_length=5,
-            depth=0,
             source_url=None,
             timestamp=123.0,
             content="Hello",
