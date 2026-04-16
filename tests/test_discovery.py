@@ -2,7 +2,6 @@
 
 from crawler.discovery import (
     ARCHETYPE_DOCUMENT_PAGE,
-    ARCHETYPE_GENERIC_PAGE,
     ARCHETYPE_REDIRECT_HUB,
     ARCHETYPE_REGISTRY_LISTING,
     EXTERNAL_PRIORITY,
@@ -33,7 +32,6 @@ def test_rank_seed_url_returns_seed_priority():
     result = rank_seed_url("https://example.com/")
 
     assert result.priority == SEED_PRIORITY
-    assert result.archetype == ARCHETYPE_GENERIC_PAGE
 
 
 def test_rank_discovered_url_prefers_same_host():
@@ -64,7 +62,6 @@ def test_rank_discovered_url_marks_other_hosts_external():
     )
 
     assert result.priority == EXTERNAL_PRIORITY
-    assert result.archetype == ARCHETYPE_GENERIC_PAGE
 
 
 def test_classify_url_archetype_detects_redirect_hubs():
@@ -90,7 +87,6 @@ def test_rank_discovered_url_downgrades_bulk_data_paths():
     )
 
     assert result.priority < 0.75
-    assert result.archetype == ARCHETYPE_REGISTRY_LISTING
 
 
 def test_rank_discovered_url_downgrades_redirect_hubs():
@@ -100,7 +96,6 @@ def test_rank_discovered_url_downgrades_redirect_hubs():
         seed_hosts={"example.com", "docs.example.com"},
     )
 
-    assert result.archetype == ARCHETYPE_REDIRECT_HUB
     assert result.priority < SAME_HOST_PRIORITY
 
 
@@ -111,7 +106,6 @@ def test_rank_discovered_url_promotes_document_pages():
         seed_hosts={"example.com", "docs.example.com"},
     )
 
-    assert result.archetype == ARCHETYPE_DOCUMENT_PAGE
     assert result.priority > SEED_HOST_PRIORITY
 
 

@@ -67,10 +67,9 @@ class PageSignals:
 
 @dataclass(frozen=True)
 class EnqueueDecision:
-    """Priority and archetype assigned when enqueueing a URL."""
+    """Priority assigned when enqueueing a URL."""
 
     priority: float
-    archetype: str
 
 
 def host_key(url: str) -> str:
@@ -198,10 +197,7 @@ def _adjust_priority(
 
 def rank_seed_url(url: str) -> EnqueueDecision:
     """Assign the highest priority to explicit seed URLs."""
-    return EnqueueDecision(
-        priority=SEED_PRIORITY,
-        archetype=classify_url_archetype(url),
-    )
+    return EnqueueDecision(priority=SEED_PRIORITY)
 
 
 def rank_discovered_url(
@@ -217,36 +213,27 @@ def rank_discovered_url(
     known_seed_hosts = seed_hosts or set()
 
     if child_host and child_host == parent_host:
-        priority, archetype = _adjust_priority(
+        priority, _archetype = _adjust_priority(
             SAME_HOST_PRIORITY,
             url=url,
             parent_url=parent_url,
             parent_signals=parent_signals,
         )
-        return EnqueueDecision(
-            priority=priority,
-            archetype=archetype,
-        )
+        return EnqueueDecision(priority=priority)
 
     if child_host and child_host in known_seed_hosts:
-        priority, archetype = _adjust_priority(
+        priority, _archetype = _adjust_priority(
             SEED_HOST_PRIORITY,
             url=url,
             parent_url=parent_url,
             parent_signals=parent_signals,
         )
-        return EnqueueDecision(
-            priority=priority,
-            archetype=archetype,
-        )
+        return EnqueueDecision(priority=priority)
 
-    priority, archetype = _adjust_priority(
+    priority, _archetype = _adjust_priority(
         EXTERNAL_PRIORITY,
         url=url,
         parent_url=parent_url,
         parent_signals=parent_signals,
     )
-    return EnqueueDecision(
-        priority=priority,
-        archetype=archetype,
-    )
+    return EnqueueDecision(priority=priority)
