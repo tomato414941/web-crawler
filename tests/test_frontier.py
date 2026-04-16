@@ -576,6 +576,17 @@ class TestFrontier:
         assert frontier.pending_domain_count() == 2
         assert frontier.pending_domain_count(queue_classes=[QUEUE_EXPLORATION]) == 2
 
+    def test_ready_domain_and_branch_counts_ignore_scheduled_and_blocked_hosts(self, frontier):
+        now = time.time()
+        frontier.add(CrawlTask(url="http://a.com/docs/1", depth=0, next_fetch_at=now))
+        frontier.add(CrawlTask(url="http://a.com/blog/1", depth=0, next_fetch_at=now))
+        frontier.add(CrawlTask(url="http://b.com/future", depth=0, next_fetch_at=now + 30.0))
+        frontier.add(CrawlTask(url="http://c.com/backoff", depth=0, next_fetch_at=now))
+        self.domain_store.record_failure("c.com", backoff_seconds=20.0, now=now)
+
+        assert frontier.ready_domain_count(now=now) == 1
+        assert frontier.ready_domain_branch_count(now=now) == 2
+
     def test_ready_count_ignores_future_next_fetch(self, frontier):
         now = time.time()
         frontier.add(
@@ -620,6 +631,8 @@ class TestFrontier:
 
         assert readiness.pending == 2
         assert readiness.ready == 0
+        assert readiness.ready_domains == 0
+        assert readiness.ready_domain_branches == 0
         assert readiness.next_ready_delay == pytest.approx(20.0, abs=1e-3)
         assert readiness.blocked == {
             "next_fetch_at": 1,
@@ -651,6 +664,8 @@ class TestFrontier:
         readiness = frontier.readiness(now=now)
         assert readiness.pending == 2
         assert readiness.ready == 1
+        assert readiness.ready_domains == 1
+        assert readiness.ready_domain_branches == 1
         assert readiness.state_counts == {
             "ready": 1,
             "scheduled": 0,
@@ -680,6 +695,8 @@ class TestFrontier:
 
         readiness = frontier.readiness(now=now + 31.0)
         assert readiness.ready == 2
+        assert readiness.ready_domains == 2
+        assert readiness.ready_domain_branches == 2
         assert readiness.state_counts == {
             "ready": 2,
             "scheduled": 0,

@@ -194,6 +194,8 @@ def test_get_stats_includes_frontier_breakdown(pg_storage):
     assert stats["readiness"] == {
         "pending": 2,
         "ready": 2,
+        "ready_domains": 2,
+        "ready_domain_branches": 2,
         "next_ready_delay": 0.0,
         "blocked": {
             "next_fetch_at": 0,
@@ -343,6 +345,8 @@ def test_get_stats_includes_readiness_breakdown(pg_storage):
 
     assert stats["readiness"]["pending"] == 3
     assert stats["readiness"]["ready"] == 1
+    assert stats["readiness"]["ready_domains"] == 1
+    assert stats["readiness"]["ready_domain_branches"] == 1
     assert stats["readiness"]["next_ready_delay"] == pytest.approx(20.0, abs=1e-3)
     assert stats["readiness"]["blocked"] == {
         "next_fetch_at": 1,

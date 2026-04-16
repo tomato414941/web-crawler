@@ -12,6 +12,8 @@ class FrontierReadiness:
 
     pending: int
     ready: int
+    ready_domains: int
+    ready_domain_branches: int
     next_ready_delay: float | None
     blocked: dict[str, int]
     state_counts: dict[str, int]
@@ -44,13 +46,13 @@ class FrontierObservability:
     def _pending_queue_union_sql(self, queue_classes: list[str] | None = None) -> str:
         normalized_queue_classes = self._normalized_queue_classes(queue_classes)
         selects = [
-            f"SELECT url, domain, next_fetch_at FROM {self._queue_table_by_class[queue_class]}"
+            f"SELECT url, domain, branch_key, next_fetch_at FROM {self._queue_table_by_class[queue_class]}"
             for queue_class in normalized_queue_classes
         ]
         return "\nUNION ALL\n".join(selects)
 
     def _blocked_queue_sql(self, queue_classes: list[str] | None = None) -> tuple[str, tuple[object, ...]]:
-        sql = f"SELECT url, domain, next_fetch_at FROM {self._blocked_queue_table}"
+        sql = f"SELECT url, domain, branch_key, next_fetch_at FROM {self._blocked_queue_table}"
         if queue_classes:
             sql += " WHERE queue_class = ANY(%s)"
             return sql, (self._normalized_queue_classes(queue_classes),)
@@ -119,6 +121,22 @@ class FrontierObservability:
             value = cur.fetchone()[0]
         return int(value or 0)
 
+    def ready_domain_count(
+        self,
+        *,
+        now: float | None = None,
+        queue_classes: list[str] | None = None,
+    ) -> int:
+        return self.readiness(now=now, queue_classes=queue_classes).ready_domains
+
+    def ready_domain_branch_count(
+        self,
+        *,
+        now: float | None = None,
+        queue_classes: list[str] | None = None,
+    ) -> int:
+        return self.readiness(now=now, queue_classes=queue_classes).ready_domain_branches
+
     def blocked_count(self) -> int:
         with self._conn.cursor() as cur:
             cur.execute(f"SELECT COUNT(*) FROM {self._blocked_queue_table}")
@@ -143,6 +161,7 @@ class FrontierObservability:
                         SELECT
                             queue_entry.url,
                             queue_entry.domain,
+                            queue_entry.branch_key,
                             queue_entry.next_fetch_at,
                             queue_entry.next_fetch_at > %s AS blocked_next_fetch,
                             COALESCE(domain_state.next_request_at, 0) > %s AS blocked_domain_next_request,
@@ -159,6 +178,7 @@ class FrontierObservability:
                         SELECT
                             blocked_entry.url,
                             blocked_entry.domain,
+                            blocked_entry.branch_key,
                             blocked_entry.next_fetch_at,
                             FALSE AS blocked_next_fetch,
                             FALSE AS blocked_domain_next_request,
@@ -175,6 +195,18 @@ class FrontierObservability:
                               AND NOT blocked_host_backoff
                               AND NOT retry_quarantine
                         ) AS ready,
+                        COUNT(DISTINCT domain) FILTER (
+                            WHERE NOT blocked_next_fetch
+                              AND NOT blocked_domain_next_request
+                              AND NOT blocked_host_backoff
+                              AND NOT retry_quarantine
+                        ) AS ready_domains,
+                        COUNT(DISTINCT (domain, branch_key)) FILTER (
+                            WHERE NOT blocked_next_fetch
+                              AND NOT blocked_domain_next_request
+                              AND NOT blocked_host_backoff
+                              AND NOT retry_quarantine
+                        ) AS ready_domain_branches,
                         MIN(ready_at) AS next_ready_at,
                         COUNT(*) FILTER (WHERE blocked_next_fetch) AS blocked_next_fetch,
                         COUNT(*) FILTER (WHERE blocked_domain_next_request) AS blocked_domain_next_request,
@@ -203,6 +235,8 @@ class FrontierObservability:
             (
                 pending,
                 ready,
+                ready_domains,
+                ready_domain_branches,
                 next_ready_at,
                 blocked_next_fetch,
                 blocked_domain_next_request,
@@ -215,6 +249,8 @@ class FrontierObservability:
         return FrontierReadiness(
             pending=pending or 0,
             ready=ready or 0,
+            ready_domains=ready_domains or 0,
+            ready_domain_branches=ready_domain_branches or 0,
             next_ready_delay=None if next_ready_at is None else max(0.0, next_ready_at - now),
             blocked={
                 "next_fetch_at": blocked_next_fetch or 0,

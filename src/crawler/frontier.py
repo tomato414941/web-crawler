@@ -1520,6 +1520,27 @@ class UrlLedger:
         normalized_queue_classes = self._normalized_queue_classes(queue_classes)
         return self._observability.pending_domain_count(normalized_queue_classes)
 
+    def ready_domain_count(
+        self,
+        now: float | None = None,
+        queue_classes: list[str] | None = None,
+    ) -> int:
+        """Get count of distinct domains that are leaseable right now."""
+        normalized_queue_classes = self._normalized_queue_classes(queue_classes)
+        return self._observability.ready_domain_count(now=now, queue_classes=normalized_queue_classes)
+
+    def ready_domain_branch_count(
+        self,
+        now: float | None = None,
+        queue_classes: list[str] | None = None,
+    ) -> int:
+        """Get count of distinct domain/branch pairs that are leaseable right now."""
+        normalized_queue_classes = self._normalized_queue_classes(queue_classes)
+        return self._observability.ready_domain_branch_count(
+            now=now,
+            queue_classes=normalized_queue_classes,
+        )
+
     def blocked_domain_backoff_count(self) -> int:
         """Return count of URLs isolated due to host backoff."""
         return self._observability.blocked_count()
