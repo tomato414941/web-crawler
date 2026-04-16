@@ -13,9 +13,7 @@ from crawler.discovery import (
 )
 from crawler.frontier import (
     CrawlTask,
-    DONE_STATUS,
     Frontier,
-    PENDING_STATUS,
     QUEUE_BACKLOG,
     QUEUE_EXPLORATION,
     QUEUE_RECRAWL,
@@ -258,13 +256,16 @@ class TestFrontier:
         frontier.upsert_seeds(["http://example.com/seed"])
 
         with frontier._conn.cursor() as cur:
+            cur.execute("SELECT COUNT(*) FROM frontier WHERE url = %s", ("http://example.com/seed",))
+            (frontier_count,) = cur.fetchone()
             cur.execute(
-                "SELECT queue_class FROM frontier WHERE url = %s",
+                "SELECT COUNT(*) FROM frontier_queue_exploration WHERE url = %s",
                 ("http://example.com/seed",),
             )
-            (queue_class,) = cur.fetchone()
+            (queue_count,) = cur.fetchone()
 
-        assert queue_class == QUEUE_EXPLORATION
+        assert frontier_count == 1
+        assert queue_count == 1
 
     def test_add_classifies_registry_listings_as_backlog_even_when_shallow(self, frontier):
         frontier.add(
@@ -404,12 +405,9 @@ class TestFrontier:
         assert frontier.lease_next() is None
 
         with frontier._conn.cursor() as cur:
-            cur.execute("SELECT status FROM frontier WHERE url = %s", ("http://example.com/",))
-            (status,) = cur.fetchone()
             cur.execute("SELECT count(*) FROM active_leases WHERE url = %s", ("http://example.com/",))
             (active_count,) = cur.fetchone()
 
-        assert status == PENDING_STATUS
         assert active_count == 1
 
     def test_lease_batch(self, frontier):
@@ -457,7 +455,17 @@ class TestFrontier:
         with frontier._conn.cursor() as cur:
             cur.execute("SELECT count(*) FROM active_leases WHERE url = %s", (result.url,))
             (active_count,) = cur.fetchone()
+            cur.execute(
+                "SELECT last_success_at, fail_streak, last_error, terminal_reason, terminalized_at FROM frontier WHERE url = %s",
+                (result.url,),
+            )
+            last_success_at, fail_streak, last_error, terminal_reason, terminalized_at = cur.fetchone()
         assert active_count == 0
+        assert last_success_at is not None
+        assert fail_streak == 0
+        assert last_error is None
+        assert terminal_reason is None
+        assert terminalized_at is None
 
     def test_lease_state_lives_only_in_active_lease_table(self, frontier):
         frontier.add(CrawlTask(url="http://example.com", depth=0))
@@ -466,17 +474,16 @@ class TestFrontier:
 
         with frontier._conn.cursor() as cur:
             cur.execute(
-                "SELECT status, lease_token, lease_expires_at FROM frontier WHERE url = %s",
+                "SELECT lease_token, lease_expires_at FROM frontier WHERE url = %s",
                 (result.url,),
             )
-            status, lease_token, lease_expires_at = cur.fetchone()
+            lease_token, lease_expires_at = cur.fetchone()
             cur.execute(
                 "SELECT lease_token, lease_expires_at FROM active_leases WHERE url = %s",
                 (result.url,),
             )
             active_lease_token, active_lease_expires_at = cur.fetchone()
 
-        assert status == PENDING_STATUS
         assert lease_token is None
         assert lease_expires_at is None
         assert active_lease_token == result.lease_token
@@ -515,12 +522,32 @@ class TestFrontier:
         frontier.mark_failed(result.url, lease_token=result.lease_token)
         assert frontier.stats().get("failed", 0) == 1
 
+        with frontier._conn.cursor() as cur:
+            cur.execute(
+                "SELECT terminal_reason, terminalized_at FROM frontier WHERE url = %s",
+                (result.url,),
+            )
+            terminal_reason, terminalized_at = cur.fetchone()
+
+        assert terminal_reason == "failed"
+        assert terminalized_at is not None
+
     def test_requeue_failed(self, frontier):
         frontier.add(CrawlTask(url="http://example.com", depth=0))
         result = frontier.lease_next()
         frontier.mark_failed(result.url, lease_token=result.lease_token)
         assert frontier.requeue_failed() == 1
         assert frontier.pending_count() == 1
+
+        with frontier._conn.cursor() as cur:
+            cur.execute(
+                "SELECT terminal_reason, terminalized_at FROM frontier WHERE url = %s",
+                (result.url,),
+            )
+            terminal_reason, terminalized_at = cur.fetchone()
+
+        assert terminal_reason is None
+        assert terminalized_at is None
 
     def test_recover_leased(self, frontier):
         frontier.add(CrawlTask(url="http://example.com", depth=0))
@@ -569,7 +596,7 @@ class TestFrontier:
         with frontier._conn.cursor() as cur:
             cur.execute(
                 "UPDATE frontier SET status = %s WHERE url = %s",
-                (DONE_STATUS, "http://example.com/1"),
+                ("done", "http://example.com/1"),
             )
         frontier._conn.commit()
 
@@ -686,6 +713,7 @@ class TestFrontier:
 
         assert promoted == 2
         assert frontier.pending_count() == 2
+        assert frontier.pending_count(queue_classes=[QUEUE_BACKLOG]) == 2
         assert frontier.blocked_domain_backoff_count() == 1
 
         readiness = frontier.readiness(now=now + 31.0)
@@ -723,10 +751,10 @@ class TestFrontier:
         assert leased is not None
         assert leased.url == "http://b.com/blocked"
 
-    def test_promote_blocked_domain_backoff_prefers_domains_missing_from_normal_pending(self, frontier):
+    def test_promote_blocked_domain_backoff_returns_ready_urls_to_backlog_without_domain_bias(self, frontier):
         now = time.time()
         frontier.add(CrawlTask(url="http://a.com/blocked", depth=0, next_fetch_at=now))
-        frontier.add(CrawlTask(url="http://b.com/blocked", depth=0, next_fetch_at=now))
+        frontier.add(CrawlTask(url="http://b.com/blocked", depth=0, next_fetch_at=now + 5.0))
         self.domain_store.record_failure("a.com", backoff_seconds=30.0, now=now)
         self.domain_store.record_failure("b.com", backoff_seconds=30.0, now=now)
         frontier.rebalance_blocked_domain_backoff(now=now)
@@ -738,10 +766,15 @@ class TestFrontier:
         promoted = frontier.promote_blocked_domain_backoff(1, per_domain=1, now=now + 31.0)
 
         assert promoted == 1
+        assert frontier.pending_count(queue_classes=[QUEUE_BACKLOG]) == 2
         leased = frontier.lease_next(now=now + 31.0)
         assert leased is not None
-        assert leased.url == "http://b.com/blocked"
+        assert leased.url == "http://a.com/ready-2"
         assert frontier.blocked_domain_backoff_count() == 1
+
+        leased = frontier.lease_next(now=now + 31.0, queue_classes=[QUEUE_BACKLOG])
+        assert leased is not None
+        assert leased.url == "http://a.com/blocked"
 
     def test_retire_blocked_domain_backoff_marks_old_high_failure_urls_failed(self, frontier):
         now = time.time()
@@ -769,8 +802,15 @@ class TestFrontier:
         assert frontier.blocked_domain_backoff_count() == 0
 
         with frontier._conn.cursor() as cur:
-            cur.execute("SELECT status, last_error FROM frontier WHERE url = %s", ("http://a.com/blocked",))
-            assert cur.fetchone() == ("failed", "retry_quarantine_retired")
+            cur.execute(
+                "SELECT last_error, terminal_reason, terminalized_at FROM frontier WHERE url = %s",
+                ("http://a.com/blocked",),
+            )
+            last_error, terminal_reason, terminalized_at = cur.fetchone()
+
+        assert last_error == "retry_quarantine_retired"
+        assert terminal_reason == "retry_quarantine_retired"
+        assert terminalized_at is not None
 
     def test_restore_recovered_blocked_domain_backoff_restores_healthy_domains(self, frontier):
         now = time.time()
@@ -790,9 +830,10 @@ class TestFrontier:
 
         assert restored == 2
         assert frontier.pending_count() == 2
+        assert frontier.pending_count(queue_classes=[QUEUE_BACKLOG]) == 2
         assert frontier.blocked_domain_backoff_count() == 1
 
-        leased = frontier.lease_batch(count=2, queue_classes=[QUEUE_EXPLORATION], now=now + 31.0)
+        leased = frontier.lease_batch(count=2, queue_classes=[QUEUE_BACKLOG], now=now + 31.0)
         assert {task.url for task in leased} == {"http://a.com/blocked-1", "http://a.com/blocked-2"}
 
     def test_readiness_filters_blocked_queue_by_queue_class(self, frontier):
@@ -875,15 +916,16 @@ class TestFrontier:
 
         with frontier._conn.cursor() as cur:
             cur.execute(
-                "SELECT status, fail_streak, last_error, next_fetch_at FROM frontier WHERE url = %s",
+                "SELECT fail_streak, last_error, next_fetch_at, terminal_reason, terminalized_at FROM frontier WHERE url = %s",
                 (result.url,),
             )
-            status, fail_streak, last_error, next_fetch_at = cur.fetchone()
+            fail_streak, last_error, next_fetch_at, terminal_reason, terminalized_at = cur.fetchone()
 
-        assert status == "pending"
         assert fail_streak == 1
         assert last_error == "timeout"
         assert next_fetch_at > time.time()
+        assert terminal_reason is None
+        assert terminalized_at is None
 
     def test_retryable_failure_demotes_priority(self, frontier):
         frontier.add(CrawlTask(url="http://example.com/retry", depth=0, priority=1.25))
@@ -900,12 +942,11 @@ class TestFrontier:
 
         with frontier._conn.cursor() as cur:
             cur.execute(
-                "SELECT status, fail_streak, priority FROM frontier WHERE url = %s",
+                "SELECT fail_streak, priority FROM frontier WHERE url = %s",
                 (result.url,),
             )
-            status, fail_streak, priority = cur.fetchone()
+            fail_streak, priority = cur.fetchone()
 
-        assert status == "pending"
         assert fail_streak == 1
         assert priority == 0.75
 
@@ -940,15 +981,9 @@ class TestFrontier:
         frontier.upsert_seeds(["http://example.com"])
 
         with frontier._conn.cursor() as cur:
-            cur.execute(
-                "SELECT queue_class FROM frontier WHERE url = %s",
-                ("http://example.com/",),
-            )
-            (queue_class,) = cur.fetchone()
             cur.execute("SELECT COUNT(*) FROM frontier_queue_exploration WHERE url = %s", ("http://example.com/",))
             (queue_count,) = cur.fetchone()
 
-        assert queue_class == QUEUE_EXPLORATION
         assert queue_count == 1
 
     def test_promote_branch_novelty_exploration_promotes_distinct_backlog_branches(self, frontier):
@@ -1016,7 +1051,7 @@ class TestFrontier:
         assert leased is not None
         frontier.mark_done(leased.url, lease_token=leased.lease_token)
 
-        requeued = frontier.requeue_urls([leased.url], queue_class=QUEUE_RECRAWL, current_statuses=[DONE_STATUS])
+        requeued = frontier.requeue_urls([leased.url], queue_class=QUEUE_RECRAWL)
         assert requeued == 1
 
         recrawl = frontier.lease_next(queue_classes=[QUEUE_RECRAWL])
@@ -1029,15 +1064,8 @@ class TestFrontier:
         assert leased is not None
         frontier.mark_done(leased.url, lease_token=leased.lease_token)
 
-        requeued = frontier.requeue_urls([leased.url], queue_class=QUEUE_RECRAWL, current_statuses=[DONE_STATUS])
+        requeued = frontier.requeue_urls([leased.url], queue_class=QUEUE_RECRAWL)
         assert requeued == 1
-
-        with frontier._conn.cursor() as cur:
-            cur.execute(
-                "UPDATE frontier SET queue_class = %s WHERE url = %s",
-                (QUEUE_EXPLORATION, leased.url),
-            )
-        frontier._conn.commit()
 
         recrawl = frontier.lease_next(queue_classes=[QUEUE_RECRAWL])
         assert recrawl is not None
@@ -1063,15 +1091,16 @@ class TestFrontier:
 
         with frontier._conn.cursor() as cur:
             cur.execute(
-                "SELECT status, fail_streak, last_success_at, last_error FROM frontier WHERE url = %s",
+                "SELECT fail_streak, last_success_at, last_error, terminal_reason, terminalized_at FROM frontier WHERE url = %s",
                 (second.url,),
             )
-            status, fail_streak, last_success_at, last_error = cur.fetchone()
+            fail_streak, last_success_at, last_error, terminal_reason, terminalized_at = cur.fetchone()
 
-        assert status == "done"
         assert fail_streak == 0
         assert last_success_at is not None
         assert last_error is None
+        assert terminal_reason is None
+        assert terminalized_at is None
 
     def test_defer_overcrowded_backlog_delays_excess_low_priority_urls(self, frontier):
         frontier.add(CrawlTask(url="http://a.com/1", depth=1, priority=0.55, added_at=1000))

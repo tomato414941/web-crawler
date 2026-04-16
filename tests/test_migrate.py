@@ -60,6 +60,9 @@ def test_apply_migrations_creates_expected_tables(migrated_dsn):
         "012_blocked_domain_backoff_quarantined_at.sql",
         "013_domain_state_latency_ewma.sql",
         "014_rename_frontier_lease_active.sql",
+        "015_frontier_terminal_decision.sql",
+        "016_drop_frontier_queue_class.sql",
+        "017_drop_frontier_status.sql",
     ]
 
     conn = psycopg2.connect(migrated_dsn)
