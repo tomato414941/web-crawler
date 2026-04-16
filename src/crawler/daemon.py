@@ -472,7 +472,7 @@ class CrawlDaemon:
                    FROM frontier
                    JOIN pages ON frontier.url = pages.url
                    WHERE pages.crawled_at < %s
-                     AND frontier.status = 'done'
+                     AND frontier.last_success_at IS NOT NULL
                    ORDER BY pages.crawled_at ASC
                    LIMIT %s""",
                 (cutoff, batch_size),
@@ -483,7 +483,6 @@ class CrawlDaemon:
             candidate_urls,
             queue_class='recrawl',
             next_fetch_at=now,
-            current_statuses=['done'],
         )
         if count:
             logger.info(

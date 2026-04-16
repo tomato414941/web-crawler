@@ -28,20 +28,12 @@ class FrontierObservability:
         queue_class_order: tuple[str, ...],
         blocked_queue_table: str,
         lease_table: str,
-        pending_status: str,
-        leased_status: str,
-        done_status: str,
-        failed_status: str,
     ):
         self._conn = conn
         self._queue_table_by_class = queue_table_by_class
         self._queue_class_order = queue_class_order
         self._blocked_queue_table = blocked_queue_table
         self._lease_table = lease_table
-        self._pending_status = pending_status
-        self._leased_status = leased_status
-        self._done_status = done_status
-        self._failed_status = failed_status
 
     def _normalized_queue_classes(self, queue_classes: list[str] | None) -> list[str]:
         if queue_classes:
@@ -63,11 +55,6 @@ class FrontierObservability:
             sql += " WHERE queue_class = ANY(%s)"
             return sql, (self._normalized_queue_classes(queue_classes),)
         return sql, ()
-
-    def legacy_status_counts(self) -> dict[str, int]:
-        with self._conn.cursor() as cur:
-            cur.execute("SELECT status, COUNT(*) FROM frontier GROUP BY status")
-            return dict(cur.fetchall())
 
     def pending_queue_counts(self) -> dict[str, int]:
         with self._conn.cursor() as cur:
@@ -93,29 +80,27 @@ class FrontierObservability:
             return dict(cur.fetchall())
 
     def status_counts(self) -> dict[str, int | dict[str, int]]:
-        legacy_status = self.legacy_status_counts()
         pending_queue_tables = self.pending_queue_counts()
         blocked_queue_classes = self.blocked_queue_counts()
 
-        stats = {
-            status: count
-            for status, count in legacy_status.items()
-            if status not in {self._pending_status, self._leased_status}
-        }
         with self._conn.cursor() as cur:
             cur.execute(f"SELECT COUNT(*) FROM {self._lease_table}")
-            stats[self._leased_status] = cur.fetchone()[0]
+            leased = cur.fetchone()[0]
+            cur.execute("SELECT COUNT(*) FROM frontier WHERE last_success_at IS NOT NULL")
+            done = cur.fetchone()[0]
+            cur.execute("SELECT COUNT(*) FROM frontier WHERE terminal_reason IS NOT NULL")
+            failed = cur.fetchone()[0]
 
-        stats["pending_queue_tables"] = pending_queue_tables
-        stats["blocked_queue_classes"] = blocked_queue_classes
-        stats[self._pending_status] = sum(pending_queue_tables.values()) + sum(blocked_queue_classes.values())
-        stats["legacy_pending"] = legacy_status.get(self._pending_status, 0)
-        stats["legacy_leased"] = legacy_status.get(self._leased_status, 0)
-        stats["total"] = sum(
-            stats.get(key, 0)
-            for key in (self._done_status, self._failed_status, self._pending_status, self._leased_status)
-        )
-        return stats
+        pending = sum(pending_queue_tables.values()) + sum(blocked_queue_classes.values())
+        return {
+            "leased": leased,
+            "done": done,
+            "failed": failed,
+            "pending_queue_tables": pending_queue_tables,
+            "blocked_queue_classes": blocked_queue_classes,
+            "pending": pending,
+            "total": done + failed + pending + leased,
+        }
 
     def pending_count(self, queue_classes: list[str] | None = None) -> int:
         total = 0

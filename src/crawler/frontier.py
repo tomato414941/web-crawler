@@ -29,10 +29,6 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-PENDING_STATUS = "pending"
-LEASED_STATUS = "leased"
-DONE_STATUS = "done"
-FAILED_STATUS = "failed"
 QUEUE_EXPLORATION = "exploration"
 QUEUE_BACKLOG = "backlog"
 QUEUE_RECRAWL = "recrawl"
@@ -51,24 +47,18 @@ FRONTIER_REQUIRED_COLUMNS = {
     "domain",
     "depth",
     "priority",
-    "queue_class",
     "discovery_kind",
     "archetype",
     "source_url",
     "added_at",
-    "status",
     "next_fetch_at",
     "last_success_at",
     "fail_streak",
     "lease_token",
     "lease_expires_at",
     "last_error",
-}
-FRONTIER_ALLOWED_STATUSES = {
-    PENDING_STATUS,
-    LEASED_STATUS,
-    DONE_STATUS,
-    FAILED_STATUS,
+    "terminal_reason",
+    "terminalized_at",
 }
 FRONTIER_ALLOWED_QUEUE_CLASSES = {
     QUEUE_EXPLORATION,
@@ -173,18 +163,12 @@ class UrlLedger:
             queue_class_order=QUEUE_CLASS_ORDER,
             blocked_queue_table=BLOCKED_DOMAIN_BACKOFF_TABLE,
             lease_table=LEASE_TABLE,
-            pending_status=PENDING_STATUS,
-            leased_status=LEASED_STATUS,
-            done_status=DONE_STATUS,
-            failed_status=FAILED_STATUS,
         )
         self._quarantine = FrontierQuarantine(
             conn,
             queue_exploration=QUEUE_EXPLORATION,
             queue_backlog=QUEUE_BACKLOG,
             queue_recrawl=QUEUE_RECRAWL,
-            pending_status=PENDING_STATUS,
-            failed_status=FAILED_STATUS,
             blocked_queue_table=BLOCKED_DOMAIN_BACKOFF_TABLE,
             queue_table_sql=self._queue_table_sql,
             delete_queue_entries=self._delete_queue_entries,
@@ -312,20 +296,23 @@ class UrlLedger:
 
         with self._conn.cursor() as cur:
             cur.execute(
-                f"""WITH active_leases AS (
-                        SELECT url
-                        FROM {LEASE_TABLE}
+                f"""WITH recovered AS (
+                        DELETE FROM {LEASE_TABLE}
                         WHERE {where}
+                        RETURNING url, domain, queue_class
                     )
-                    UPDATE frontier
-                    SET status = status
-                    WHERE url IN (SELECT url FROM active_leases)
-                    RETURNING url, domain, priority, next_fetch_at, added_at, queue_class, status""",
+                    SELECT frontier.url,
+                           frontier.domain,
+                           frontier.priority,
+                           frontier.next_fetch_at,
+                           frontier.added_at,
+                           recovered.queue_class
+                    FROM frontier
+                    JOIN recovered ON recovered.url = frontier.url""",
                 params,
             )
             rows = cur.fetchall()
             self._replace_pending_queue_rows(cur, self._project_pending_queue_rows(rows))
-            self._delete_active_leases(cur, [row[0] for row in rows])
             return len(rows)
 
     def _assert_current_schema(self) -> None:
@@ -351,28 +338,6 @@ class UrlLedger:
             if cur.fetchone()[0] is None:
                 raise RuntimeError(f"missing frontier lease table: {LEASE_TABLE}")
             assert_public_table_columns(self._conn, LEASE_TABLE, LEASE_REQUIRED_COLUMNS)
-
-        with self._conn.cursor() as cur:
-            cur.execute("SELECT DISTINCT status FROM frontier")
-            invalid_statuses = sorted(
-                status
-                for (status,) in cur.fetchall()
-                if status not in FRONTIER_ALLOWED_STATUSES
-            )
-        if invalid_statuses:
-            invalid = ", ".join(invalid_statuses)
-            raise RuntimeError(f"frontier contains unsupported statuses: {invalid}")
-
-        with self._conn.cursor() as cur:
-            cur.execute("SELECT DISTINCT queue_class FROM frontier")
-            invalid_queue_classes = sorted(
-                queue_class
-                for (queue_class,) in cur.fetchall()
-                if queue_class not in FRONTIER_ALLOWED_QUEUE_CLASSES
-            )
-        if invalid_queue_classes:
-            invalid = ", ".join(invalid_queue_classes)
-            raise RuntimeError(f"frontier contains unsupported queue classes: {invalid}")
 
     def _normalize_queue_class(self, queue_class: str | None) -> str:
         """Return a supported frontier queue class."""
@@ -613,13 +578,13 @@ class UrlLedger:
     def _insert_pending_queue_rows(
         self,
         cur,
-        rows: list[tuple[str, str, float, float, float, str, str]],
+        rows: list[tuple[str, str, float, float, float, str]],
     ) -> None:
         """Insert scheduler-pending rows into the appropriate physical queue tables."""
         grouped: dict[str, list[tuple[str, str, float, float, float, str]]] = {
             queue_class: [] for queue_class in FRONTIER_ALLOWED_QUEUE_CLASSES
         }
-        for url, domain, priority, next_fetch_at, added_at, queue_class, _status in rows:
+        for url, domain, priority, next_fetch_at, added_at, queue_class in rows:
             normalized_url = normalize_url(url)
             grouped[self._normalize_queue_class(queue_class)].append(
                 (normalized_url, domain, priority, next_fetch_at, added_at, url_branch_key(normalized_url))
@@ -646,7 +611,7 @@ class UrlLedger:
     def _insert_blocked_domain_backoff_rows(
         self,
         cur,
-        rows: list[tuple[str, str, float, float, float, str, str]],
+        rows: list[tuple[str, str, float, float, float, str]],
         *,
         quarantined_at: float | None = None,
     ) -> None:
@@ -663,8 +628,7 @@ class UrlLedger:
                 now,
                 url_branch_key(normalize_url(url)),
             )
-            for url, domain, priority, next_fetch_at, added_at, queue_class, status in rows
-            if status == PENDING_STATUS
+            for url, domain, priority, next_fetch_at, added_at, queue_class in rows
         ]
         if not blocked_rows:
             return
@@ -727,30 +691,27 @@ class UrlLedger:
     def _replace_pending_queue_rows(
         self,
         cur,
-        rows: list[tuple[str, str, float, float, float, str, str]],
+        rows: list[tuple[str, str, float, float, float, str]],
     ) -> None:
         """Replace physical pending queue rows using returned frontier state."""
         normalized_urls = sorted({normalize_url(url) for url, *_ in rows if url})
         if not normalized_urls:
             return
         self._delete_queue_entries(cur, normalized_urls)
-        self._insert_pending_queue_rows(
-            cur,
-            [row for row in rows if row[6] == PENDING_STATUS],
-        )
+        self._insert_pending_queue_rows(cur, rows)
 
     def _project_pending_queue_rows(
         self,
         rows: list[tuple[object, ...]],
-    ) -> list[tuple[str, str, float, float, float, str, str]]:
+    ) -> list[tuple[str, str, float, float, float, str]]:
         """Project frontier rows into the queue-table row shape."""
-        projected: list[tuple[str, str, float, float, float, str, str]] = []
+        projected: list[tuple[str, str, float, float, float, str]] = []
         for row in rows:
-            if len(row) == 7:
+            if len(row) == 6:
                 projected.append(row)  # type: ignore[arg-type]
                 continue
-            if len(row) >= 9:
-                projected.append((row[0], row[1], row[2], row[3], row[4], row[5], row[8]))  # type: ignore[arg-type]
+            if len(row) >= 8:
+                projected.append((row[0], row[1], row[2], row[3], row[4], row[5]))  # type: ignore[arg-type]
                 continue
             raise ValueError(f"unexpected frontier row shape: {len(row)}")
         return projected
@@ -769,23 +730,37 @@ class UrlLedger:
             return 0
 
         scheduled_at = time.time() if next_fetch_at is None else next_fetch_at
-        statuses = current_statuses or [DONE_STATUS, FAILED_STATUS]
+        normalized_queue_class = self._normalize_queue_class(queue_class)
 
         with self._conn.cursor() as cur:
-            cur.execute(
-                f"""UPDATE frontier
-                    SET status = '{PENDING_STATUS}',
-                        queue_class = %s,
-                        next_fetch_at = %s,
-                    WHERE url = ANY(%s)
-                      AND status = ANY(%s)
-                    RETURNING url, domain, priority, next_fetch_at, added_at, queue_class, status""",
-                (queue_class, scheduled_at, normalized_urls, statuses),
-            )
+            if current_statuses is None:
+                cur.execute(
+                    """UPDATE frontier
+                        SET next_fetch_at = %s,
+                            terminal_reason = NULL,
+                            terminalized_at = NULL
+                        WHERE url = ANY(%s)
+                        RETURNING url, domain, priority, next_fetch_at, added_at""",
+                    (scheduled_at, normalized_urls),
+                )
+            else:
+                cur.execute(
+                    """UPDATE frontier
+                        SET next_fetch_at = %s,
+                            terminal_reason = NULL,
+                            terminalized_at = NULL
+                        WHERE url = ANY(%s)
+                        RETURNING url, domain, priority, next_fetch_at, added_at""",
+                    (scheduled_at, normalized_urls),
+                )
             rows = cur.fetchall()
-            self._replace_pending_queue_rows(cur, self._project_pending_queue_rows(rows))
-            self._delete_active_leases(cur, [row[0] for row in rows])
-            count = len(rows)
+            pending_rows = [
+                (url, domain, priority, next_fetch_at, added_at, normalized_queue_class)
+                for url, domain, priority, next_fetch_at, added_at in rows
+            ]
+            self._replace_pending_queue_rows(cur, pending_rows)
+            self._delete_active_leases(cur, [row[0] for row in pending_rows])
+            count = len(pending_rows)
 
         self._conn.commit()
         return count
@@ -795,8 +770,10 @@ class UrlLedger:
         if not tasks:
             return 0
 
+        prepared_tasks = self._prepare_tasks(tasks)
+        prepared_by_url = {task.url: task for task in prepared_tasks}
         rows = []
-        for task in self._prepare_tasks(tasks):
+        for task in prepared_tasks:
             domain = urlparse(task.url).netloc
             next_fetch_at = task.next_fetch_at or task.added_at or time.time()
             rows.append(
@@ -805,7 +782,6 @@ class UrlLedger:
                     domain,
                     task.depth,
                     task.priority,
-                    task.queue_class,
                     task.discovery_kind,
                     task.archetype,
                     task.source_url,
@@ -819,20 +795,11 @@ class UrlLedger:
                 psycopg2.extras.execute_values(
                     cur,
                     f"""INSERT INTO frontier (
-                           url, domain, depth, priority, queue_class, discovery_kind, archetype, source_url, added_at, next_fetch_at
+                           url, domain, depth, priority, discovery_kind, archetype, source_url, added_at, next_fetch_at
                        )
                        VALUES %s
                        ON CONFLICT (url) DO UPDATE SET
                            priority = GREATEST(frontier.priority, EXCLUDED.priority),
-                           queue_class = CASE
-                               WHEN frontier.queue_class = '{QUEUE_EXPLORATION}'
-                                    OR EXCLUDED.queue_class = '{QUEUE_EXPLORATION}'
-                                   THEN '{QUEUE_EXPLORATION}'
-                               WHEN frontier.queue_class = '{QUEUE_BACKLOG}'
-                                    OR EXCLUDED.queue_class = '{QUEUE_BACKLOG}'
-                                   THEN '{QUEUE_BACKLOG}'
-                               ELSE '{QUEUE_RECRAWL}'
-                           END,
                            archetype = CASE
                                WHEN frontier.archetype = '{ARCHETYPE_GENERIC_PAGE}'
                                     AND EXCLUDED.archetype != '{ARCHETYPE_GENERIC_PAGE}'
@@ -852,13 +819,24 @@ class UrlLedger:
                            )
                            OR (frontier.source_url IS NULL AND EXCLUDED.source_url IS NOT NULL)
                            OR EXCLUDED.next_fetch_at < frontier.next_fetch_at
-                       RETURNING url, domain, priority, next_fetch_at, added_at, queue_class, status""",
+                       RETURNING url, domain, priority, next_fetch_at, added_at""",
                     rows,
                     page_size=200,
                 )
                 frontier_rows = cur.fetchall()
-                self._replace_pending_queue_rows(cur, self._project_pending_queue_rows(frontier_rows))
-                self._delete_active_leases(cur, [row[0] for row in frontier_rows])
+                pending_rows = [
+                    (
+                        url,
+                        domain,
+                        priority,
+                        next_fetch_at,
+                        added_at,
+                        prepared_by_url[url].queue_class or QUEUE_BACKLOG,
+                    )
+                    for url, domain, priority, next_fetch_at, added_at in frontier_rows
+                ]
+                self._replace_pending_queue_rows(cur, pending_rows)
+                self._delete_active_leases(cur, [row[0] for row in pending_rows])
                 return len(frontier_rows)
         except Exception:
             self._conn.rollback()
@@ -963,7 +941,7 @@ class UrlLedger:
             with self._conn.cursor() as cur:
                 cur.execute(
                     f"""UPDATE frontier
-                        SET status = status
+                        SET next_fetch_at = next_fetch_at
                         WHERE url = (
                             SELECT candidate.url
                             {candidate_from}
@@ -981,15 +959,16 @@ class UrlLedger:
                             source_url,
                             added_at,
                             next_fetch_at,
-                            queue_class,
-                            domain,
-                            status""",
+                            domain""",
                     params,
                 )
                 row = cur.fetchone()
                 if row:
                     self._delete_queue_entries(cur, [row[0]])
-                    self._upsert_active_leases(cur, [(row[0], row[9], row[8], lease_token, lease_expires_at)])
+                    self._upsert_active_leases(
+                        cur,
+                        [(row[0], row[8], normalized_queue_classes[0], lease_token, lease_expires_at)],
+                    )
             self._conn.commit()
         except Exception:
             self._conn.rollback()
@@ -1006,9 +985,7 @@ class UrlLedger:
                 source_url,
                 added_at,
                 next_fetch_at,
-                _queue_class,
                 _domain,
-                _status,
             ) = row
             return CrawlTask(
                 url=url, depth=depth, priority=priority,
@@ -1090,7 +1067,7 @@ class UrlLedger:
             with self._conn.cursor() as cur:
                 cur.execute(
                     f"""UPDATE frontier
-                        SET status = status
+                        SET next_fetch_at = next_fetch_at
                         WHERE url IN (
                             SELECT candidate.url
                             {candidate_from}
@@ -1108,9 +1085,7 @@ class UrlLedger:
                             source_url,
                             added_at,
                             next_fetch_at,
-                            queue_class,
-                            domain,
-                            status""",
+                            domain""",
                     params,
                 )
                 rows = cur.fetchall()
@@ -1118,7 +1093,7 @@ class UrlLedger:
                     self._delete_queue_entries(cur, [row[0] for row in rows])
                     self._upsert_active_leases(
                         cur,
-                        [(row[0], row[9], row[8], lease_token, lease_expires_at) for row in rows],
+                        [(row[0], row[8], normalized_queue_classes[0], lease_token, lease_expires_at) for row in rows],
                     )
             self._conn.commit()
         except Exception:
@@ -1163,13 +1138,14 @@ class UrlLedger:
         with self._conn.cursor() as cur:
             cur.execute(
                 f"""UPDATE frontier
-                    SET status = '{DONE_STATUS}',
-                        next_fetch_at = %s,
+                    SET next_fetch_at = %s,
                         last_success_at = %s,
                         fail_streak = 0,
-                        last_error = NULL
+                        last_error = NULL,
+                        terminal_reason = NULL,
+                        terminalized_at = NULL
                     WHERE url = %s{lease_sql}
-                    RETURNING url, domain, queue_class, status""",
+                    RETURNING url""",
                 (now, now, normalized, *lease_params),
             )
             rows = cur.fetchall()
@@ -1208,31 +1184,62 @@ class UrlLedger:
             if retryable and retry_delay is None:
                 retry_delay = self._compute_retry_backoff(next_fail_streak)
 
-            status = PENDING_STATUS if retryable else FAILED_STATUS
-            next_fetch_at = now + (retry_delay or 0.0) if retryable else now
-            cur.execute(
-                f"""UPDATE frontier
-                    SET status = %s,
-                        next_fetch_at = %s,
-                        fail_streak = %s,
-                        priority = %s,
-                        last_error = %s
-                    WHERE url = %s{lease_sql}
-                    RETURNING url, domain, priority, next_fetch_at, added_at, queue_class, status""",
-                (
-                    status,
-                    next_fetch_at,
-                    next_fail_streak,
-                    next_priority,
-                    error,
-                    normalized,
-                    *lease_params,
-                ),
-            )
-            rows = cur.fetchall()
-            self._replace_pending_queue_rows(cur, self._project_pending_queue_rows(rows))
-            self._delete_active_leases(cur, [row[0] for row in rows])
-            updated = bool(rows)
+            if retryable:
+                next_fetch_at = now + (retry_delay or 0.0)
+                cur.execute(
+                    """UPDATE frontier
+                        SET next_fetch_at = %s,
+                            fail_streak = %s,
+                            priority = %s,
+                            last_error = %s,
+                            terminal_reason = NULL,
+                            terminalized_at = NULL
+                        WHERE url = %s{lease_sql}
+                        RETURNING url, domain, priority, next_fetch_at, added_at""",
+                    (
+                        next_fetch_at,
+                        next_fail_streak,
+                        next_priority,
+                        error,
+                        normalized,
+                        *lease_params,
+                    ),
+                )
+                rows = cur.fetchall()
+                pending_rows = [
+                    (url, domain, priority, next_fetch_at, added_at, QUEUE_BACKLOG)
+                    for url, domain, priority, next_fetch_at, added_at in rows
+                ]
+                self._replace_pending_queue_rows(cur, pending_rows)
+                self._delete_active_leases(cur, [row[0] for row in pending_rows])
+                updated = bool(rows)
+            else:
+                cur.execute(
+                    f"""UPDATE frontier
+                        SET next_fetch_at = %s,
+                            fail_streak = %s,
+                            priority = %s,
+                            last_error = %s,
+                            terminal_reason = %s,
+                            terminalized_at = %s
+                        WHERE url = %s{lease_sql}
+                        RETURNING url""",
+                    (
+                        now,
+                        next_fail_streak,
+                        next_priority,
+                        error,
+                        error or "failed",
+                        now,
+                        normalized,
+                        *lease_params,
+                    ),
+                )
+                rows = cur.fetchall()
+                urls = [row[0] for row in rows]
+                self._delete_queue_entries(cur, urls)
+                self._delete_active_leases(cur, urls)
+                updated = bool(rows)
         self._conn.commit()
         return updated
 
@@ -1242,16 +1249,21 @@ class UrlLedger:
         with self._conn.cursor() as cur:
             cur.execute(
                 """UPDATE frontier
-                   SET status = %s,
-                       next_fetch_at = %s
-                   WHERE status = %s
-                   RETURNING url, domain, priority, next_fetch_at, added_at, queue_class, status""",
-                (PENDING_STATUS, now, FAILED_STATUS),
+                   SET next_fetch_at = %s,
+                       terminal_reason = NULL,
+                       terminalized_at = NULL
+                   WHERE terminal_reason IS NOT NULL
+                   RETURNING url, domain, priority, next_fetch_at, added_at""",
+                (now,),
             )
             rows = cur.fetchall()
-            self._replace_pending_queue_rows(cur, self._project_pending_queue_rows(rows))
-            self._delete_active_leases(cur, [row[0] for row in rows])
-            count = len(rows)
+            pending_rows = [
+                (url, domain, priority, next_fetch_at, added_at, QUEUE_BACKLOG)
+                for url, domain, priority, next_fetch_at, added_at in rows
+            ]
+            self._replace_pending_queue_rows(cur, pending_rows)
+            self._delete_active_leases(cur, [row[0] for row in pending_rows])
+            count = len(pending_rows)
         self._conn.commit()
         return count
 
@@ -1346,7 +1358,7 @@ class UrlLedger:
                     UPDATE frontier
                     SET next_fetch_at = GREATEST(next_fetch_at, %s)
                     WHERE url IN (SELECT url FROM deferred)
-                    RETURNING url, domain, priority, next_fetch_at, added_at, queue_class, status""",
+                    RETURNING url, domain, priority, next_fetch_at, added_at""",
                 (
                     now,
                     low_priority_threshold,
@@ -1356,7 +1368,11 @@ class UrlLedger:
                 ),
             )
             rows = cur.fetchall()
-            self._replace_pending_queue_rows(cur, self._project_pending_queue_rows(rows))
+            pending_rows = [
+                (url, domain, priority, next_fetch_at, added_at, QUEUE_BACKLOG)
+                for url, domain, priority, next_fetch_at, added_at in rows
+            ]
+            self._replace_pending_queue_rows(cur, pending_rows)
             count = len(rows)
         self._conn.commit()
         return count
@@ -1411,14 +1427,17 @@ class UrlLedger:
                 return 0
 
             cur.execute(
-                """UPDATE frontier
-                    SET queue_class = %s
-                    WHERE url = ANY(%s)
-                    RETURNING url, domain, priority, next_fetch_at, added_at, queue_class, status""",
-                (QUEUE_EXPLORATION, promoted_urls),
+                f"""SELECT url, domain, priority, next_fetch_at, added_at
+                    FROM {self._queue_table_sql(QUEUE_BACKLOG)}
+                    WHERE url = ANY(%s)""",
+                (promoted_urls,),
             )
-            rows = cur.fetchall()
-            self._replace_pending_queue_rows(cur, self._project_pending_queue_rows(rows))
+            rows = [
+                (url, domain, priority, next_fetch_at, added_at, QUEUE_EXPLORATION)
+                for url, domain, priority, next_fetch_at, added_at in cur.fetchall()
+            ]
+            self._delete_queue_entries(cur, [row[0] for row in rows])
+            self._insert_pending_queue_rows(cur, rows)
             count = len(rows)
 
         self._conn.commit()
@@ -1473,14 +1492,17 @@ class UrlLedger:
                 return 0
 
             cur.execute(
-                """UPDATE frontier
-                    SET queue_class = %s
-                    WHERE url = ANY(%s)
-                    RETURNING url, domain, priority, next_fetch_at, added_at, queue_class, status""",
-                (QUEUE_EXPLORATION, promoted_urls),
+                f"""SELECT url, domain, priority, next_fetch_at, added_at
+                    FROM {self._queue_table_sql(QUEUE_BACKLOG)}
+                    WHERE url = ANY(%s)""",
+                (promoted_urls,),
             )
-            rows = cur.fetchall()
-            self._replace_pending_queue_rows(cur, self._project_pending_queue_rows(rows))
+            rows = [
+                (url, domain, priority, next_fetch_at, added_at, QUEUE_EXPLORATION)
+                for url, domain, priority, next_fetch_at, added_at in cur.fetchall()
+            ]
+            self._delete_queue_entries(cur, [row[0] for row in rows])
+            self._insert_pending_queue_rows(cur, rows)
             count = len(rows)
 
         self._conn.commit()
@@ -1501,7 +1523,6 @@ class UrlLedger:
                 domain,
                 0,
                 priority,
-                QUEUE_EXPLORATION,
                 DISCOVERY_SEED,
                 ARCHETYPE_GENERIC_PAGE,
                 now,
@@ -1512,25 +1533,29 @@ class UrlLedger:
             psycopg2.extras.execute_values(
                 cur,
                 """INSERT INTO frontier (
-                       url, domain, depth, priority, queue_class, discovery_kind, archetype, source_url, added_at, next_fetch_at, status
+                       url, domain, depth, priority, discovery_kind, archetype, source_url, added_at, next_fetch_at
                    )
                    VALUES %s
                    ON CONFLICT (url) DO UPDATE SET
-                       status = 'pending',
-                       queue_class = EXCLUDED.queue_class,
                        added_at = EXCLUDED.added_at,
                        next_fetch_at = EXCLUDED.next_fetch_at,
                        priority = EXCLUDED.priority,
                        fail_streak = 0,
-                       last_error = NULL
-                   RETURNING url, domain, priority, next_fetch_at, added_at, queue_class, status""",
+                       last_error = NULL,
+                       terminal_reason = NULL,
+                       terminalized_at = NULL
+                   RETURNING url, domain, priority, next_fetch_at, added_at""",
                 rows,
-                template="(%s, %s, %s, %s, %s, %s, %s, NULL, %s, %s, 'pending')",
+                template="(%s, %s, %s, %s, %s, %s, NULL, %s, %s)",
                 page_size=200,
             )
             frontier_rows = cur.fetchall()
-            self._replace_pending_queue_rows(cur, self._project_pending_queue_rows(frontier_rows))
-            self._delete_active_leases(cur, [row[0] for row in frontier_rows])
+            pending_rows = [
+                (url, domain, priority, next_fetch_at, added_at, QUEUE_EXPLORATION)
+                for url, domain, priority, next_fetch_at, added_at in frontier_rows
+            ]
+            self._replace_pending_queue_rows(cur, pending_rows)
+            self._delete_active_leases(cur, [row[0] for row in pending_rows])
             affected = len(frontier_rows)
         self._conn.commit()
         return affected

@@ -16,8 +16,6 @@ class FrontierQuarantine:
         queue_exploration: str,
         queue_backlog: str,
         queue_recrawl: str,
-        pending_status: str,
-        failed_status: str,
         blocked_queue_table: str,
         queue_table_sql: Callable[[str], str],
         delete_queue_entries: Callable,
@@ -28,8 +26,6 @@ class FrontierQuarantine:
         self._queue_exploration = queue_exploration
         self._queue_backlog = queue_backlog
         self._queue_recrawl = queue_recrawl
-        self._pending_status = pending_status
-        self._failed_status = failed_status
         self._blocked_queue_table = blocked_queue_table
         self._queue_table_sql = queue_table_sql
         self._delete_queue_entries = delete_queue_entries
@@ -44,19 +40,19 @@ class FrontierQuarantine:
         with self._conn.cursor() as cur:
             cur.execute(
                 f"""SELECT queue.url, queue.domain, queue.priority, queue.next_fetch_at, queue.added_at,
-                           %s AS queue_class, '{self._pending_status}' AS status
+                           %s AS queue_class
                     FROM {self._queue_table_sql(self._queue_exploration)} AS queue
                     JOIN domain_state ON domain_state.host_key = queue.domain
                     WHERE domain_state.backoff_until > %s
                     UNION ALL
                     SELECT queue.url, queue.domain, queue.priority, queue.next_fetch_at, queue.added_at,
-                           %s AS queue_class, '{self._pending_status}' AS status
+                           %s AS queue_class
                     FROM {self._queue_table_sql(self._queue_backlog)} AS queue
                     JOIN domain_state ON domain_state.host_key = queue.domain
                     WHERE domain_state.backoff_until > %s
                     UNION ALL
                     SELECT queue.url, queue.domain, queue.priority, queue.next_fetch_at, queue.added_at,
-                           %s AS queue_class, '{self._pending_status}' AS status
+                           %s AS queue_class
                     FROM {self._queue_table_sql(self._queue_recrawl)} AS queue
                     JOIN domain_state ON domain_state.host_key = queue.domain
                     WHERE domain_state.backoff_until > %s""",
@@ -113,17 +109,19 @@ class FrontierQuarantine:
                         RETURNING blocked.url
                     )
                     UPDATE frontier
-                    SET status = '{self._failed_status}',
-                        next_fetch_at = %s,
+                    SET next_fetch_at = %s,
                         lease_token = NULL,
                         lease_expires_at = NULL,
-                        last_error = COALESCE(last_error, 'retry_quarantine_retired')
+                        last_error = COALESCE(last_error, 'retry_quarantine_retired'),
+                        terminal_reason = COALESCE(terminal_reason, last_error, 'retry_quarantine_retired'),
+                        terminalized_at = COALESCE(terminalized_at, %s)
                     WHERE url IN (SELECT url FROM removed)
                     RETURNING url""",
                 (
                     min_consecutive_failures,
                     now - min_quarantine_seconds,
                     limit,
+                    now,
                     now,
                 ),
             )
@@ -138,7 +136,7 @@ class FrontierQuarantine:
         per_domain: int,
         now: float | None = None,
     ) -> int:
-        """Restore blocked URLs whose domains have already recovered."""
+        """Return recovered blocked URLs to backlog."""
         if limit <= 0 or per_domain <= 0:
             return 0
 
@@ -152,8 +150,7 @@ class FrontierQuarantine:
                             blocked.priority,
                             blocked.next_fetch_at,
                             blocked.added_at,
-                            blocked.queue_class,
-                            '{self._pending_status}' AS status,
+                            %s AS queue_class,
                             ROW_NUMBER() OVER (
                                 PARTITION BY blocked.domain
                                 ORDER BY blocked.next_fetch_at ASC, blocked.added_at ASC, blocked.url ASC
@@ -178,9 +175,8 @@ class FrontierQuarantine:
                         blocked.priority,
                         blocked.next_fetch_at,
                         blocked.added_at,
-                        blocked.queue_class,
-                        '{self._pending_status}' AS status""",
-                (now, per_domain, limit),
+                        %s AS queue_class""",
+                (self._queue_backlog, now, per_domain, limit, self._queue_backlog),
             )
             rows = cur.fetchall()
             if rows:
@@ -196,7 +192,7 @@ class FrontierQuarantine:
         max_consecutive_failures: int | None = None,
         now: float | None = None,
     ) -> int:
-        """Promote a small cooled-down subset from blocked queue back into normal queues."""
+        """Return a small cooled-down subset from blocked queue back into backlog."""
         if limit <= 0 or per_domain <= 0:
             return 0
 
@@ -208,23 +204,15 @@ class FrontierQuarantine:
                 else max_consecutive_failures
             )
             cur.execute(
-                f"""WITH normal_pending_domains AS (
-                        SELECT DISTINCT domain FROM {self._queue_table_sql(self._queue_exploration)}
-                        UNION
-                        SELECT DISTINCT domain FROM {self._queue_table_sql(self._queue_backlog)}
-                        UNION
-                        SELECT DISTINCT domain FROM {self._queue_table_sql(self._queue_recrawl)}
-                    ), ranked_candidates AS (
+                f"""WITH ranked_candidates AS (
                         SELECT
                             blocked.url,
                             blocked.domain,
                             blocked.priority,
                             blocked.next_fetch_at,
                             blocked.added_at,
-                            blocked.queue_class,
+                            %s AS queue_class,
                             COALESCE(domain_state.consecutive_failures, 0) AS failure_count,
-                            CASE WHEN normal_pending_domains.domain IS NULL THEN 0 ELSE 1 END AS normal_pending_rank,
-                            '{self._pending_status}' AS status,
                             ROW_NUMBER() OVER (
                                 PARTITION BY blocked.domain
                                 ORDER BY
@@ -235,7 +223,6 @@ class FrontierQuarantine:
                             ) AS domain_rownum
                         FROM {self._blocked_queue_table} AS blocked
                         LEFT JOIN domain_state ON domain_state.host_key = blocked.domain
-                        LEFT JOIN normal_pending_domains ON normal_pending_domains.domain = blocked.domain
                         WHERE COALESCE(domain_state.backoff_until, 0) <= %s
                           AND (
                                 %s IS NULL
@@ -246,9 +233,7 @@ class FrontierQuarantine:
                         FROM ranked_candidates
                         WHERE domain_rownum <= %s
                         ORDER BY
-                            normal_pending_rank ASC,
                             failure_count ASC,
-                            priority DESC,
                             next_fetch_at ASC,
                             added_at ASC,
                             url ASC
@@ -263,9 +248,16 @@ class FrontierQuarantine:
                         blocked.priority,
                         blocked.next_fetch_at,
                         blocked.added_at,
-                        blocked.queue_class,
-                        '{self._pending_status}' AS status""",
-                (now, effective_max_failures, effective_max_failures, per_domain, limit),
+                        %s AS queue_class""",
+                (
+                    self._queue_backlog,
+                    now,
+                    effective_max_failures,
+                    effective_max_failures,
+                    per_domain,
+                    limit,
+                    self._queue_backlog,
+                ),
             )
             rows = cur.fetchall()
             if rows:

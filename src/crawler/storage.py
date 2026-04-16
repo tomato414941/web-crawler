@@ -16,11 +16,7 @@ from .error_stats import categorize_crawl_error
 from .domain_manager import compute_host_budget
 from .frontier import (
     BLOCKED_DOMAIN_BACKOFF_TABLE,
-    DONE_STATUS,
-    FAILED_STATUS,
-    LEASED_STATUS,
     LEASE_TABLE,
-    PENDING_STATUS,
     QUEUE_CLASS_ORDER,
     QUEUE_TABLE_BY_CLASS,
 )
@@ -36,7 +32,6 @@ PAGES_REQUIRED_COLUMNS = {
     "domain",
     "title",
     "content",
-    "status",
     "content_length",
     "depth",
     "source_url",
@@ -45,8 +40,6 @@ PAGES_REQUIRED_COLUMNS = {
     "created_at",
 }
 FRONTIER_STATS_REQUIRED_COLUMNS = {
-    "status",
-    "queue_class",
     "archetype",
     "domain",
     "last_error",
@@ -330,8 +323,6 @@ class PgStorage:
                 frontier_exists = cur.fetchone()[0] is not None
 
                 frontier_status: dict[str, int] = {}
-                legacy_frontier_status: dict[str, int] = {}
-                queue_classes: dict[str, int] = {}
                 pending_queue_classes: dict[str, int] = {}
                 blocked_queue_classes: dict[str, int] = {}
                 readiness: dict[str, object] = {}
@@ -380,23 +371,11 @@ class PgStorage:
                         queue_class_order=QUEUE_CLASS_ORDER,
                         blocked_queue_table=BLOCKED_DOMAIN_BACKOFF_TABLE,
                         lease_table=LEASE_TABLE,
-                        pending_status=PENDING_STATUS,
-                        leased_status=LEASED_STATUS,
-                        done_status=DONE_STATUS,
-                        failed_status=FAILED_STATUS,
                     )
 
-                    legacy_frontier_status = observability.legacy_status_counts()
                     frontier_status = observability.status_counts()
                     pending_queue_classes = dict(frontier_status.get("pending_queue_tables", {}))
                     blocked_queue_classes = dict(frontier_status.get("blocked_queue_classes", {}))
-
-                    cur.execute(
-                        """SELECT queue_class, COUNT(*)
-                           FROM public.frontier
-                           GROUP BY queue_class"""
-                    )
-                    queue_classes = {queue_class: count for queue_class, count in cur.fetchall()}
 
                     cur.execute(
                         """SELECT archetype, COUNT(*)
@@ -613,11 +592,19 @@ class PgStorage:
                     }
 
                     cur.execute(
-                        """SELECT last_error, COUNT(*)
-                           FROM public.frontier
-                           WHERE last_error IS NOT NULL
-                             AND status IN ('pending', 'failed')
-                           GROUP BY last_error"""
+                        """WITH retry_surface AS (
+                               SELECT url FROM public.frontier_queue_exploration
+                               UNION
+                               SELECT url FROM public.frontier_queue_backlog
+                               UNION
+                               SELECT url FROM public.frontier_queue_recrawl
+                           )
+                           SELECT frontier.last_error, COUNT(*)
+                           FROM public.frontier AS frontier
+                           LEFT JOIN retry_surface ON retry_surface.url = frontier.url
+                           WHERE frontier.last_error IS NOT NULL
+                             AND (frontier.terminal_reason IS NOT NULL OR retry_surface.url IS NOT NULL)
+                           GROUP BY frontier.last_error"""
                     )
                     error_counts = Counter()
                     for error, count in cur.fetchall():
@@ -638,12 +625,20 @@ class PgStorage:
                     }
 
                     cur.execute(
-                        """SELECT domain, COUNT(*)
-                           FROM public.frontier
-                           WHERE last_error IS NOT NULL
-                             AND status IN ('pending', 'failed')
-                           GROUP BY domain
-                           ORDER BY COUNT(*) DESC, domain ASC
+                        """WITH retry_surface AS (
+                               SELECT url FROM public.frontier_queue_exploration
+                               UNION
+                               SELECT url FROM public.frontier_queue_backlog
+                               UNION
+                               SELECT url FROM public.frontier_queue_recrawl
+                           )
+                           SELECT frontier.domain, COUNT(*)
+                           FROM public.frontier AS frontier
+                           LEFT JOIN retry_surface ON retry_surface.url = frontier.url
+                           WHERE frontier.last_error IS NOT NULL
+                             AND (frontier.terminal_reason IS NOT NULL OR retry_surface.url IS NOT NULL)
+                           GROUP BY frontier.domain
+                           ORDER BY COUNT(*) DESC, frontier.domain ASC
                            LIMIT 10"""
                     )
                     top_error_domains = [
@@ -680,8 +675,6 @@ class PgStorage:
             "newest_crawl": row[3],
             "total_bytes": row[4],
             "frontier_status": frontier_status,
-            "legacy_frontier_status": legacy_frontier_status,
-            "queue_classes": queue_classes,
             "pending_queue_classes": pending_queue_classes,
             "blocked_queue_classes": blocked_queue_classes,
             "readiness": readiness,
