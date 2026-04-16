@@ -88,11 +88,14 @@ def test_recrawl_stale_skips_when_pending_queue_is_full(pg_resources):
     daemon._recrawl_stale(storage, frontier)
 
     with storage._conn.cursor() as cur:
-        cur.execute("SELECT status FROM frontier WHERE url = %s", (stale_url,))
-        (status,) = cur.fetchone()
+        cur.execute(
+            "SELECT COUNT(*) FROM frontier_queue_recrawl WHERE url = %s",
+            (stale_url,),
+        )
+        (recrawl_count,) = cur.fetchone()
 
     assert frontier.pending_count() == 3
-    assert status == "done"
+    assert recrawl_count == 0
 
 
 def test_recrawl_stale_requeues_only_oldest_rows_needed(pg_resources):
@@ -123,20 +126,19 @@ def test_recrawl_stale_requeues_only_oldest_rows_needed(pg_resources):
     with storage._conn.cursor() as cur:
         cur.execute(
             """
-            SELECT url, status
-            FROM frontier
+            SELECT url
+            FROM frontier_queue_recrawl
             WHERE url LIKE 'https://example.com/stale-%'
             ORDER BY url
             """
         )
-        statuses = dict(cur.fetchall())
+        recrawl_urls = [url for (url,) in cur.fetchall()]
 
     assert frontier.pending_count() == 3
-    assert statuses == {
-        "https://example.com/stale-1": "pending",
-        "https://example.com/stale-2": "pending",
-        "https://example.com/stale-3": "done",
-    }
+    assert recrawl_urls == [
+        "https://example.com/stale-1",
+        "https://example.com/stale-2",
+    ]
 
 
 @pytest.mark.asyncio
