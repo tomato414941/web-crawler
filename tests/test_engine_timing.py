@@ -84,11 +84,10 @@ class _FakeStorage:
 
 @pytest.mark.asyncio
 async def test_crawler_engine_records_stage_timings():
-    frontier = _FakeFrontier(CrawlTask(url="https://example.com/", depth=0, lease_token="lease-1"))
+    frontier = _FakeFrontier(CrawlTask(url="https://example.com/", lease_token="lease-1"))
     engine = CrawlerEngine(
         start_url="https://example.com/",
         max_pages=1,
-        max_depth=1,
         frontier=frontier,
         domain_manager=_FakeDomainManager(),
     )
@@ -129,11 +128,10 @@ class _SlowFrontier(_FakeFrontier):
 
 @pytest.mark.asyncio
 async def test_parse_frontier_delay_does_not_extend_fetch_slot():
-    frontier = _SlowFrontier(CrawlTask(url="https://example.com/", depth=0, lease_token="lease-1"))
+    frontier = _SlowFrontier(CrawlTask(url="https://example.com/", lease_token="lease-1"))
     engine = CrawlerEngine(
         start_url="https://example.com/",
         max_pages=1,
-        max_depth=1,
         frontier=frontier,
         domain_manager=_FakeDomainManager(),
     )
@@ -156,11 +154,10 @@ class _SlowStorage(_FakeStorage):
 
 @pytest.mark.asyncio
 async def test_queue_wait_metrics_record_backpressure():
-    frontier = _FakeFrontier(CrawlTask(url="https://example.com/", depth=0, lease_token="lease-1"))
+    frontier = _FakeFrontier(CrawlTask(url="https://example.com/", lease_token="lease-1"))
     engine = CrawlerEngine(
         start_url="https://example.com/",
         max_pages=1,
-        max_depth=1,
         frontier=frontier,
         domain_manager=_FakeDomainManager(),
     )

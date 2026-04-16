@@ -40,7 +40,6 @@ LATENCY_BUCKET_VERY_SLOW_MS = 1000.0
 URL_LEDGER_REQUIRED_COLUMNS = {
     "url",
     "domain",
-    "depth",
     "priority",
     "source_url",
     "added_at",
@@ -102,7 +101,6 @@ class CrawlTask:
     """A URL to crawl with metadata."""
 
     url: str
-    depth: int
     priority: float = 1.0
     queue_class: str | None = None
     source_url: str | None = None
@@ -340,7 +338,6 @@ class UrlLedger:
         """Merge duplicate task metadata before bulk upsert."""
         return CrawlTask(
             url=current.url,
-            depth=min(current.depth, candidate.depth),
             priority=max(current.priority, candidate.priority),
             queue_class=self._merge_queue_class(current.queue_class, candidate.queue_class),
             source_url=current.source_url or candidate.source_url,
@@ -355,7 +352,6 @@ class UrlLedger:
             normalized_url = normalize_url(task.url)
             normalized = CrawlTask(
                 url=normalized_url,
-                depth=task.depth,
                 priority=task.priority,
                 queue_class=task.queue_class,
                 source_url=task.source_url,
@@ -377,7 +373,6 @@ class UrlLedger:
             prepared.append(
                 CrawlTask(
                     url=task.url,
-                    depth=task.depth,
                     priority=task.priority,
                     queue_class=self._classify_queue(task, known_count=known_count),
                     source_url=task.source_url,
@@ -695,7 +690,6 @@ class UrlLedger:
                 (
                     task.url,
                     domain,
-                    task.depth,
                     task.priority,
                     task.source_url,
                     task.added_at,
@@ -708,18 +702,16 @@ class UrlLedger:
                 psycopg2.extras.execute_values(
                     cur,
                     f"""INSERT INTO {URL_LEDGER_TABLE} (
-                           url, domain, depth, priority, source_url, added_at, next_fetch_at
+                           url, domain, priority, source_url, added_at, next_fetch_at
                        )
                        VALUES %s
                        ON CONFLICT (url) DO UPDATE SET
                            priority = GREATEST({URL_LEDGER_TABLE}.priority, EXCLUDED.priority),
                            source_url = COALESCE({URL_LEDGER_TABLE}.source_url, EXCLUDED.source_url),
-                           depth = LEAST({URL_LEDGER_TABLE}.depth, EXCLUDED.depth),
                            added_at = LEAST({URL_LEDGER_TABLE}.added_at, EXCLUDED.added_at),
                            next_fetch_at = LEAST({URL_LEDGER_TABLE}.next_fetch_at, EXCLUDED.next_fetch_at)
                        WHERE
                            EXCLUDED.priority > {URL_LEDGER_TABLE}.priority
-                           OR EXCLUDED.depth < {URL_LEDGER_TABLE}.depth
                            OR ({URL_LEDGER_TABLE}.source_url IS NULL AND EXCLUDED.source_url IS NOT NULL)
                            OR EXCLUDED.next_fetch_at < {URL_LEDGER_TABLE}.next_fetch_at
                        RETURNING url, domain, priority, next_fetch_at, added_at""",
@@ -836,7 +828,6 @@ class UrlLedger:
                         )
                         RETURNING
                             url,
-                            depth,
                             priority,
                             source_url,
                             added_at,
@@ -849,7 +840,7 @@ class UrlLedger:
                     self._delete_queue_entries(cur, [row[0]])
                     self._upsert_active_leases(
                         cur,
-                        [(row[0], row[6], normalized_queue_classes[0], lease_token, lease_expires_at)],
+                        [(row[0], row[5], normalized_queue_classes[0], lease_token, lease_expires_at)],
                     )
             self._conn.commit()
         except Exception:
@@ -860,7 +851,6 @@ class UrlLedger:
         if row:
             (
                 url,
-                depth,
                 priority,
                 source_url,
                 added_at,
@@ -868,7 +858,7 @@ class UrlLedger:
                 _domain,
             ) = row
             return CrawlTask(
-                url=url, depth=depth, priority=priority,
+                url=url, priority=priority,
                 source_url=source_url, added_at=added_at,
                 next_fetch_at=next_fetch_at,
                 lease_token=lease_token, lease_expires_at=lease_expires_at,
@@ -935,7 +925,6 @@ class UrlLedger:
                         )
                         RETURNING
                             url,
-                            depth,
                             priority,
                             source_url,
                             added_at,
@@ -948,7 +937,7 @@ class UrlLedger:
                     self._delete_queue_entries(cur, [row[0] for row in rows])
                     self._upsert_active_leases(
                         cur,
-                        [(row[0], row[6], normalized_queue_classes[0], lease_token, lease_expires_at) for row in rows],
+                        [(row[0], row[5], normalized_queue_classes[0], lease_token, lease_expires_at) for row in rows],
                     )
             self._conn.commit()
         except Exception:
@@ -959,7 +948,6 @@ class UrlLedger:
         return [
             CrawlTask(
                 url=url,
-                depth=depth,
                 priority=priority,
                 source_url=source_url,
                 added_at=added_at,
@@ -969,7 +957,6 @@ class UrlLedger:
             )
             for (
                 url,
-                depth,
                 priority,
                 source_url,
                 added_at,
@@ -1301,7 +1288,6 @@ class UrlLedger:
             rows.append((
                 normalized,
                 domain,
-                0,
                 priority,
                 now,
                 now,
@@ -1311,7 +1297,7 @@ class UrlLedger:
             psycopg2.extras.execute_values(
                 cur,
                 f"""INSERT INTO {URL_LEDGER_TABLE} (
-                       url, domain, depth, priority, source_url, added_at, next_fetch_at
+                       url, domain, priority, source_url, added_at, next_fetch_at
                    )
                    VALUES %s
                    ON CONFLICT (url) DO UPDATE SET
@@ -1324,7 +1310,7 @@ class UrlLedger:
                        terminalized_at = NULL
                    RETURNING url, domain, priority, next_fetch_at, added_at""",
                 rows,
-                template="(%s, %s, %s, %s, NULL, %s, %s)",
+                template="(%s, %s, %s, NULL, %s, %s)",
                 page_size=200,
             )
             ledger_rows = cur.fetchall()

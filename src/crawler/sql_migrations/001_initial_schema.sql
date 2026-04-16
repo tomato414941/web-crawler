@@ -6,7 +6,6 @@ CREATE TABLE IF NOT EXISTS pages (
     content TEXT,
     status INTEGER,
     content_length INTEGER,
-    depth INTEGER,
     source_url TEXT,
     outlinks TEXT[],
     crawled_at DOUBLE PRECISION NOT NULL,
@@ -19,7 +18,6 @@ CREATE INDEX IF NOT EXISTS idx_pages_crawled_at ON pages(crawled_at);
 CREATE TABLE IF NOT EXISTS url_ledger (
     url TEXT PRIMARY KEY,
     domain TEXT NOT NULL,
-    depth INTEGER NOT NULL,
     priority REAL NOT NULL DEFAULT 1.0,
     archetype TEXT NOT NULL DEFAULT 'generic_page',
     source_url TEXT,

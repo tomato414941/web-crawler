@@ -38,7 +38,6 @@ class CrawlResult:
     url: str
     status: int
     content_length: int
-    depth: int
     source_url: str | None
     timestamp: float
     content: str
@@ -59,7 +58,6 @@ class CrawlFailure:
 
     url: str
     error: str
-    depth: int
     retryable: bool
     timings: CrawlStageTimings | None = None
 
