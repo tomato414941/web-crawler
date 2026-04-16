@@ -6,11 +6,6 @@ import pytest
 
 from crawler.core import Response
 from crawler.crawl import CrawlerEngine
-from crawler.discovery import (
-    ARCHETYPE_DOCUMENT_PAGE,
-    ARCHETYPE_GENERIC_PAGE,
-    ARCHETYPE_REDIRECT_HUB,
-)
 from crawler.frontier import CrawlTask
 
 
@@ -65,9 +60,7 @@ class FakeFrontier:
             known_count = domain_counts.get(domain, 0) + batch_counts.get(domain, 0)
             queue_class = task.queue_class
             if queue_class is None:
-                if task.archetype in {"registry_listing", "redirect_hub"}:
-                    queue_class = "backlog"
-                elif known_count >= 8:
+                if known_count >= 8:
                     queue_class = "backlog"
                 else:
                     queue_class = "backlog"
@@ -76,7 +69,6 @@ class FakeFrontier:
                 depth=task.depth,
                 priority=task.priority,
                 queue_class=queue_class,
-                archetype=task.archetype,
                 source_url=task.source_url,
                 added_at=task.added_at,
                 next_fetch_at=task.next_fetch_at,
@@ -405,15 +397,12 @@ async def test_crawler_assigns_discovery_metadata_to_outlinks():
     added = frontier.added_batches[0]
     by_url = {task.url: task for task in added}
 
-    assert by_url["https://example.com/domains"].archetype == ARCHETYPE_GENERIC_PAGE
     assert by_url["https://example.com/domains"].priority > by_url[
         "https://docs.example.com/guide"
     ].priority
-    assert by_url["https://docs.example.com/guide"].archetype == ARCHETYPE_GENERIC_PAGE
     assert by_url["https://docs.example.com/guide"].priority > by_url[
         "https://external.example.net/project"
     ].priority
-    assert by_url["https://external.example.net/project"].archetype == ARCHETYPE_GENERIC_PAGE
     assert by_url["https://docs.example.com/guide"].queue_class == "backlog"
     assert by_url["https://external.example.net/project"].queue_class == "backlog"
 
@@ -451,43 +440,6 @@ async def test_crawler_assigns_known_hosts_to_backlog_queue():
     added = frontier.added_batches[0]
     assert added[0].queue_class == "backlog"
 
-
-async def test_crawler_assigns_page_archetypes_to_outlinks():
-    frontier = FakeFrontier([CrawlTask(url="https://example.com/", depth=0)])
-    domain_manager = FakeDomainManager()
-    fetcher = FakeFetcher(
-        [
-            Response(
-                url="https://example.com/",
-                status=200,
-                content=(
-                    b'<a href="https://example.com/go/rfc9142">redirect hub</a>'
-                    b'<a href="https://docs.example.com/doc/rfc9142">document</a>'
-                ),
-                headers={"content-type": "text/html; charset=utf-8"},
-            )
-        ]
-    )
-
-    async with CrawlerEngine(
-        max_pages=1,
-        max_depth=1,
-        same_domain=False,
-        frontier=frontier,
-        domain_manager=domain_manager,
-        seed_urls=["https://example.com/", "https://docs.example.com/"],
-    ) as engine:
-        engine.fetcher = fetcher
-        await engine.crawl()
-
-    added = frontier.added_batches[0]
-    by_url = {task.url: task for task in added}
-
-    assert by_url["https://example.com/go/rfc9142"].archetype == ARCHETYPE_REDIRECT_HUB
-    assert by_url["https://docs.example.com/doc/rfc9142"].archetype == ARCHETYPE_DOCUMENT_PAGE
-    assert by_url["https://docs.example.com/doc/rfc9142"].priority > by_url[
-        "https://example.com/go/rfc9142"
-    ].priority
 
 
 @pytest.mark.asyncio

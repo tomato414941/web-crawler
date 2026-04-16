@@ -40,7 +40,6 @@ PAGES_REQUIRED_COLUMNS = {
     "created_at",
 }
 FRONTIER_STATS_REQUIRED_COLUMNS = {
-    "archetype",
     "domain",
     "last_error",
 }
@@ -326,7 +325,6 @@ class PgStorage:
                 pending_queue_classes: dict[str, int] = {}
                 blocked_queue_classes: dict[str, int] = {}
                 readiness: dict[str, object] = {}
-                archetypes: dict[str, int] = {}
                 top_pending_domains: list[dict[str, object]] = []
                 top_blocked_domains: list[dict[str, object]] = []
                 top_slow_domains: list[dict[str, object]] = []
@@ -376,13 +374,6 @@ class PgStorage:
                     frontier_status = observability.status_counts()
                     pending_queue_classes = dict(frontier_status.get("pending_queue_tables", {}))
                     blocked_queue_classes = dict(frontier_status.get("blocked_queue_classes", {}))
-
-                    cur.execute(
-                        """SELECT archetype, COUNT(*)
-                           FROM public.frontier
-                           GROUP BY archetype"""
-                    )
-                    archetypes = {archetype: count for archetype, count in cur.fetchall()}
 
                     cur.execute(
                         f"""SELECT domain, COUNT(*)
@@ -678,7 +669,6 @@ class PgStorage:
             "pending_queue_classes": pending_queue_classes,
             "blocked_queue_classes": blocked_queue_classes,
             "readiness": readiness,
-            "archetypes": archetypes,
             "top_page_domains": top_page_domains,
             "top_pending_domains": top_pending_domains,
             "top_blocked_domains": top_blocked_domains,

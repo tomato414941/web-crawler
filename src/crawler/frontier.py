@@ -13,11 +13,6 @@ from urllib.parse import urlparse
 import psycopg2.extras
 
 from .config import settings
-from .discovery import (
-    ARCHETYPE_GENERIC_PAGE,
-    ARCHETYPE_REDIRECT_HUB,
-    ARCHETYPE_REGISTRY_LISTING,
-)
 from .frontier_observability import FrontierObservability, FrontierReadiness
 from .frontier_quarantine import FrontierQuarantine
 from .schema import assert_public_table_columns
@@ -46,7 +41,6 @@ FRONTIER_REQUIRED_COLUMNS = {
     "domain",
     "depth",
     "priority",
-    "archetype",
     "source_url",
     "added_at",
     "next_fetch_at",
@@ -110,7 +104,6 @@ class CrawlTask:
     depth: int
     priority: float = 1.0
     queue_class: str | None = None
-    archetype: str = ARCHETYPE_GENERIC_PAGE
     source_url: str | None = None
     added_at: float = 0.0
     next_fetch_at: float = 0.0
@@ -346,8 +339,6 @@ class UrlLedger:
         """Map a task into the queue class used by the scheduler."""
         if task.queue_class in FRONTIER_ALLOWED_QUEUE_CLASSES:
             return task.queue_class
-        if task.archetype in {ARCHETYPE_REGISTRY_LISTING, ARCHETYPE_REDIRECT_HUB}:
-            return QUEUE_BACKLOG
         if known_count >= EXPLORATION_DOMAIN_BUDGET:
             return QUEUE_BACKLOG
         return QUEUE_BACKLOG
@@ -369,12 +360,6 @@ class UrlLedger:
             depth=min(current.depth, candidate.depth),
             priority=max(current.priority, candidate.priority),
             queue_class=self._merge_queue_class(current.queue_class, candidate.queue_class),
-            archetype=(
-                candidate.archetype
-                if current.archetype == ARCHETYPE_GENERIC_PAGE
-                and candidate.archetype != ARCHETYPE_GENERIC_PAGE
-                else current.archetype
-            ),
             source_url=current.source_url or candidate.source_url,
             added_at=min(current.added_at, candidate.added_at),
             next_fetch_at=min(current.next_fetch_at, candidate.next_fetch_at),
@@ -390,7 +375,6 @@ class UrlLedger:
                 depth=task.depth,
                 priority=task.priority,
                 queue_class=task.queue_class,
-                archetype=task.archetype,
                 source_url=task.source_url,
                 added_at=task.added_at,
                 next_fetch_at=task.next_fetch_at,
@@ -413,7 +397,6 @@ class UrlLedger:
                     depth=task.depth,
                     priority=task.priority,
                     queue_class=self._classify_queue(task, known_count=known_count),
-                    archetype=task.archetype,
                     source_url=task.source_url,
                     added_at=task.added_at,
                     next_fetch_at=task.next_fetch_at,
@@ -776,7 +759,6 @@ class UrlLedger:
                     domain,
                     task.depth,
                     task.priority,
-                    task.archetype,
                     task.source_url,
                     task.added_at,
                     next_fetch_at,
@@ -787,18 +769,12 @@ class UrlLedger:
             with self._conn.cursor() as cur:
                 psycopg2.extras.execute_values(
                     cur,
-                    f"""INSERT INTO frontier (
-                           url, domain, depth, priority, archetype, source_url, added_at, next_fetch_at
+                    """INSERT INTO frontier (
+                           url, domain, depth, priority, source_url, added_at, next_fetch_at
                        )
                        VALUES %s
                        ON CONFLICT (url) DO UPDATE SET
                            priority = GREATEST(frontier.priority, EXCLUDED.priority),
-                           archetype = CASE
-                               WHEN frontier.archetype = '{ARCHETYPE_GENERIC_PAGE}'
-                                    AND EXCLUDED.archetype != '{ARCHETYPE_GENERIC_PAGE}'
-                                   THEN EXCLUDED.archetype
-                               ELSE frontier.archetype
-                           END,
                            source_url = COALESCE(frontier.source_url, EXCLUDED.source_url),
                            depth = LEAST(frontier.depth, EXCLUDED.depth),
                            added_at = LEAST(frontier.added_at, EXCLUDED.added_at),
@@ -806,10 +782,6 @@ class UrlLedger:
                        WHERE
                            EXCLUDED.priority > frontier.priority
                            OR EXCLUDED.depth < frontier.depth
-                           OR (
-                               frontier.archetype = '{ARCHETYPE_GENERIC_PAGE}'
-                               AND EXCLUDED.archetype != '{ARCHETYPE_GENERIC_PAGE}'
-                           )
                            OR (frontier.source_url IS NULL AND EXCLUDED.source_url IS NOT NULL)
                            OR EXCLUDED.next_fetch_at < frontier.next_fetch_at
                        RETURNING url, domain, priority, next_fetch_at, added_at""",
@@ -947,7 +919,6 @@ class UrlLedger:
                             url,
                             depth,
                             priority,
-                            archetype,
                             source_url,
                             added_at,
                             next_fetch_at,
@@ -972,7 +943,6 @@ class UrlLedger:
                 url,
                 depth,
                 priority,
-                archetype,
                 source_url,
                 added_at,
                 next_fetch_at,
@@ -980,7 +950,6 @@ class UrlLedger:
             ) = row
             return CrawlTask(
                 url=url, depth=depth, priority=priority,
-                archetype=archetype,
                 source_url=source_url, added_at=added_at,
                 next_fetch_at=next_fetch_at,
                 lease_token=lease_token, lease_expires_at=lease_expires_at,
@@ -1070,7 +1039,6 @@ class UrlLedger:
                             url,
                             depth,
                             priority,
-                            archetype,
                             source_url,
                             added_at,
                             next_fetch_at,
@@ -1095,7 +1063,6 @@ class UrlLedger:
                 url=url,
                 depth=depth,
                 priority=priority,
-                archetype=archetype,
                 source_url=source_url,
                 added_at=added_at,
                 next_fetch_at=next_fetch_at,
@@ -1106,7 +1073,6 @@ class UrlLedger:
                 url,
                 depth,
                 priority,
-                archetype,
                 source_url,
                 added_at,
                 next_fetch_at,
@@ -1508,7 +1474,6 @@ class UrlLedger:
                 domain,
                 0,
                 priority,
-                ARCHETYPE_GENERIC_PAGE,
                 now,
                 now,
             ))
@@ -1517,7 +1482,7 @@ class UrlLedger:
             psycopg2.extras.execute_values(
                 cur,
                 """INSERT INTO frontier (
-                       url, domain, depth, priority, archetype, source_url, added_at, next_fetch_at
+                       url, domain, depth, priority, source_url, added_at, next_fetch_at
                    )
                    VALUES %s
                    ON CONFLICT (url) DO UPDATE SET
@@ -1530,7 +1495,7 @@ class UrlLedger:
                        terminalized_at = NULL
                    RETURNING url, domain, priority, next_fetch_at, added_at""",
                 rows,
-                template="(%s, %s, %s, %s, %s, NULL, %s, %s)",
+                template="(%s, %s, %s, %s, NULL, %s, %s)",
                 page_size=200,
             )
             frontier_rows = cur.fetchall()

@@ -421,7 +421,6 @@ class CrawlerEngine:
             depth=0,
             priority=decision.priority,
             queue_class=QUEUE_EXPLORATION,
-            archetype=decision.archetype,
         )
 
     def _build_page_signals(self, response) -> PageSignals:
@@ -467,7 +466,6 @@ class CrawlerEngine:
                     url=link,
                     depth=depth,
                     priority=decision.priority,
-                    archetype=decision.archetype,
                     source_url=parent_url,
                 )
             )
