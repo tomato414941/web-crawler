@@ -1275,10 +1275,9 @@ class UrlLedger:
         *,
         keep_ready_per_domain: int = 128,
         keep_ready_per_branch: int = 16,
-        low_priority_threshold: float = 0.75,
         defer_seconds: float = 1800.0,
     ) -> int:
-        """Delay excess low-priority backlog so one host or branch cannot dominate ready work."""
+        """Delay excess ready backlog so one host or branch cannot dominate ready work."""
         if keep_ready_per_domain <= 0 or keep_ready_per_branch <= 0:
             return 0
 
@@ -1299,7 +1298,6 @@ class UrlLedger:
                             ) AS branch_rownum
                         FROM {self._queue_table_sql(QUEUE_BACKLOG)} AS queue
                         WHERE queue.next_fetch_at <= %s
-                          AND queue.priority <= %s
                     ), deferred AS (
                         SELECT ranked.url
                         FROM ranked
@@ -1312,7 +1310,6 @@ class UrlLedger:
                     RETURNING url, domain, priority, next_fetch_at, added_at""",
                 (
                     now,
-                    low_priority_threshold,
                     keep_ready_per_domain,
                     keep_ready_per_branch,
                     deferred_until,

@@ -23,7 +23,6 @@ class DaemonSchedulerPolicy:
         quarantine_retire_after_seconds: float,
         backlog_ready_per_domain: int,
         backlog_ready_per_branch: int,
-        backlog_low_priority: float,
         backlog_defer_seconds: float,
     ):
         self._seeds = seeds
@@ -38,7 +37,6 @@ class DaemonSchedulerPolicy:
         self._quarantine_retire_after_seconds = quarantine_retire_after_seconds
         self._backlog_ready_per_domain = backlog_ready_per_domain
         self._backlog_ready_per_branch = backlog_ready_per_branch
-        self._backlog_low_priority = backlog_low_priority
         self._backlog_defer_seconds = backlog_defer_seconds
 
     def prepare_frontier(self, frontier, *, recrawl_stale: Callable[[], None] | None = None) -> dict[str, int]:
@@ -59,7 +57,6 @@ class DaemonSchedulerPolicy:
         metrics["deferred"] = frontier.defer_overcrowded_backlog(
             keep_ready_per_domain=self._backlog_ready_per_domain,
             keep_ready_per_branch=self._backlog_ready_per_branch,
-            low_priority_threshold=self._backlog_low_priority,
             defer_seconds=self._backlog_defer_seconds,
         )
         metrics["rebalanced_after"] = self._rebalance_blocked(frontier)
@@ -74,7 +71,6 @@ class DaemonSchedulerPolicy:
         deferred = frontier.defer_overcrowded_backlog(
             keep_ready_per_domain=self._backlog_ready_per_domain,
             keep_ready_per_branch=self._backlog_ready_per_branch,
-            low_priority_threshold=self._backlog_low_priority,
             defer_seconds=self._backlog_defer_seconds,
         )
         promoted = self.promote_blocked_retry(frontier)
