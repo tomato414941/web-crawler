@@ -301,7 +301,6 @@ async def test_daemon_uses_configured_backlog_controls():
         recrawl_ttl=3600,
         backlog_ready_per_domain=7,
         backlog_ready_per_branch=2,
-        backlog_low_priority=0.4,
         backlog_defer_seconds=12.0,
     )
     frontier = FakeFrontier()
@@ -325,7 +324,6 @@ async def test_daemon_uses_configured_backlog_controls():
     assert frontier.defer_args == {
         "keep_ready_per_domain": 7,
         "keep_ready_per_branch": 2,
-        "low_priority_threshold": 0.4,
         "defer_seconds": 12.0,
     }
 

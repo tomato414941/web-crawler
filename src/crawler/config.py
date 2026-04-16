@@ -21,7 +21,6 @@ class CrawlerSettings(BaseSettings):
     max_host_backoff_seconds: float = 600.0
     daemon_keep_ready_per_domain: int = 128
     daemon_keep_ready_per_branch: int = 16
-    daemon_backlog_low_priority: float = 0.75
     daemon_backlog_defer_seconds: float = 1800.0
     daemon_min_ready_sleep: float = 0.5
     daemon_min_exploration_pending: int = 3
