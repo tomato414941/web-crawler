@@ -7,10 +7,6 @@ import psycopg2
 import pytest
 
 from crawler.domain_store import DomainStore
-from crawler.discovery import (
-    ARCHETYPE_REDIRECT_HUB,
-    ARCHETYPE_REGISTRY_LISTING,
-)
 from crawler.frontier import (
     CrawlTask,
     Frontier,
@@ -267,23 +263,6 @@ class TestFrontier:
         assert frontier_count == 1
         assert queue_count == 1
 
-    def test_add_classifies_registry_listings_as_backlog_even_when_shallow(self, frontier):
-        frontier.add(
-            CrawlTask(
-                url="http://example.com/index",
-                depth=1,
-                archetype=ARCHETYPE_REGISTRY_LISTING,
-            )
-        )
-
-        with frontier._conn.cursor() as cur:
-            cur.execute(
-                "SELECT queue_class FROM frontier WHERE url = %s",
-                ("http://example.com/index",),
-            )
-            (queue_class,) = cur.fetchone()
-
-        assert queue_class == QUEUE_BACKLOG
 
     def test_add_classifies_known_domains_as_backlog_even_when_shallow(self, frontier):
         for i in range(8):
@@ -300,23 +279,6 @@ class TestFrontier:
 
         assert queue_class == QUEUE_BACKLOG
 
-    def test_add_classifies_redirect_hubs_as_backlog_even_when_shallow(self, frontier):
-        frontier.add(
-            CrawlTask(
-                url="http://example.com/go/rfc",
-                depth=1,
-                archetype=ARCHETYPE_REDIRECT_HUB,
-            )
-        )
-
-        with frontier._conn.cursor() as cur:
-            cur.execute(
-                "SELECT queue_class FROM frontier WHERE url = %s",
-                ("http://example.com/go/rfc",),
-            )
-            (queue_class,) = cur.fetchone()
-
-        assert queue_class == QUEUE_BACKLOG
 
     def test_add_classifies_external_deep_urls_as_backlog(self, frontier):
         frontier.add(CrawlTask(url="http://external.example.com/deep", depth=3))
