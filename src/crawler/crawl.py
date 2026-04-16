@@ -32,7 +32,7 @@ from .frontier import (
 )
 from .output import StreamingOutputWriter
 from .result import CrawlFailure, CrawlResult, CrawlStageTimings
-from .urls import extract_links, url_branch_key
+from .urls import extract_links
 
 logger = logging.getLogger(__name__)
 
@@ -246,7 +246,6 @@ class CrawlerEngine:
         self._lease_lock = asyncio.Lock()
         self._failure_counts: Counter[str] = Counter()
         self._active_host_counts: Counter[str] = Counter()
-        self._active_branch_counts: Counter[tuple[str, str]] = Counter()
         self._parse_queue: asyncio.Queue[_FetchedPage | object] | None = None
         self._finalize_queue: asyncio.Queue[_FinalizeItem | object] | None = None
         self._publish_queue: asyncio.Queue[_PublishItem | object] | None = None
@@ -273,7 +272,6 @@ class CrawlerEngine:
             "backlog_workers": self.backlog_workers,
             "recrawl_workers": self.recrawl_workers,
             "active_hosts": len(self._active_host_counts),
-            "active_branches": len(self._active_branch_counts),
             "parse_queue_size": self._parse_queue.qsize() if self._parse_queue is not None else 0,
             "finalize_queue_size": self._finalize_queue.qsize()
             if self._finalize_queue is not None
@@ -614,30 +612,15 @@ class CrawlerEngine:
         """Return the host key used for in-flight request limiting."""
         return urlparse(url).netloc.lower()
 
-    def _branch_key_for_url(self, url: str) -> str:
-        """Return the branch key used for in-flight exploration diversity."""
-        return url_branch_key(url)
-
-    def _domain_branch_key_for_url(self, url: str) -> tuple[str, str]:
-        """Return the domain/branch key used for in-flight exploration diversity."""
-        return (self._host_key_for_url(url), self._branch_key_for_url(url))
-
     async def _release_active_host(self, url: str) -> None:
-        """Release in-flight host and branch reservations after fetch processing finishes."""
+        """Release in-flight host reservations after fetch processing finishes."""
         host_key = self._host_key_for_url(url)
-        domain_branch_key = self._domain_branch_key_for_url(url)
         async with self._lease_lock:
             current = self._active_host_counts.get(host_key, 0)
             if current <= 1:
                 self._active_host_counts.pop(host_key, None)
             else:
                 self._active_host_counts[host_key] = current - 1
-
-            current_branch = self._active_branch_counts.get(domain_branch_key, 0)
-            if current_branch <= 1:
-                self._active_branch_counts.pop(domain_branch_key, None)
-            else:
-                self._active_branch_counts[domain_branch_key] = current_branch - 1
 
     async def _claim_page_slot(self) -> bool:
         """Reserve capacity so concurrent workers do not exceed max_pages."""
@@ -1054,18 +1037,14 @@ class CrawlerEngine:
                 for host, count in self._active_host_counts.items()
                 if count >= self._host_inflight_budget(host)
             ]
-            excluded_domain_branches = list(self._active_branch_counts) if prioritize_breadth else []
             task = self.frontier.lease_next(
                 queue_classes=queue_classes,
                 prioritize_breadth=prioritize_breadth,
                 exclude_domains=excluded_hosts or None,
-                exclude_domain_branches=excluded_domain_branches or None,
             )
             if task is not None:
                 host_key = self._host_key_for_url(task.url)
-                domain_branch_key = self._domain_branch_key_for_url(task.url)
                 self._active_host_counts[host_key] += 1
-                self._active_branch_counts[domain_branch_key] += 1
             return task
 
     async def crawl(self) -> list[dict]:
