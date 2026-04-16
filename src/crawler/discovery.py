@@ -6,11 +6,6 @@ from dataclasses import dataclass
 from pathlib import PurePosixPath
 from urllib.parse import urlparse
 
-DISCOVERY_SEED = "seed"
-DISCOVERY_SAME_HOST = "same_host"
-DISCOVERY_SEED_HOST = "seed_host"
-DISCOVERY_EXTERNAL = "external"
-
 ARCHETYPE_GENERIC_PAGE = "generic_page"
 ARCHETYPE_DOCUMENT_PAGE = "document_page"
 ARCHETYPE_REDIRECT_HUB = "redirect_hub"

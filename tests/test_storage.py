@@ -152,7 +152,6 @@ def test_get_stats_includes_frontier_breakdown(pg_storage):
                 domain TEXT NOT NULL,
                 depth INTEGER NOT NULL,
                 priority REAL NOT NULL DEFAULT 1.0,
-                discovery_kind TEXT NOT NULL DEFAULT 'seed',
                 archetype TEXT NOT NULL DEFAULT 'generic_page',
                 source_url TEXT,
                 added_at DOUBLE PRECISION NOT NULL,
@@ -169,11 +168,11 @@ def test_get_stats_includes_frontier_breakdown(pg_storage):
         )
         cur.execute(
             """
-            INSERT INTO frontier (url, domain, depth, priority, discovery_kind, archetype, source_url, added_at, next_fetch_at)
+            INSERT INTO frontier (url, domain, depth, priority, archetype, source_url, added_at, next_fetch_at)
             VALUES
-                ('https://example.com/page1', 'example.com', 0, 2.0, 'seed', 'generic_page', NULL, 1710000000.0, 1710000000.0),
-                ('https://example.com/page2', 'example.com', 1, 1.25, 'same_host', 'document_page', 'https://example.com/page1', 1710000002.0, 1710000002.0),
-                ('https://other.com/page1', 'other.com', 1, 0.8, 'external', 'redirect_hub', 'https://example.com/page1', 1710000003.0, 1710000003.0)
+                ('https://example.com/page1', 'example.com', 0, 2.0, 'generic_page', NULL, 1710000000.0, 1710000000.0),
+                ('https://example.com/page2', 'example.com', 1, 1.25, 'document_page', 'https://example.com/page1', 1710000002.0, 1710000002.0),
+                ('https://other.com/page1', 'other.com', 1, 0.8, 'redirect_hub', 'https://example.com/page1', 1710000003.0, 1710000003.0)
             """
         )
         cur.execute(
@@ -302,13 +301,13 @@ def test_get_stats_includes_readiness_breakdown(pg_storage):
         cur.execute(
             """
             INSERT INTO frontier (
-                url, domain, depth, priority, discovery_kind, archetype,
+                url, domain, depth, priority, archetype,
                 source_url, added_at, next_fetch_at
             )
             VALUES
-                ('https://ready.example/', 'ready.example', 0, 1.0, 'seed', 'generic_page', NULL, %s, %s),
-                ('https://future.example/', 'future.example', 0, 1.0, 'seed', 'generic_page', NULL, %s, %s),
-                ('https://backoff.example/', 'backoff.example', 0, 1.0, 'seed', 'generic_page', NULL, %s, %s)
+                ('https://ready.example/', 'ready.example', 0, 1.0, 'generic_page', NULL, %s, %s),
+                ('https://future.example/', 'future.example', 0, 1.0, 'generic_page', NULL, %s, %s),
+                ('https://backoff.example/', 'backoff.example', 0, 1.0, 'generic_page', NULL, %s, %s)
             """,
             (now, now, now, now + 30.0, now, now),
         )
@@ -392,13 +391,13 @@ def test_get_stats_prioritizes_domains_blocked_by_backoff(pg_storage):
         cur.execute(
             """
             INSERT INTO frontier (
-                url, domain, depth, priority, discovery_kind, archetype,
+                url, domain, depth, priority, archetype,
                 source_url, added_at, next_fetch_at
             )
             VALUES
-                ('https://backoff.example/a', 'backoff.example', 0, 1.0, 'seed', 'generic_page', NULL, %s, %s),
-                ('https://backoff.example/b', 'backoff.example', 0, 1.0, 'seed', 'generic_page', NULL, %s, %s),
-                ('https://slot.example/', 'slot.example', 0, 1.0, 'seed', 'generic_page', NULL, %s, %s)
+                ('https://backoff.example/a', 'backoff.example', 0, 1.0, 'generic_page', NULL, %s, %s),
+                ('https://backoff.example/b', 'backoff.example', 0, 1.0, 'generic_page', NULL, %s, %s),
+                ('https://slot.example/', 'slot.example', 0, 1.0, 'generic_page', NULL, %s, %s)
             """,
             (now, now, now, now, now, now),
         )
@@ -457,12 +456,12 @@ def test_get_stats_counts_blocked_queue_classes(pg_storage):
         cur.execute(
             """
             INSERT INTO frontier (
-                url, domain, depth, priority, discovery_kind, archetype,
+                url, domain, depth, priority, archetype,
                 source_url, added_at, next_fetch_at
             )
             VALUES
-                ('https://blocked.example/explore', 'blocked.example', 0, 1.0, 'seed', 'generic_page', NULL, %s, %s),
-                ('https://blocked.example/backlog', 'blocked.example', 3, 1.0, 'same_host', 'generic_page', NULL, %s, %s)
+                ('https://blocked.example/explore', 'blocked.example', 0, 1.0, 'generic_page', NULL, %s, %s),
+                ('https://blocked.example/backlog', 'blocked.example', 3, 1.0, 'generic_page', NULL, %s, %s)
             """,
             (now, now, now, now),
         )
@@ -531,13 +530,13 @@ def test_get_stats_includes_top_slow_domains(pg_storage):
         cur.execute(
             """
             INSERT INTO frontier (
-                url, domain, depth, priority, discovery_kind, archetype,
+                url, domain, depth, priority, archetype,
                 source_url, added_at, next_fetch_at
             )
             VALUES
-                ('https://slow.example/a', 'slow.example', 0, 1.0, 'seed', 'generic_page', NULL, %s, %s),
-                ('https://slow.example/b', 'slow.example', 0, 1.0, 'same_host', 'generic_page', NULL, %s, %s),
-                ('https://fast.example/', 'fast.example', 0, 1.0, 'seed', 'generic_page', NULL, %s, %s)
+                ('https://slow.example/a', 'slow.example', 0, 1.0, 'generic_page', NULL, %s, %s),
+                ('https://slow.example/b', 'slow.example', 0, 1.0, 'generic_page', NULL, %s, %s),
+                ('https://fast.example/', 'fast.example', 0, 1.0, 'generic_page', NULL, %s, %s)
             """,
             (now, now, now, now, now, now),
         )
@@ -640,16 +639,16 @@ def test_get_stats_includes_active_error_breakdown(pg_storage):
         cur.execute(
             """
             INSERT INTO frontier (
-                url, domain, depth, priority, discovery_kind, archetype, source_url,
+                url, domain, depth, priority, archetype, source_url,
                 added_at, next_fetch_at, fail_streak, last_error
             )
             VALUES
-                ('https://example.com/404', 'example.com', 0, 1.0, 'seed', 'generic_page', NULL, 1710000000.0, 1710000000.0, 1, 'http_404'),
-                ('https://example.com/503', 'example.com', 0, 1.0, 'seed', 'generic_page', NULL, 1710000001.0, 1710000001.0, 1, 'http_503'),
-                ('https://other.com/timeout', 'other.com', 0, 1.0, 'external', 'generic_page', NULL, 1710000002.0, 1710000002.0, 2, 'timeout'),
-                ('https://other.com/disconnect', 'other.com', 0, 1.0, 'external', 'generic_page', NULL, 1710000003.0, 1710000003.0, 3, 'Server disconnected without sending a response.'),
-                ('https://third.com/connect', 'third.com', 0, 1.0, 'external', 'generic_page', NULL, 1710000004.0, 1710000004.0, 1, 'connection_error'),
-                ('https://third.com/other', 'third.com', 0, 1.0, 'external', 'generic_page', NULL, 1710000005.0, 1710000005.0, 1, 'weird_error')
+                ('https://example.com/404', 'example.com', 0, 1.0, 'generic_page', NULL, 1710000000.0, 1710000000.0, 1, 'http_404'),
+                ('https://example.com/503', 'example.com', 0, 1.0, 'generic_page', NULL, 1710000001.0, 1710000001.0, 1, 'http_503'),
+                ('https://other.com/timeout', 'other.com', 0, 1.0, 'generic_page', NULL, 1710000002.0, 1710000002.0, 2, 'timeout'),
+                ('https://other.com/disconnect', 'other.com', 0, 1.0, 'generic_page', NULL, 1710000003.0, 1710000003.0, 3, 'Server disconnected without sending a response.'),
+                ('https://third.com/connect', 'third.com', 0, 1.0, 'generic_page', NULL, 1710000004.0, 1710000004.0, 1, 'connection_error'),
+                ('https://third.com/other', 'third.com', 0, 1.0, 'generic_page', NULL, 1710000005.0, 1710000005.0, 1, 'weird_error')
             """
         )
     pg_storage._conn.commit()
