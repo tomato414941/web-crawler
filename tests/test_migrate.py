@@ -63,6 +63,8 @@ def test_apply_migrations_creates_expected_tables(migrated_dsn):
         "015_frontier_terminal_decision.sql",
         "016_drop_frontier_queue_class.sql",
         "017_drop_frontier_status.sql",
+        "018_drop_frontier_discovery_kind.sql",
+        "019_drop_frontier_archetype.sql",
     ]
 
     conn = psycopg2.connect(migrated_dsn)
@@ -96,6 +98,28 @@ def test_apply_migrations_creates_expected_tables(migrated_dsn):
             )
     finally:
         conn.close()
+
+
+def test_apply_migrations_drops_legacy_frontier_columns(migrated_dsn):
+    apply_migrations(migrated_dsn)
+
+    conn = psycopg2.connect(migrated_dsn)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT column_name
+                FROM information_schema.columns
+                WHERE table_schema = 'public' AND table_name = 'frontier'
+                ORDER BY ordinal_position
+                """
+            )
+            columns = [column_name for (column_name,) in cur.fetchall()]
+    finally:
+        conn.close()
+
+    assert "discovery_kind" not in columns
+    assert "archetype" not in columns
 
 
 def test_apply_migrations_is_idempotent(migrated_dsn):
