@@ -1,15 +1,15 @@
 CREATE TABLE IF NOT EXISTS frontier_queue_exploration (
-    url TEXT PRIMARY KEY REFERENCES frontier(url) ON DELETE CASCADE,
+    url TEXT PRIMARY KEY REFERENCES url_ledger(url) ON DELETE CASCADE,
     domain TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS frontier_queue_backlog (
-    url TEXT PRIMARY KEY REFERENCES frontier(url) ON DELETE CASCADE,
+    url TEXT PRIMARY KEY REFERENCES url_ledger(url) ON DELETE CASCADE,
     domain TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS frontier_queue_recrawl (
-    url TEXT PRIMARY KEY REFERENCES frontier(url) ON DELETE CASCADE,
+    url TEXT PRIMARY KEY REFERENCES url_ledger(url) ON DELETE CASCADE,
     domain TEXT NOT NULL
 );
 
@@ -26,7 +26,7 @@ DELETE FROM frontier_queue_recrawl;
 
 INSERT INTO frontier_queue_exploration (url, domain)
 SELECT url, domain
-FROM frontier
+FROM url_ledger
 WHERE status = 'pending'
   AND queue_class = 'exploration'
 ON CONFLICT (url) DO UPDATE
@@ -34,7 +34,7 @@ SET domain = EXCLUDED.domain;
 
 INSERT INTO frontier_queue_backlog (url, domain)
 SELECT url, domain
-FROM frontier
+FROM url_ledger
 WHERE status = 'pending'
   AND queue_class = 'backlog'
 ON CONFLICT (url) DO UPDATE
@@ -42,7 +42,7 @@ SET domain = EXCLUDED.domain;
 
 INSERT INTO frontier_queue_recrawl (url, domain)
 SELECT url, domain
-FROM frontier
+FROM url_ledger
 WHERE status = 'pending'
   AND queue_class = 'recrawl'
 ON CONFLICT (url) DO UPDATE

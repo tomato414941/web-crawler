@@ -14,11 +14,12 @@ import psycopg2.extras
 
 from .error_stats import categorize_crawl_error
 from .domain_manager import compute_host_budget
-from .frontier import (
+from .url_ledger import (
     BLOCKED_DOMAIN_BACKOFF_TABLE,
     LEASE_TABLE,
     QUEUE_CLASS_ORDER,
     QUEUE_TABLE_BY_CLASS,
+    URL_LEDGER_TABLE,
 )
 from .frontier_observability import FrontierObservability
 from .config import settings
@@ -39,7 +40,7 @@ PAGES_REQUIRED_COLUMNS = {
     "crawled_at",
     "created_at",
 }
-FRONTIER_STATS_REQUIRED_COLUMNS = {
+URL_LEDGER_STATS_REQUIRED_COLUMNS = {
     "domain",
     "last_error",
 }
@@ -192,7 +193,7 @@ class PgStorage:
 
     @property
     def conn(self):
-        """Expose connection for frontier (which shares the same Postgres)."""
+        """Expose connection for the URL ledger (which shares the same Postgres)."""
         return self._conn
 
     def list_pages(
@@ -317,8 +318,8 @@ class PgStorage:
                 )
                 row = cur.fetchone()
 
-                cur.execute("SELECT to_regclass('public.frontier')")
-                frontier_exists = cur.fetchone()[0] is not None
+                cur.execute(f"SELECT to_regclass('public.{URL_LEDGER_TABLE}')")
+                url_ledger_exists = cur.fetchone()[0] is not None
 
                 frontier_status: dict[str, int] = {}
                 pending_queue_classes: dict[str, int] = {}
@@ -355,11 +356,11 @@ class PgStorage:
                             "updated_at": runtime_row[1],
                         }
 
-                if frontier_exists:
+                if url_ledger_exists:
                     assert_public_table_columns(
                         self._conn,
-                        "frontier",
-                        FRONTIER_STATS_REQUIRED_COLUMNS,
+                        URL_LEDGER_TABLE,
+                        URL_LEDGER_STATS_REQUIRED_COLUMNS,
                     )
 
                     observability = FrontierObservability(
@@ -590,12 +591,12 @@ class PgStorage:
                                UNION
                                SELECT url FROM public.frontier_queue_recrawl
                            )
-                           SELECT frontier.last_error, COUNT(*)
-                           FROM public.frontier AS frontier
-                           LEFT JOIN retry_surface ON retry_surface.url = frontier.url
-                           WHERE frontier.last_error IS NOT NULL
-                             AND (frontier.terminal_reason IS NOT NULL OR retry_surface.url IS NOT NULL)
-                           GROUP BY frontier.last_error"""
+                           SELECT url_ledger.last_error, COUNT(*)
+                           FROM public.url_ledger AS url_ledger
+                           LEFT JOIN retry_surface ON retry_surface.url = url_ledger.url
+                           WHERE url_ledger.last_error IS NOT NULL
+                             AND (url_ledger.terminal_reason IS NOT NULL OR retry_surface.url IS NOT NULL)
+                           GROUP BY url_ledger.last_error"""
                     )
                     error_counts = Counter()
                     for error, count in cur.fetchall():
@@ -623,13 +624,13 @@ class PgStorage:
                                UNION
                                SELECT url FROM public.frontier_queue_recrawl
                            )
-                           SELECT frontier.domain, COUNT(*)
-                           FROM public.frontier AS frontier
-                           LEFT JOIN retry_surface ON retry_surface.url = frontier.url
-                           WHERE frontier.last_error IS NOT NULL
-                             AND (frontier.terminal_reason IS NOT NULL OR retry_surface.url IS NOT NULL)
-                           GROUP BY frontier.domain
-                           ORDER BY COUNT(*) DESC, frontier.domain ASC
+                           SELECT url_ledger.domain, COUNT(*)
+                           FROM public.url_ledger AS url_ledger
+                           LEFT JOIN retry_surface ON retry_surface.url = url_ledger.url
+                           WHERE url_ledger.last_error IS NOT NULL
+                             AND (url_ledger.terminal_reason IS NOT NULL OR retry_surface.url IS NOT NULL)
+                           GROUP BY url_ledger.domain
+                           ORDER BY COUNT(*) DESC, url_ledger.domain ASC
                            LIMIT 10"""
                     )
                     top_error_domains = [

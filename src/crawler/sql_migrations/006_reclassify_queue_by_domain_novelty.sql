@@ -5,7 +5,7 @@ WITH ranked AS (
         archetype,
         depth,
         ROW_NUMBER() OVER (PARTITION BY domain ORDER BY added_at ASC, url ASC) AS domain_rank
-    FROM frontier
+    FROM url_ledger
 ), reclassified AS (
     SELECT
         url,
@@ -18,8 +18,8 @@ WITH ranked AS (
         END AS queue_class
     FROM ranked
 )
-UPDATE frontier AS frontier
+UPDATE url_ledger AS url_ledger
 SET queue_class = reclassified.queue_class
 FROM reclassified
-WHERE frontier.url = reclassified.url
-  AND frontier.queue_class IS DISTINCT FROM reclassified.queue_class;
+WHERE url_ledger.url = reclassified.url
+  AND url_ledger.queue_class IS DISTINCT FROM reclassified.queue_class;

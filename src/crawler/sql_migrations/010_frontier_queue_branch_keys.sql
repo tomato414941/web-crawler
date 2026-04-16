@@ -8,19 +8,19 @@ ALTER TABLE frontier_queue_recrawl
     ADD COLUMN IF NOT EXISTS branch_key TEXT NOT NULL DEFAULT '/';
 
 UPDATE frontier_queue_exploration AS queue
-SET branch_key = COALESCE(NULLIF('/' || array_to_string((regexp_match(frontier.url, '^https?://[^/]+/([^/?#]+)(?:/([^/?#]+))?'))[1:2], '/'), '/'), '/')
-FROM frontier
-WHERE frontier.url = queue.url;
+SET branch_key = COALESCE(NULLIF('/' || array_to_string((regexp_match(url_ledger.url, '^https?://[^/]+/([^/?#]+)(?:/([^/?#]+))?'))[1:2], '/'), '/'), '/')
+FROM url_ledger
+WHERE url_ledger.url = queue.url;
 
 UPDATE frontier_queue_backlog AS queue
-SET branch_key = COALESCE(NULLIF('/' || array_to_string((regexp_match(frontier.url, '^https?://[^/]+/([^/?#]+)(?:/([^/?#]+))?'))[1:2], '/'), '/'), '/')
-FROM frontier
-WHERE frontier.url = queue.url;
+SET branch_key = COALESCE(NULLIF('/' || array_to_string((regexp_match(url_ledger.url, '^https?://[^/]+/([^/?#]+)(?:/([^/?#]+))?'))[1:2], '/'), '/'), '/')
+FROM url_ledger
+WHERE url_ledger.url = queue.url;
 
 UPDATE frontier_queue_recrawl AS queue
-SET branch_key = COALESCE(NULLIF('/' || array_to_string((regexp_match(frontier.url, '^https?://[^/]+/([^/?#]+)(?:/([^/?#]+))?'))[1:2], '/'), '/'), '/')
-FROM frontier
-WHERE frontier.url = queue.url;
+SET branch_key = COALESCE(NULLIF('/' || array_to_string((regexp_match(url_ledger.url, '^https?://[^/]+/([^/?#]+)(?:/([^/?#]+))?'))[1:2], '/'), '/'), '/')
+FROM url_ledger
+WHERE url_ledger.url = queue.url;
 
 CREATE INDEX IF NOT EXISTS idx_frontier_queue_exploration_branch
     ON frontier_queue_exploration(domain, branch_key);

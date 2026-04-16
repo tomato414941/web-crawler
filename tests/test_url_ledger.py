@@ -1,4 +1,4 @@
-"""Tests for URL Frontier module."""
+"""Tests for URL ledger module."""
 
 import os
 import time
@@ -7,12 +7,13 @@ import psycopg2
 import pytest
 
 from crawler.domain_store import DomainStore
-from crawler.frontier import (
+from crawler.url_ledger import (
     CrawlTask,
-    Frontier,
     QUEUE_BACKLOG,
     QUEUE_EXPLORATION,
     QUEUE_RECRAWL,
+    URL_LEDGER_TABLE,
+    UrlLedger,
 )
 from crawler.migrate import apply_migrations
 from crawler.urls import normalize_url
@@ -93,7 +94,7 @@ class TestCrawlTask:
 
 
 @requires_pg
-class TestFrontier:
+class TestUrlLedger:
     @pytest.fixture(autouse=True)
     def frontier(self):
         conn = psycopg2.connect(PG_DSN)
@@ -106,7 +107,7 @@ class TestFrontier:
             cur.execute("DROP TABLE IF EXISTS frontier_queue_backlog")
             cur.execute("DROP TABLE IF EXISTS frontier_queue_recrawl")
             cur.execute("DROP TABLE IF EXISTS frontier_queue_blocked_domain_backoff")
-            cur.execute("DROP TABLE IF EXISTS frontier")
+            cur.execute(f"DROP TABLE IF EXISTS {URL_LEDGER_TABLE}")
             cur.execute("DROP TABLE IF EXISTS domain_state")
             cur.execute("DROP TABLE IF EXISTS pages")
         conn.commit()
@@ -114,11 +115,21 @@ class TestFrontier:
         apply_migrations(PG_DSN)
         conn = psycopg2.connect(PG_DSN)
         conn.autocommit = False
-        f = Frontier(conn)
+        f = UrlLedger(conn)
         self.domain_store = DomainStore(conn)
         f.attach_domain_store(self.domain_store)
         yield f
         conn.close()
+
+    def _queue_counts(self, frontier, url: str) -> tuple[int, int, int]:
+        with frontier._conn.cursor() as cur:
+            cur.execute("SELECT COUNT(*) FROM frontier_queue_exploration WHERE url = %s", (url,))
+            (exploration_count,) = cur.fetchone()
+            cur.execute("SELECT COUNT(*) FROM frontier_queue_backlog WHERE url = %s", (url,))
+            (backlog_count,) = cur.fetchone()
+            cur.execute("SELECT COUNT(*) FROM frontier_queue_recrawl WHERE url = %s", (url,))
+            (recrawl_count,) = cur.fetchone()
+        return exploration_count, backlog_count, recrawl_count
 
     def test_add_new_url_returns_true(self, frontier):
         task = CrawlTask(url="http://example.com", depth=0)
@@ -165,7 +176,7 @@ class TestFrontier:
 
         with frontier._conn.cursor() as cur:
             cur.execute(
-                "SELECT priority, source_url FROM frontier WHERE url = %s",
+                f"SELECT priority, source_url FROM {URL_LEDGER_TABLE} WHERE url = %s",
                 ("http://example.com/page",),
             )
             priority, source_url = cur.fetchone()
@@ -176,83 +187,61 @@ class TestFrontier:
     def test_add_classifies_shallow_urls_as_backlog(self, frontier):
         frontier.add(CrawlTask(url="http://example.com", depth=1))
 
-        with frontier._conn.cursor() as cur:
-            cur.execute(
-                "SELECT queue_class FROM frontier WHERE url = %s",
-                ("http://example.com/",),
-            )
-            (queue_class,) = cur.fetchone()
-            cur.execute("SELECT COUNT(*) FROM frontier_queue_exploration WHERE url = %s", ("http://example.com/",))
-            (queue_count,) = cur.fetchone()
-
-        assert queue_class == QUEUE_BACKLOG
-        assert queue_count == 0
+        exploration_count, backlog_count, recrawl_count = self._queue_counts(frontier, "http://example.com/")
+        assert exploration_count == 0
+        assert backlog_count == 1
+        assert recrawl_count == 0
 
     def test_add_classifies_same_host_urls_as_backlog_through_depth_three(self, frontier):
         frontier.add(CrawlTask(url="http://example.com/guide", depth=3))
-
-        with frontier._conn.cursor() as cur:
-            cur.execute(
-                "SELECT queue_class FROM frontier WHERE url = %s",
-                ("http://example.com/guide",),
-            )
-            (queue_class,) = cur.fetchone()
-
-        assert queue_class == QUEUE_BACKLOG
+        exploration_count, backlog_count, recrawl_count = self._queue_counts(
+            frontier, "http://example.com/guide"
+        )
+        assert exploration_count == 0
+        assert backlog_count == 1
+        assert recrawl_count == 0
 
     def test_add_classifies_same_host_urls_as_backlog_from_depth_four(self, frontier):
         frontier.add(CrawlTask(url="http://example.com/guide", depth=4))
-
-        with frontier._conn.cursor() as cur:
-            cur.execute(
-                "SELECT queue_class FROM frontier WHERE url = %s",
-                ("http://example.com/guide",),
-            )
-            (queue_class,) = cur.fetchone()
-
-        assert queue_class == QUEUE_BACKLOG
+        exploration_count, backlog_count, recrawl_count = self._queue_counts(
+            frontier, "http://example.com/guide"
+        )
+        assert exploration_count == 0
+        assert backlog_count == 1
+        assert recrawl_count == 0
 
     def test_add_classifies_seed_host_urls_as_backlog_through_depth_two(self, frontier):
         frontier.add(CrawlTask(url="http://docs.example.com/guide", depth=2))
-
-        with frontier._conn.cursor() as cur:
-            cur.execute(
-                "SELECT queue_class FROM frontier WHERE url = %s",
-                ("http://docs.example.com/guide",),
-            )
-            (queue_class,) = cur.fetchone()
-
-        assert queue_class == QUEUE_BACKLOG
+        exploration_count, backlog_count, recrawl_count = self._queue_counts(
+            frontier, "http://docs.example.com/guide"
+        )
+        assert exploration_count == 0
+        assert backlog_count == 1
+        assert recrawl_count == 0
 
     def test_add_classifies_seed_host_urls_as_backlog_through_depth_three(self, frontier):
         frontier.add(CrawlTask(url="http://docs.example.com/guide", depth=3))
-
-        with frontier._conn.cursor() as cur:
-            cur.execute(
-                "SELECT queue_class FROM frontier WHERE url = %s",
-                ("http://docs.example.com/guide",),
-            )
-            (queue_class,) = cur.fetchone()
-
-        assert queue_class == QUEUE_BACKLOG
+        exploration_count, backlog_count, recrawl_count = self._queue_counts(
+            frontier, "http://docs.example.com/guide"
+        )
+        assert exploration_count == 0
+        assert backlog_count == 1
+        assert recrawl_count == 0
 
     def test_add_defaults_implicit_urls_to_backlog(self, frontier):
         frontier.add(CrawlTask(url="http://example.com/seed", depth=0))
-
-        with frontier._conn.cursor() as cur:
-            cur.execute(
-                "SELECT queue_class FROM frontier WHERE url = %s",
-                ("http://example.com/seed",),
-            )
-            (queue_class,) = cur.fetchone()
-
-        assert queue_class == QUEUE_BACKLOG
+        exploration_count, backlog_count, recrawl_count = self._queue_counts(
+            frontier, "http://example.com/seed"
+        )
+        assert exploration_count == 0
+        assert backlog_count == 1
+        assert recrawl_count == 0
 
     def test_upsert_seeds_keeps_seed_urls_in_exploration(self, frontier):
         frontier.upsert_seeds(["http://example.com/seed"])
 
         with frontier._conn.cursor() as cur:
-            cur.execute("SELECT COUNT(*) FROM frontier WHERE url = %s", ("http://example.com/seed",))
+            cur.execute(f"SELECT COUNT(*) FROM {URL_LEDGER_TABLE} WHERE url = %s", ("http://example.com/seed",))
             (frontier_count,) = cur.fetchone()
             cur.execute(
                 "SELECT COUNT(*) FROM frontier_queue_exploration WHERE url = %s",
@@ -269,40 +258,31 @@ class TestFrontier:
             frontier.add(CrawlTask(url=f"http://example.com/known-{i}", depth=0))
 
         frontier.add(CrawlTask(url="http://example.com/new-branch", depth=1))
-
-        with frontier._conn.cursor() as cur:
-            cur.execute(
-                "SELECT queue_class FROM frontier WHERE url = %s",
-                ("http://example.com/new-branch",),
-            )
-            (queue_class,) = cur.fetchone()
-
-        assert queue_class == QUEUE_BACKLOG
+        exploration_count, backlog_count, recrawl_count = self._queue_counts(
+            frontier, "http://example.com/new-branch"
+        )
+        assert exploration_count == 0
+        assert backlog_count == 1
+        assert recrawl_count == 0
 
 
     def test_add_classifies_external_deep_urls_as_backlog(self, frontier):
         frontier.add(CrawlTask(url="http://external.example.com/deep", depth=3))
-
-        with frontier._conn.cursor() as cur:
-            cur.execute(
-                "SELECT queue_class FROM frontier WHERE url = %s",
-                ("http://external.example.com/deep",),
-            )
-            (queue_class,) = cur.fetchone()
-
-        assert queue_class == QUEUE_BACKLOG
+        exploration_count, backlog_count, recrawl_count = self._queue_counts(
+            frontier, "http://external.example.com/deep"
+        )
+        assert exploration_count == 0
+        assert backlog_count == 1
+        assert recrawl_count == 0
 
     def test_add_classifies_deep_urls_as_backlog(self, frontier):
         frontier.add(CrawlTask(url="http://example.com/deep", depth=3))
-
-        with frontier._conn.cursor() as cur:
-            cur.execute(
-                "SELECT queue_class FROM frontier WHERE url = %s",
-                ("http://example.com/deep",),
-            )
-            (queue_class,) = cur.fetchone()
-
-        assert queue_class == QUEUE_BACKLOG
+        exploration_count, backlog_count, recrawl_count = self._queue_counts(
+            frontier, "http://example.com/deep"
+        )
+        assert exploration_count == 0
+        assert backlog_count == 1
+        assert recrawl_count == 0
 
     def test_lease_next_returns_task(self, frontier):
         frontier.add(CrawlTask(url="http://example.com", depth=0))
@@ -418,7 +398,7 @@ class TestFrontier:
             cur.execute("SELECT count(*) FROM active_leases WHERE url = %s", (result.url,))
             (active_count,) = cur.fetchone()
             cur.execute(
-                "SELECT last_success_at, fail_streak, last_error, terminal_reason, terminalized_at FROM frontier WHERE url = %s",
+                f"SELECT last_success_at, fail_streak, last_error, terminal_reason, terminalized_at FROM {URL_LEDGER_TABLE} WHERE url = %s",
                 (result.url,),
             )
             last_success_at, fail_streak, last_error, terminal_reason, terminalized_at = cur.fetchone()
@@ -436,7 +416,7 @@ class TestFrontier:
 
         with frontier._conn.cursor() as cur:
             cur.execute(
-                "SELECT lease_token, lease_expires_at FROM frontier WHERE url = %s",
+                f"SELECT lease_token, lease_expires_at FROM {URL_LEDGER_TABLE} WHERE url = %s",
                 (result.url,),
             )
             lease_token, lease_expires_at = cur.fetchone()
@@ -457,7 +437,7 @@ class TestFrontier:
 
         with frontier._conn.cursor() as cur:
             cur.execute(
-                "UPDATE frontier SET lease_token = %s WHERE url = %s",
+                f"UPDATE {URL_LEDGER_TABLE} SET lease_token = %s WHERE url = %s",
                 ("tampered", result.url),
             )
         frontier._conn.commit()
@@ -470,7 +450,7 @@ class TestFrontier:
 
         with frontier._conn.cursor() as cur:
             cur.execute(
-                "UPDATE frontier SET lease_expires_at = %s WHERE url = %s",
+                f"UPDATE {URL_LEDGER_TABLE} SET lease_expires_at = %s WHERE url = %s",
                 (time.time() + 3600, result.url),
             )
         frontier._conn.commit()
@@ -486,7 +466,7 @@ class TestFrontier:
 
         with frontier._conn.cursor() as cur:
             cur.execute(
-                "SELECT terminal_reason, terminalized_at FROM frontier WHERE url = %s",
+                f"SELECT terminal_reason, terminalized_at FROM {URL_LEDGER_TABLE} WHERE url = %s",
                 (result.url,),
             )
             terminal_reason, terminalized_at = cur.fetchone()
@@ -503,7 +483,7 @@ class TestFrontier:
 
         with frontier._conn.cursor() as cur:
             cur.execute(
-                "SELECT terminal_reason, terminalized_at FROM frontier WHERE url = %s",
+                f"SELECT terminal_reason, terminalized_at FROM {URL_LEDGER_TABLE} WHERE url = %s",
                 (result.url,),
             )
             terminal_reason, terminalized_at = cur.fetchone()
@@ -557,8 +537,11 @@ class TestFrontier:
 
         with frontier._conn.cursor() as cur:
             cur.execute(
-                "UPDATE frontier SET status = %s WHERE url = %s",
-                ("done", "http://example.com/1"),
+                f"""UPDATE {URL_LEDGER_TABLE}
+                    SET terminal_reason = %s,
+                        terminalized_at = %s
+                    WHERE url = %s""",
+                ("done", time.time(), "http://example.com/1"),
             )
         frontier._conn.commit()
 
@@ -778,7 +761,7 @@ class TestFrontier:
 
         with frontier._conn.cursor() as cur:
             cur.execute(
-                "SELECT last_error, terminal_reason, terminalized_at FROM frontier WHERE url = %s",
+                f"SELECT last_error, terminal_reason, terminalized_at FROM {URL_LEDGER_TABLE} WHERE url = %s",
                 ("http://a.com/blocked",),
             )
             last_error, terminal_reason, terminalized_at = cur.fetchone()
@@ -891,7 +874,7 @@ class TestFrontier:
 
         with frontier._conn.cursor() as cur:
             cur.execute(
-                "SELECT fail_streak, last_error, next_fetch_at, terminal_reason, terminalized_at FROM frontier WHERE url = %s",
+                f"SELECT fail_streak, last_error, next_fetch_at, terminal_reason, terminalized_at FROM {URL_LEDGER_TABLE} WHERE url = %s",
                 (result.url,),
             )
             fail_streak, last_error, next_fetch_at, terminal_reason, terminalized_at = cur.fetchone()
@@ -917,7 +900,7 @@ class TestFrontier:
 
         with frontier._conn.cursor() as cur:
             cur.execute(
-                "SELECT fail_streak, priority FROM frontier WHERE url = %s",
+                f"SELECT fail_streak, priority FROM {URL_LEDGER_TABLE} WHERE url = %s",
                 (result.url,),
             )
             fail_streak, priority = cur.fetchone()
@@ -926,7 +909,7 @@ class TestFrontier:
         assert priority == 0.75
 
     def test_compute_retry_backoff_uses_configured_values(self, frontier):
-        configured = Frontier(frontier._conn, retry_backoff_seconds=5.0, max_retry_backoff_seconds=12.0)
+        configured = UrlLedger(frontier._conn, retry_backoff_seconds=5.0, max_retry_backoff_seconds=12.0)
 
         assert configured._compute_retry_backoff(1) == 5.0
         assert configured._compute_retry_backoff(2) == 10.0
@@ -985,8 +968,11 @@ class TestFrontier:
 
         with frontier._conn.cursor() as cur:
             cur.execute(
-                "UPDATE frontier SET queue_class = %s WHERE url IN (%s, %s)",
-                (QUEUE_RECRAWL, "http://example.com/docs/a", "http://other.com/news/a"),
+                f"""UPDATE {URL_LEDGER_TABLE}
+                    SET terminal_reason = %s,
+                        terminalized_at = %s
+                    WHERE url IN (%s, %s)""",
+                ("reclassified", time.time(), "http://example.com/docs/a", "http://other.com/news/a"),
             )
         frontier._conn.commit()
 
@@ -1048,7 +1034,7 @@ class TestFrontier:
 
         with frontier._conn.cursor() as cur:
             cur.execute(
-                "SELECT fail_streak, last_success_at, last_error, terminal_reason, terminalized_at FROM frontier WHERE url = %s",
+                f"SELECT fail_streak, last_success_at, last_error, terminal_reason, terminalized_at FROM {URL_LEDGER_TABLE} WHERE url = %s",
                 (second.url,),
             )
             fail_streak, last_success_at, last_error, terminal_reason, terminalized_at = cur.fetchone()
@@ -1073,7 +1059,7 @@ class TestFrontier:
 
         with frontier._conn.cursor() as cur:
             cur.execute(
-                "SELECT url, next_fetch_at FROM frontier WHERE domain = 'a.com' ORDER BY url ASC"
+                f"SELECT url, next_fetch_at FROM {URL_LEDGER_TABLE} WHERE domain = 'a.com' ORDER BY url ASC"
             )
             rows = cur.fetchall()
 
@@ -1098,7 +1084,7 @@ class TestFrontier:
 
         with frontier._conn.cursor() as cur:
             cur.execute(
-                "SELECT url, next_fetch_at FROM frontier WHERE domain = 'a.com' ORDER BY url ASC"
+                f"SELECT url, next_fetch_at FROM {URL_LEDGER_TABLE} WHERE domain = 'a.com' ORDER BY url ASC"
             )
             rows = cur.fetchall()
 

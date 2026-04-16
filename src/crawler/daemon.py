@@ -15,8 +15,8 @@ from .daemon_policy import DaemonSchedulerPolicy
 from .domain_manager import DomainManager
 from .domain_store import DomainStore
 from .discovery import seed_hosts_from_urls
-from .frontier import Frontier
 from .storage import PgStorage
+from .url_ledger import UrlLedger
 
 logger = logging.getLogger(__name__)
 
@@ -335,12 +335,12 @@ class CrawlDaemon:
         """Store one last runtime snapshot on cycle boundaries."""
         self._persist_runtime_payload(storage, engine.snapshot_runtime_stats())
 
-    async def _connect(self) -> tuple[PgStorage | None, Frontier | None]:
+    async def _connect(self) -> tuple[PgStorage | None, UrlLedger | None]:
         """Connect to Postgres and initialize frontier."""
         for attempt in range(1, _MAX_RECONNECT_ATTEMPTS + 1):
             try:
                 storage = PgStorage(self._postgres_dsn)
-                frontier = Frontier(storage.conn)
+                frontier = UrlLedger(storage.conn)
                 self._domain_store = DomainStore(storage.conn, default_delay=self._delay)
                 frontier.attach_domain_store(self._domain_store)
                 self._domain_manager.attach_store(self._domain_store)
@@ -377,7 +377,7 @@ class CrawlDaemon:
         return None
 
     async def _run_cycle(
-        self, storage: PgStorage, frontier: Frontier
+        self, storage: PgStorage, frontier: UrlLedger
     ) -> tuple[int, dict[str, int]]:
         """Run one crawl cycle."""
         runtime_storage = PgStorage(self._postgres_dsn)
@@ -414,7 +414,7 @@ class CrawlDaemon:
         finally:
             runtime_storage.close()
 
-    def _ensure_exploration_supply(self, frontier: Frontier):
+    def _ensure_exploration_supply(self, frontier: UrlLedger):
         """Keep exploration supplied from existing scheduler state."""
         before_pending = frontier.pending_count()
         before_ready = frontier.ready_count(queue_classes=["exploration"])
@@ -436,25 +436,25 @@ class CrawlDaemon:
             self._min_exploration_ready,
         )
 
-    def _bootstrap_frontier(self, frontier: Frontier) -> int:
+    def _bootstrap_frontier(self, frontier: UrlLedger) -> int:
         """Seed an empty frontier through a dedicated bootstrap path."""
         if frontier.pending_count() != 0:
             return 0
         return frontier.upsert_seeds(self._seeds, priority=2.0)
 
-    def _promote_blocked_retry(self, frontier: Frontier) -> int:
+    def _promote_blocked_retry(self, frontier: UrlLedger) -> int:
         """Restore a small cooled-down subset from blocked retry queue when ready work is thin."""
         return self._policy.promote_blocked_retry(frontier)
 
-    def _retire_blocked_retry(self, frontier: Frontier) -> int:
+    def _retire_blocked_retry(self, frontier: UrlLedger) -> int:
         """Retire long-stuck blocked retry URLs out of pending scheduler state."""
         return self._policy.retire_blocked_retry(frontier)
 
-    def _restore_recovered_blocked_retry(self, frontier: Frontier) -> int:
+    def _restore_recovered_blocked_retry(self, frontier: UrlLedger) -> int:
         """Restore healthy blocked retry domains before using bounded retry promotion."""
         return self._policy.restore_recovered_blocked_retry(frontier)
 
-    def _recrawl_stale(self, storage: PgStorage, frontier: Frontier):
+    def _recrawl_stale(self, storage: PgStorage, frontier: UrlLedger):
         """Re-queue pages older than recrawl_ttl."""
         pending = frontier.pending_count()
         if pending >= self._cycle_pages:
@@ -468,11 +468,11 @@ class CrawlDaemon:
         now = time.time()
         with storage.conn.cursor() as cur:
             cur.execute(
-                """SELECT frontier.url
-                   FROM frontier
-                   JOIN pages ON frontier.url = pages.url
+                """SELECT url_ledger.url
+                   FROM url_ledger
+                   JOIN pages ON url_ledger.url = pages.url
                    WHERE pages.crawled_at < %s
-                     AND frontier.last_success_at IS NOT NULL
+                     AND url_ledger.last_success_at IS NOT NULL
                    ORDER BY pages.crawled_at ASC
                    LIMIT %s""",
                 (cutoff, batch_size),
