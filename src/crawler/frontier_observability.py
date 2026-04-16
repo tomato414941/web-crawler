@@ -13,7 +13,6 @@ class FrontierReadiness:
     pending: int
     ready: int
     ready_domains: int
-    ready_domain_branches: int
     next_ready_delay: float | None
     blocked: dict[str, int]
     state_counts: dict[str, int]
@@ -129,14 +128,6 @@ class FrontierObservability:
     ) -> int:
         return self.readiness(now=now, queue_classes=queue_classes).ready_domains
 
-    def ready_domain_branch_count(
-        self,
-        *,
-        now: float | None = None,
-        queue_classes: list[str] | None = None,
-    ) -> int:
-        return self.readiness(now=now, queue_classes=queue_classes).ready_domain_branches
-
     def blocked_count(self) -> int:
         with self._conn.cursor() as cur:
             cur.execute(f"SELECT COUNT(*) FROM {self._blocked_queue_table}")
@@ -201,12 +192,6 @@ class FrontierObservability:
                               AND NOT blocked_host_backoff
                               AND NOT retry_quarantine
                         ) AS ready_domains,
-                        COUNT(DISTINCT (domain, branch_key)) FILTER (
-                            WHERE NOT blocked_next_fetch
-                              AND NOT blocked_domain_next_request
-                              AND NOT blocked_host_backoff
-                              AND NOT retry_quarantine
-                        ) AS ready_domain_branches,
                         MIN(ready_at) AS next_ready_at,
                         COUNT(*) FILTER (WHERE blocked_next_fetch) AS blocked_next_fetch,
                         COUNT(*) FILTER (WHERE blocked_domain_next_request) AS blocked_domain_next_request,
@@ -236,7 +221,6 @@ class FrontierObservability:
                 pending,
                 ready,
                 ready_domains,
-                ready_domain_branches,
                 next_ready_at,
                 blocked_next_fetch,
                 blocked_domain_next_request,
@@ -250,7 +234,6 @@ class FrontierObservability:
             pending=pending or 0,
             ready=ready or 0,
             ready_domains=ready_domains or 0,
-            ready_domain_branches=ready_domain_branches or 0,
             next_ready_delay=None if next_ready_at is None else max(0.0, next_ready_at - now),
             blocked={
                 "next_fetch_at": blocked_next_fetch or 0,

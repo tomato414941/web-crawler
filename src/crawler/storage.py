@@ -93,7 +93,6 @@ def _build_operator_summary(
             "pages_per_second": runtime_payload.get("pages_per_second"),
             "cycle_pages": runtime_payload.get("pages"),
             "active_hosts": int(runtime_payload.get("active_hosts", 0) or 0),
-            "active_branches": int(runtime_payload.get("active_branches", 0) or 0),
             "errors": dict(cycle_errors),
         },
         "backpressure": {
@@ -392,7 +391,6 @@ class PgStorage:
                         "pending": readiness_snapshot.pending,
                         "ready": readiness_snapshot.ready,
                         "ready_domains": readiness_snapshot.ready_domains,
-                        "ready_domain_branches": readiness_snapshot.ready_domain_branches,
                         "next_ready_delay": readiness_snapshot.next_ready_delay,
                         "blocked": dict(readiness_snapshot.blocked),
                         "state_counts": dict(readiness_snapshot.state_counts),

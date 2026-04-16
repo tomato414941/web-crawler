@@ -378,7 +378,7 @@ class TestFrontier:
         batch = frontier.lease_batch(count=3)
         assert len(batch) == 3
 
-    def test_lease_batch_prioritizes_branch_breadth_for_queue_tables(self, frontier):
+    def test_lease_batch_uses_host_first_breadth_order_for_queue_tables(self, frontier):
         frontier.add(CrawlTask(url="http://a.com/docs/python/1", depth=1, priority=1.0, added_at=1000))
         frontier.add(CrawlTask(url="http://a.com/docs/python/2", depth=1, priority=1.0, added_at=1001))
         frontier.add(CrawlTask(url="http://a.com/docs/rust/1", depth=1, priority=1.0, added_at=2000))
@@ -391,10 +391,10 @@ class TestFrontier:
 
         assert {task.url for task in batch} == {
             "http://a.com/docs/python/1",
-            "http://a.com/docs/rust/1",
+            "http://a.com/docs/python/2",
         }
 
-    def test_lease_next_prioritizes_branch_breadth_within_selected_host(self, frontier):
+    def test_lease_next_uses_host_first_breadth_without_branch_rotation(self, frontier):
         frontier.add(CrawlTask(url="http://a.com/docs/python/1", depth=1, priority=1.0, added_at=1000))
         frontier.add(CrawlTask(url="http://a.com/docs/python/2", depth=1, priority=1.0, added_at=1001))
         frontier.add(CrawlTask(url="http://a.com/docs/rust/1", depth=1, priority=1.0, added_at=2000))
@@ -407,7 +407,7 @@ class TestFrontier:
 
         second = frontier.lease_next(prioritize_breadth=True, queue_classes=[QUEUE_EXPLORATION])
         assert second is not None
-        assert second.url == "http://a.com/docs/rust/1"
+        assert second.url == "http://b.com/1"
 
     def test_mark_done(self, frontier):
         frontier.add(CrawlTask(url="http://example.com", depth=0))
@@ -576,7 +576,7 @@ class TestFrontier:
         assert frontier.pending_domain_count() == 2
         assert frontier.pending_domain_count(queue_classes=[QUEUE_EXPLORATION]) == 2
 
-    def test_ready_domain_and_branch_counts_ignore_scheduled_and_blocked_hosts(self, frontier):
+    def test_ready_domain_count_ignores_scheduled_and_blocked_hosts(self, frontier):
         now = time.time()
         frontier.add(CrawlTask(url="http://a.com/docs/1", depth=0, next_fetch_at=now))
         frontier.add(CrawlTask(url="http://a.com/blog/1", depth=0, next_fetch_at=now))
@@ -585,7 +585,6 @@ class TestFrontier:
         self.domain_store.record_failure("c.com", backoff_seconds=20.0, now=now)
 
         assert frontier.ready_domain_count(now=now) == 1
-        assert frontier.ready_domain_branch_count(now=now) == 2
 
     def test_ready_count_ignores_future_next_fetch(self, frontier):
         now = time.time()
@@ -632,7 +631,6 @@ class TestFrontier:
         assert readiness.pending == 2
         assert readiness.ready == 0
         assert readiness.ready_domains == 0
-        assert readiness.ready_domain_branches == 0
         assert readiness.next_ready_delay == pytest.approx(20.0, abs=1e-3)
         assert readiness.blocked == {
             "next_fetch_at": 1,
@@ -665,7 +663,6 @@ class TestFrontier:
         assert readiness.pending == 2
         assert readiness.ready == 1
         assert readiness.ready_domains == 1
-        assert readiness.ready_domain_branches == 1
         assert readiness.state_counts == {
             "ready": 1,
             "scheduled": 0,
@@ -696,7 +693,6 @@ class TestFrontier:
         readiness = frontier.readiness(now=now + 31.0)
         assert readiness.ready == 2
         assert readiness.ready_domains == 2
-        assert readiness.ready_domain_branches == 2
         assert readiness.state_counts == {
             "ready": 2,
             "scheduled": 0,
@@ -964,24 +960,6 @@ class TestFrontier:
             (queue_count,) = cur.fetchone()
 
         assert queue_count == 1
-
-    def test_promote_branch_novelty_exploration_promotes_distinct_backlog_branches(self, frontier):
-        frontier.add(CrawlTask(url="http://example.com/docs/a", depth=4, queue_class=QUEUE_BACKLOG))
-        frontier.add(CrawlTask(url="http://example.com/docs/b", depth=4, queue_class=QUEUE_BACKLOG))
-        frontier.add(CrawlTask(url="http://example.com/blog/a", depth=4, queue_class=QUEUE_BACKLOG))
-        frontier.add(CrawlTask(url="http://other.com/news/a", depth=4, queue_class=QUEUE_BACKLOG))
-
-        promoted = frontier.promote_branch_novelty_exploration(target_pending=2, per_domain=1, candidate_limit=10)
-
-        assert promoted == 2
-        with frontier._conn.cursor() as cur:
-            cur.execute("SELECT url FROM frontier_queue_exploration ORDER BY url")
-            promoted_urls = [url for (url,) in cur.fetchall()]
-
-        assert promoted_urls == [
-            "http://example.com/docs/a",
-            "http://other.com/news/a",
-        ]
 
     def test_promote_backlog_host_heads_promotes_distinct_backlog_domains(self, frontier):
         frontier.add(CrawlTask(url="http://example.com/docs/a", depth=4, queue_class=QUEUE_BACKLOG))

@@ -211,8 +211,6 @@ class UrlLedger:
         now: float,
         domain: str | None = None,
         exclude_domains: list[str] | None = None,
-        exclude_branch_keys: list[str] | None = None,
-        exclude_domain_branches: list[tuple[str, str]] | None = None,
     ) -> _ReadySql:
         """Build readiness SQL fragments for physical pending queue tables."""
         next_request_sql = "0"
@@ -252,22 +250,6 @@ class UrlLedger:
         if exclude_domains:
             conditions.append(f"NOT ({alias}.domain = ANY(%s))")
             params.append(exclude_domains)
-
-        if exclude_branch_keys:
-            conditions.append(f"NOT ({alias}.branch_key = ANY(%s))")
-            params.append(exclude_branch_keys)
-
-        if exclude_domain_branches:
-            placeholders = ", ".join(["(%s, %s)"] * len(exclude_domain_branches))
-            conditions.append(
-                "NOT EXISTS ("
-                f"SELECT 1 FROM (VALUES {placeholders}) AS active(domain, branch_key) "
-                f"WHERE active.domain = {alias}.domain "
-                f"AND active.branch_key = {alias}.branch_key"
-                ")"
-            )
-            for active_domain, active_branch in exclude_domain_branches:
-                params.extend([active_domain, active_branch])
 
         return _ReadySql(
             where=" AND ".join(conditions),
@@ -505,40 +487,6 @@ class UrlLedger:
                         selected.url ASC
                     LIMIT 1
                 )"""
-
-    def _branch_breadth_candidate_from_sql(
-        self,
-        *,
-        queue_class: str,
-        ranked_ready_sql: _ReadySql,
-    ) -> str:
-        """Return a queue FROM clause with domain/branch breadth ranks attached."""
-        table_name = self._queue_table_sql(queue_class)
-        ranked_order = self._lease_order_by_sql("ranked_source", prioritize_breadth=True)
-        return f"""FROM {table_name} AS candidate
-                    JOIN (
-                        SELECT
-                            ranked_source.url,
-                            ROW_NUMBER() OVER (
-                                PARTITION BY ranked_source.domain
-                                ORDER BY {ranked_order}, ranked_source.url ASC
-                            ) AS domain_rownum,
-                            ROW_NUMBER() OVER (
-                                PARTITION BY ranked_source.domain, ranked_source.branch_key
-                                ORDER BY {ranked_order}, ranked_source.url ASC
-                            ) AS branch_rownum
-                        FROM {table_name} AS ranked_source
-                        WHERE {ranked_ready_sql.where}
-                    ) AS ranked ON ranked.url = candidate.url"""
-
-    def _branch_breadth_order_by_sql(self, alias: str) -> str:
-        """Return ORDER BY that takes the first ready URL from each branch before repeats."""
-        return (
-            "ranked.branch_rownum ASC, "
-            "ranked.domain_rownum ASC, "
-            f"{self._lease_order_by_sql(alias, prioritize_breadth=True)}, "
-            f"{alias}.url ASC"
-        )
 
     def _queue_table_sql(self, queue_class: str) -> str:
         """Return the physical queue table name for a queue class."""
@@ -834,8 +782,6 @@ class UrlLedger:
         lease_seconds: float | None = None,
         prioritize_breadth: bool = False,
         exclude_domains: list[str] | None = None,
-        exclude_branch_keys: list[str] | None = None,
-        exclude_domain_branches: list[tuple[str, str]] | None = None,
         queue_classes: list[str] | None = None,
     ) -> CrawlTask | None:
         """Lease the next ready URL, optionally filtered by domain."""
@@ -847,8 +793,6 @@ class UrlLedger:
                     lease_seconds=lease_seconds,
                     prioritize_breadth=prioritize_breadth,
                     exclude_domains=exclude_domains,
-                    exclude_branch_keys=exclude_branch_keys,
-                    exclude_domain_branches=exclude_domain_branches,
                     queue_classes=[queue_class],
                 )
                 if task is not None:
@@ -865,8 +809,6 @@ class UrlLedger:
             now=now,
             domain=domain,
             exclude_domains=exclude_domains,
-            exclude_branch_keys=exclude_branch_keys,
-            exclude_domain_branches=exclude_domain_branches,
         )
         where_sql = ready_sql.where
         if prioritize_breadth:
@@ -875,27 +817,14 @@ class UrlLedger:
                 now=now,
                 domain=domain,
                 exclude_domains=exclude_domains,
-                exclude_branch_keys=exclude_branch_keys,
-                exclude_domain_branches=exclude_domain_branches,
             )
-            ranked_ready_sql = self._queue_ready_sql(
-                alias="ranked_source",
-                now=now,
-                domain=domain,
-                exclude_domains=exclude_domains,
-                exclude_branch_keys=exclude_branch_keys,
-                exclude_domain_branches=exclude_domain_branches,
-            )
-            candidate_from = self._branch_breadth_candidate_from_sql(
-                queue_class=normalized_queue_classes[0],
-                ranked_ready_sql=ranked_ready_sql,
-            )
+            candidate_from = f"FROM {self._queue_table_sql(normalized_queue_classes[0])} AS candidate"
             where_sql = (
                 f"{ready_sql.where} AND "
                 f"{self._host_first_domain_selector_sql(queue_class=normalized_queue_classes[0], ready_sql=host_ready_sql)}"
             )
-            candidate_from_params = [*ranked_ready_sql.params, *host_ready_sql.params]
-            order_by = self._branch_breadth_order_by_sql("candidate")
+            candidate_from_params = list(host_ready_sql.params)
+            order_by = f"{self._lease_order_by_sql('candidate', prioritize_breadth=True)}, candidate.url ASC"
         else:
             candidate_from = f"FROM {self._queue_table_sql(normalized_queue_classes[0])} AS candidate"
             order_by = self._lease_order_by_sql("candidate", prioritize_breadth=prioritize_breadth)
@@ -963,8 +892,6 @@ class UrlLedger:
         lease_seconds: float | None = None,
         prioritize_breadth: bool = False,
         exclude_domains: list[str] | None = None,
-        exclude_branch_keys: list[str] | None = None,
-        exclude_domain_branches: list[tuple[str, str]] | None = None,
         queue_classes: list[str] | None = None,
     ) -> list[CrawlTask]:
         """Lease a batch of ready URLs."""
@@ -977,8 +904,6 @@ class UrlLedger:
                     lease_seconds=lease_seconds,
                     prioritize_breadth=prioritize_breadth,
                     exclude_domains=exclude_domains,
-                    exclude_branch_keys=exclude_branch_keys,
-                    exclude_domain_branches=exclude_domain_branches,
                     queue_classes=normalized_queue_classes,
                 )
                 if task is None:
@@ -996,27 +921,10 @@ class UrlLedger:
             now=now,
             domain=domain,
             exclude_domains=exclude_domains,
-            exclude_branch_keys=exclude_branch_keys,
-            exclude_domain_branches=exclude_domain_branches,
         )
+        candidate_from = f"FROM {self._queue_table_sql(normalized_queue_classes[0])} AS candidate"
         if prioritize_breadth:
-            ranked_ready_sql = self._queue_ready_sql(
-                alias="ranked_source",
-                now=now,
-                domain=domain,
-                exclude_domains=exclude_domains,
-                exclude_branch_keys=exclude_branch_keys,
-                exclude_domain_branches=exclude_domain_branches,
-            )
-            candidate_from = self._branch_breadth_candidate_from_sql(
-                queue_class=normalized_queue_classes[0],
-                ranked_ready_sql=ranked_ready_sql,
-            )
-            candidate_from_params = list(ranked_ready_sql.params)
-        else:
-            candidate_from = f"FROM {self._queue_table_sql(normalized_queue_classes[0])} AS candidate"
-        if prioritize_breadth:
-            order_by = self._branch_breadth_order_by_sql("candidate")
+            order_by = f"{self._lease_order_by_sql('candidate', prioritize_breadth=True)}, candidate.url ASC"
         else:
             order_by = self._lease_order_by_sql("candidate", prioritize_breadth=prioritize_breadth)
         params: list[object] = [*candidate_from_params, *ready_sql.params, count]
@@ -1325,72 +1233,6 @@ class UrlLedger:
         self._conn.commit()
         return count
 
-    def promote_branch_novelty_exploration(
-        self,
-        target_pending: int,
-        *,
-        per_domain: int = 1,
-        candidate_limit: int = 200,
-    ) -> int:
-        """Promote branch-diverse backlog URLs into exploration."""
-        if target_pending <= 0 or per_domain <= 0 or candidate_limit <= 0:
-            return 0
-
-        current_exploration = self.pending_count(queue_classes=[QUEUE_EXPLORATION])
-        needed = target_pending - current_exploration
-        if needed <= 0:
-            return 0
-
-        with self._conn.cursor() as cur:
-            cur.execute(
-                f"""SELECT domain, branch_key
-                    FROM {self._queue_table_sql(QUEUE_EXPLORATION)}"""
-            )
-            existing_branches = {(domain, branch_key) for domain, branch_key in cur.fetchall()}
-
-            cur.execute(
-                f"""SELECT url, domain, branch_key
-                    FROM {self._queue_table_sql(QUEUE_BACKLOG)}
-                    ORDER BY priority DESC, added_at ASC, url ASC
-                    LIMIT %s""",
-                (max(candidate_limit, needed * 20),),
-            )
-            candidates = cur.fetchall()
-
-            promoted_urls: list[str] = []
-            domain_counts: Counter[str] = Counter()
-            for url, domain, branch in candidates:
-                key = (domain, branch)
-                if key in existing_branches:
-                    continue
-                if domain_counts[domain] >= per_domain:
-                    continue
-                promoted_urls.append(normalize_url(url))
-                existing_branches.add(key)
-                domain_counts[domain] += 1
-                if len(promoted_urls) >= needed:
-                    break
-
-            if not promoted_urls:
-                return 0
-
-            cur.execute(
-                f"""SELECT url, domain, priority, next_fetch_at, added_at
-                    FROM {self._queue_table_sql(QUEUE_BACKLOG)}
-                    WHERE url = ANY(%s)""",
-                (promoted_urls,),
-            )
-            rows = [
-                (url, domain, priority, next_fetch_at, added_at, QUEUE_EXPLORATION)
-                for url, domain, priority, next_fetch_at, added_at in cur.fetchall()
-            ]
-            self._delete_queue_entries(cur, [row[0] for row in rows])
-            self._insert_pending_queue_rows(cur, rows)
-            count = len(rows)
-
-        self._conn.commit()
-        return count
-
     def promote_backlog_host_heads(
         self,
         target_pending: int,
@@ -1528,18 +1370,6 @@ class UrlLedger:
         """Get count of distinct domains that are leaseable right now."""
         normalized_queue_classes = self._normalized_queue_classes(queue_classes)
         return self._observability.ready_domain_count(now=now, queue_classes=normalized_queue_classes)
-
-    def ready_domain_branch_count(
-        self,
-        now: float | None = None,
-        queue_classes: list[str] | None = None,
-    ) -> int:
-        """Get count of distinct domain/branch pairs that are leaseable right now."""
-        normalized_queue_classes = self._normalized_queue_classes(queue_classes)
-        return self._observability.ready_domain_branch_count(
-            now=now,
-            queue_classes=normalized_queue_classes,
-        )
 
     def blocked_domain_backoff_count(self) -> int:
         """Return count of URLs isolated due to host backoff."""

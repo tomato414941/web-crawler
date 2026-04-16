@@ -195,7 +195,6 @@ def test_get_stats_includes_frontier_breakdown(pg_storage):
         "pending": 2,
         "ready": 2,
         "ready_domains": 2,
-        "ready_domain_branches": 2,
         "next_ready_delay": 0.0,
         "blocked": {
             "next_fetch_at": 0,
@@ -230,7 +229,6 @@ def test_get_stats_includes_runtime_snapshot(pg_storage):
             "pages_per_second": 2.5,
             "pages": 15,
             "active_hosts": 3,
-            "active_branches": 4,
             "parse_queue_size": 2,
             "finalize_queue_size": 1,
             "publish_queue_size": 1,
@@ -248,7 +246,6 @@ def test_get_stats_includes_runtime_snapshot(pg_storage):
         "pages_per_second": 2.5,
         "pages": 15,
         "active_hosts": 3,
-        "active_branches": 4,
         "parse_queue_size": 2,
         "finalize_queue_size": 1,
         "publish_queue_size": 1,
@@ -272,7 +269,6 @@ def test_get_stats_includes_runtime_snapshot(pg_storage):
             "pages_per_second": 2.5,
             "cycle_pages": 15,
             "active_hosts": 3,
-            "active_branches": 4,
             "errors": {"timeout": 1},
         },
         "backpressure": {
@@ -346,7 +342,6 @@ def test_get_stats_includes_readiness_breakdown(pg_storage):
     assert stats["readiness"]["pending"] == 3
     assert stats["readiness"]["ready"] == 1
     assert stats["readiness"]["ready_domains"] == 1
-    assert stats["readiness"]["ready_domain_branches"] == 1
     assert stats["readiness"]["next_ready_delay"] == pytest.approx(20.0, abs=1e-3)
     assert stats["readiness"]["blocked"] == {
         "next_fetch_at": 1,
