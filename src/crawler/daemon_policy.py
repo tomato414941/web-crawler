@@ -11,8 +11,6 @@ class DaemonSchedulerPolicy:
     def __init__(
         self,
         *,
-        seeds: list[str],
-        seed_hosts: list[str],
         cycle_pages: int,
         min_exploration_ready: int,
         min_exploration_hosts: int,
@@ -25,8 +23,6 @@ class DaemonSchedulerPolicy:
         backlog_ready_per_branch: int,
         backlog_defer_seconds: float,
     ):
-        self._seeds = seeds
-        self._seed_hosts = seed_hosts
         self._cycle_pages = cycle_pages
         self._min_exploration_ready = min_exploration_ready
         self._min_exploration_hosts = min_exploration_hosts
@@ -81,14 +77,10 @@ class DaemonSchedulerPolicy:
         }
 
     def ensure_exploration_supply(self, frontier) -> None:
-        """Bootstrap an empty frontier, then keep exploration supplied from existing pending work."""
-        if frontier.pending_count() == 0:
-            frontier.upsert_seeds(self._seeds, priority=2.0)
-            return
-
+        """Keep exploration supplied from existing scheduler state only."""
         exploration_ready = frontier.ready_count(queue_classes=["exploration"])
         exploration_pending = frontier.pending_count(queue_classes=["exploration"])
-        exploration_hosts = self._exploration_pending_hosts(frontier, exploration_pending)
+        exploration_hosts = self._exploration_ready_hosts(frontier)
         if (
             exploration_ready >= self._min_exploration_ready
             and exploration_hosts >= self._min_exploration_hosts
@@ -115,7 +107,7 @@ class DaemonSchedulerPolicy:
             return 0
         ready_count = frontier.ready_count()
         ready_deficit = max(0, self._min_exploration_ready - ready_count)
-        exploration_hosts = self._exploration_pending_hosts(frontier)
+        exploration_hosts = self._exploration_ready_hosts(frontier)
         host_deficit = max(0, self._min_exploration_hosts - exploration_hosts)
         if ready_deficit <= 0 and host_deficit <= 0:
             return 0
@@ -152,9 +144,9 @@ class DaemonSchedulerPolicy:
         quarantined, _restored = frontier.rebalance_blocked_domain_backoff()
         return quarantined
 
-    def _exploration_pending_hosts(self, frontier, pending_count: int | None = None) -> int:
-        if pending_count is None:
-            pending_count = frontier.pending_count(queue_classes=["exploration"])
+    def _exploration_ready_hosts(self, frontier) -> int:
+        if hasattr(frontier, "ready_domain_count"):
+            return frontier.ready_domain_count(queue_classes=["exploration"])
         if hasattr(frontier, "pending_domain_count"):
             return frontier.pending_domain_count(queue_classes=["exploration"])
-        return pending_count
+        return frontier.ready_count(queue_classes=["exploration"])

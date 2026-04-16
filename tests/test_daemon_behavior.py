@@ -200,6 +200,42 @@ async def test_daemon_does_not_auto_requeue_failed_urls():
     assert frontier.requeue_failed_calls == 0
 
 
+def test_bootstrap_frontier_inserts_seeds_only_when_empty():
+    class FakeFrontier:
+        def __init__(self, pending):
+            self._pending = pending
+            self.upsert_calls = []
+
+        def pending_count(self, queue_classes=None):
+            assert queue_classes is None
+            return self._pending
+
+        def upsert_seeds(self, urls, priority=2.0):
+            self.upsert_calls.append((list(urls), priority))
+            self._pending = len(urls)
+            return len(urls)
+
+    daemon = CrawlDaemon(
+        seeds=["https://example.com/", "https://example.org/"],
+        postgres_dsn="postgresql://unused",
+        cycle_pages=10,
+        recrawl_ttl=3600,
+    )
+
+    empty_frontier = FakeFrontier(pending=0)
+    populated_frontier = FakeFrontier(pending=3)
+
+    inserted = daemon._bootstrap_frontier(empty_frontier)
+    skipped = daemon._bootstrap_frontier(populated_frontier)
+
+    assert inserted == 2
+    assert empty_frontier.upsert_calls == [
+        (["https://example.com/", "https://example.org/"], 2.0)
+    ]
+    assert skipped == 0
+    assert populated_frontier.upsert_calls == []
+
+
 def test_format_error_breakdown_orders_known_categories():
     formatted = _format_error_breakdown(
         {
@@ -439,6 +475,11 @@ def test_ensure_exploration_supply_tops_up_when_exploration_queue_is_starved():
                 return 1
             return 10
 
+        def ready_domain_count(self, queue_classes=None, now=None):
+            if queue_classes == ["exploration"]:
+                return 1
+            return 10
+
         def promote_backlog_host_heads(self, target_pending, per_domain=1):
             self.host_promote_calls.append((target_pending, per_domain))
             return 2
@@ -465,6 +506,49 @@ def test_ensure_exploration_supply_tops_up_when_exploration_queue_is_starved():
     assert frontier.upsert_calls == []
 
 
+def test_ensure_exploration_supply_does_not_bootstrap_empty_frontier():
+    class FakeFrontier:
+        def __init__(self):
+            self.upsert_calls = []
+            self.host_promote_calls = []
+
+        def pending_count(self, queue_classes=None):
+            return 0
+
+        def ready_count(self, queue_classes=None, now=None):
+            assert queue_classes == ["exploration"]
+            return 0
+
+        def ready_domain_count(self, queue_classes=None, now=None):
+            assert queue_classes == ["exploration"]
+            return 0
+
+        def promote_backlog_host_heads(self, target_pending, per_domain=1):
+            self.host_promote_calls.append((target_pending, per_domain))
+            return 0
+
+        def upsert_seeds(self, urls, priority=2.0):
+            self.upsert_calls.append((list(urls), priority))
+            return len(urls)
+
+    daemon = CrawlDaemon(
+        seeds=[
+            "https://www.iana.org/",
+            "https://datatracker.ietf.org/",
+            "https://www.rfc-editor.org/",
+        ],
+        postgres_dsn="postgresql://unused",
+        cycle_pages=10,
+        recrawl_ttl=3600,
+    )
+    frontier = FakeFrontier()
+
+    daemon._ensure_exploration_supply(frontier)
+
+    assert frontier.host_promote_calls == [(3, 1)]
+    assert frontier.upsert_calls == []
+
+
 def test_ensure_exploration_supply_stays_idle_when_host_promotion_is_insufficient():
     class FakeFrontier:
         def __init__(self):
@@ -481,6 +565,11 @@ def test_ensure_exploration_supply_stays_idle_when_host_promotion_is_insufficien
             return 1
 
         def pending_domain_count(self, queue_classes=None):
+            if queue_classes == ["exploration"]:
+                return 1
+            return 10
+
+        def ready_domain_count(self, queue_classes=None, now=None):
             if queue_classes == ["exploration"]:
                 return 1
             return 10
@@ -530,6 +619,11 @@ def test_ensure_exploration_supply_does_not_top_up_when_exploration_queue_is_hea
                 return 3
             return 10
 
+        def ready_domain_count(self, queue_classes=None, now=None):
+            if queue_classes == ["exploration"]:
+                return 3
+            return 10
+
         def upsert_seeds(self, urls, priority=2.0):
             self.upsert_calls.append((list(urls), priority))
             return len(urls)
@@ -571,6 +665,11 @@ def test_ensure_exploration_supply_does_not_reinsert_when_exploration_pending_is
                 return 2
             return 12
 
+        def ready_domain_count(self, queue_classes=None, now=None):
+            if queue_classes == ["exploration"]:
+                return 0
+            return 12
+
         def promote_backlog_host_heads(self, target_pending, per_domain=1):
             self.host_promote_calls.append((target_pending, per_domain))
             return 0
@@ -594,7 +693,7 @@ def test_ensure_exploration_supply_does_not_reinsert_when_exploration_pending_is
 
     daemon._ensure_exploration_supply(frontier)
 
-    assert frontier.host_promote_calls == [(29, 1)]
+    assert frontier.host_promote_calls == [(32, 1)]
     assert frontier.upsert_calls == []
 
 
@@ -614,6 +713,11 @@ def test_ensure_exploration_supply_tops_up_when_exploration_host_diversity_is_lo
             return 3
 
         def pending_domain_count(self, queue_classes=None):
+            if queue_classes == ["exploration"]:
+                return 1
+            return 10
+
+        def ready_domain_count(self, queue_classes=None, now=None):
             if queue_classes == ["exploration"]:
                 return 1
             return 10
@@ -657,6 +761,10 @@ def test_promote_blocked_retry_restores_small_subset_when_ready_is_thin():
             assert queue_classes == ["exploration"]
             return 3
 
+        def ready_domain_count(self, queue_classes=None, now=None):
+            assert queue_classes == ["exploration"]
+            return 3
+
         def promote_blocked_domain_backoff(self, limit, per_domain=1, max_consecutive_failures=None):
             self.calls.append((limit, per_domain, max_consecutive_failures))
             return 2
@@ -689,6 +797,10 @@ def test_promote_blocked_retry_surges_when_ready_is_zero():
             return 0
 
         def pending_domain_count(self, queue_classes=None):
+            assert queue_classes == ["exploration"]
+            return 3
+
+        def ready_domain_count(self, queue_classes=None, now=None):
             assert queue_classes == ["exploration"]
             return 3
 
@@ -727,6 +839,10 @@ def test_promote_blocked_retry_skips_when_ready_is_healthy():
             assert queue_classes == ["exploration"]
             return 3
 
+        def ready_domain_count(self, queue_classes=None, now=None):
+            assert queue_classes == ["exploration"]
+            return 3
+
         def promote_blocked_domain_backoff(self, limit, per_domain=1, max_consecutive_failures=None):
             self.calls.append((limit, per_domain, max_consecutive_failures))
             return 1
@@ -759,6 +875,10 @@ def test_promote_blocked_retry_runs_when_ready_is_healthy_but_host_diversity_is_
             return 20
 
         def pending_domain_count(self, queue_classes=None):
+            assert queue_classes == ["exploration"]
+            return 1
+
+        def ready_domain_count(self, queue_classes=None, now=None):
             assert queue_classes == ["exploration"]
             return 1
 

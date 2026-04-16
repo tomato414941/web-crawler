@@ -391,6 +391,8 @@ class PgStorage:
                     readiness = {
                         "pending": readiness_snapshot.pending,
                         "ready": readiness_snapshot.ready,
+                        "ready_domains": readiness_snapshot.ready_domains,
+                        "ready_domain_branches": readiness_snapshot.ready_domain_branches,
                         "next_ready_delay": readiness_snapshot.next_ready_delay,
                         "blocked": dict(readiness_snapshot.blocked),
                         "state_counts": dict(readiness_snapshot.state_counts),

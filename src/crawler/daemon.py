@@ -113,8 +113,6 @@ class CrawlDaemon:
             default_delay=delay,
         )
         self._policy = DaemonSchedulerPolicy(
-            seeds=self._seeds,
-            seed_hosts=self._seed_hosts,
             cycle_pages=self._cycle_pages,
             min_exploration_ready=self._min_exploration_ready,
             min_exploration_hosts=self._min_exploration_hosts,
@@ -152,6 +150,9 @@ class CrawlDaemon:
                         continue
 
                 try:
+                    bootstrapped = self._bootstrap_frontier(frontier)
+                    if bootstrapped:
+                        logger.info("Bootstrapped frontier with %d seed URLs", bootstrapped)
                     maintenance = self._policy.prepare_frontier(
                         frontier,
                         recrawl_stale=lambda: self._recrawl_stale(storage, frontier),
@@ -414,7 +415,7 @@ class CrawlDaemon:
             runtime_storage.close()
 
     def _ensure_exploration_supply(self, frontier: Frontier):
-        """Keep exploration supplied from existing pending work and bootstrap when empty."""
+        """Keep exploration supplied from existing scheduler state."""
         before_pending = frontier.pending_count()
         before_ready = frontier.ready_count(queue_classes=["exploration"])
         before_exploration_pending = frontier.pending_count(queue_classes=["exploration"])
@@ -434,6 +435,12 @@ class CrawlDaemon:
             after_exploration_pending,
             self._min_exploration_ready,
         )
+
+    def _bootstrap_frontier(self, frontier: Frontier) -> int:
+        """Seed an empty frontier through a dedicated bootstrap path."""
+        if frontier.pending_count() != 0:
+            return 0
+        return frontier.upsert_seeds(self._seeds, priority=2.0)
 
     def _promote_blocked_retry(self, frontier: Frontier) -> int:
         """Restore a small cooled-down subset from blocked retry queue when ready work is thin."""
