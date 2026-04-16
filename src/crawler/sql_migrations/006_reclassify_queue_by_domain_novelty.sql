@@ -3,7 +3,6 @@ WITH ranked AS (
         url,
         status,
         archetype,
-        depth,
         ROW_NUMBER() OVER (PARTITION BY domain ORDER BY added_at ASC, url ASC) AS domain_rank
     FROM url_ledger
 ), reclassified AS (
@@ -13,7 +12,6 @@ WITH ranked AS (
             WHEN status = 'done' THEN 'recrawl'
             WHEN archetype IN ('registry_listing', 'redirect_hub') THEN 'backlog'
             WHEN domain_rank > 8 THEN 'backlog'
-            WHEN depth <= 3 THEN 'exploration'
             ELSE 'backlog'
         END AS queue_class
     FROM ranked

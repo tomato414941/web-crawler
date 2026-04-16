@@ -166,7 +166,6 @@ class CrawlerEngine:
         self,
         start_url: str = "",
         max_pages: int = 100,
-        max_depth: int = 3,
         same_domain: bool = True,
         use_browser: bool = False,
         delay: float = 1.0,
@@ -180,7 +179,6 @@ class CrawlerEngine:
     ):
         self.start_url = start_url
         self.max_pages = max_pages
-        self.max_depth = max_depth
         self.same_domain = same_domain
         self.use_browser = use_browser
         self.concurrency = concurrency
@@ -416,7 +414,6 @@ class CrawlerEngine:
         decision = rank_seed_url(url)
         return CrawlTask(
             url=url,
-            depth=0,
             priority=decision.priority,
             queue_class=QUEUE_EXPLORATION,
         )
@@ -445,7 +442,6 @@ class CrawlerEngine:
         self,
         parent_url: str,
         links: list[str],
-        depth: int,
         parent_signals: PageSignals | None = None,
     ) -> list[CrawlTask]:
         """Assign ranking metadata to discovered outlinks before enqueueing."""
@@ -462,7 +458,6 @@ class CrawlerEngine:
             tasks.append(
                 CrawlTask(
                     url=link,
-                    depth=depth,
                     priority=decision.priority,
                     source_url=parent_url,
                 )
@@ -506,7 +501,6 @@ class CrawlerEngine:
                                 url=response.url,
                                 error=f"http_{response.status}",
                                 retryable=False,
-                                depth=task.depth,
                                 timings=timings,
                             ),
                             process_started=process_started,
@@ -524,7 +518,6 @@ class CrawlerEngine:
                                 url=response.url,
                                 error=f"http_{response.status}",
                                 retryable=False,
-                                depth=task.depth,
                                 timings=timings,
                             ),
                             process_started=process_started,
@@ -540,7 +533,6 @@ class CrawlerEngine:
                             url=response.url,
                             error=f"http_{response.status}",
                             retryable=True,
-                            depth=task.depth,
                             timings=timings,
                         ),
                         process_started=process_started,
@@ -565,7 +557,6 @@ class CrawlerEngine:
                     url=url,
                     error="timeout",
                     retryable=True,
-                    depth=task.depth,
                     timings=timings,
                 ),
                 process_started=process_started,
@@ -582,7 +573,6 @@ class CrawlerEngine:
                     url=url,
                     error="connection_error",
                     retryable=True,
-                    depth=task.depth,
                     timings=timings,
                 ),
                 process_started=process_started,
@@ -600,7 +590,6 @@ class CrawlerEngine:
                     url=url,
                     error=str(e),
                     retryable=retryable,
-                    depth=task.depth,
                     timings=timings,
                 ),
                 process_started=process_started,
@@ -741,7 +730,7 @@ class CrawlerEngine:
         outlinks: list[str] = []
         new_tasks: list[CrawlTask] = []
 
-        if task.depth < self.max_depth and should_extract_links(
+        if should_extract_links(
             response.headers.get("content-type"),
             response.content,
         ):
@@ -751,7 +740,6 @@ class CrawlerEngine:
             new_tasks = self._build_discovered_tasks(
                 task.url,
                 links,
-                task.depth + 1,
                 parent_signals=page_signals,
             )
 
@@ -779,7 +767,6 @@ class CrawlerEngine:
                 url=response.url,
                 status=response.status,
                 content_length=len(response.content),
-                depth=task.depth,
                 source_url=task.source_url,
                 timestamp=time.time(),
                 content=content,
@@ -842,7 +829,6 @@ class CrawlerEngine:
                     url=fetched.task.url,
                     error=str(exc),
                     retryable=self.domain_manager.should_retry(fetched.task.url),
-                    depth=fetched.task.depth,
                     timings=fetched.timings,
                 )
                 category = categorize_crawl_error(str(exc))
@@ -1160,7 +1146,6 @@ class CrawlerEngine:
 async def run_crawl(
     start_url: str,
     max_pages: int = 100,
-    max_depth: int = 3,
     same_domain: bool = True,
     output_file: str | None = None,
     use_browser: bool = False,
@@ -1174,7 +1159,7 @@ async def run_crawl(
         raise ValueError("--postgres is required")
 
     typer.echo(f"Starting crawl from {start_url}")
-    typer.echo(f"Max pages: {max_pages}, Max depth: {max_depth}, Concurrency: {concurrency}")
+    typer.echo(f"Max pages: {max_pages}, Concurrency: {concurrency}")
 
     start_time = time.time()
     from .storage import PgStorage
@@ -1191,7 +1176,6 @@ async def run_crawl(
             async with CrawlerEngine(
                 start_url=start_url,
                 max_pages=max_pages,
-                max_depth=max_depth,
                 same_domain=same_domain,
                 use_browser=use_browser,
                 delay=delay,

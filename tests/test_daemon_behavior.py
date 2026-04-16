@@ -56,7 +56,6 @@ def _save_page(storage: PgStorage, url: str, timestamp: float) -> None:
             "url": url,
             "status": 200,
             "content_length": 100,
-            "depth": 0,
             "timestamp": timestamp,
             "content": "<html><title>Example</title></html>",
             "outlinks": [],
@@ -70,11 +69,11 @@ def test_recrawl_stale_skips_when_pending_queue_is_full(pg_resources):
 
     for idx in range(3):
         frontier.add(
-            CrawlTask(url=f"https://example.com/pending-{idx}", depth=0, added_at=now + idx)
+            CrawlTask(url=f"https://example.com/pending-{idx}", added_at=now + idx)
         )
 
     stale_url = "https://example.com/stale"
-    frontier.add(CrawlTask(url=stale_url, depth=0, added_at=now - 100))
+    frontier.add(CrawlTask(url=stale_url, added_at=now - 100))
     frontier.mark_done(stale_url)
     _save_page(storage, stale_url, now - 86400)
 
@@ -102,7 +101,7 @@ def test_recrawl_stale_requeues_only_oldest_rows_needed(pg_resources):
     _dsn, storage, frontier = pg_resources
     now = time.time()
 
-    frontier.add(CrawlTask(url="https://example.com/pending", depth=0, added_at=now))
+    frontier.add(CrawlTask(url="https://example.com/pending", added_at=now))
 
     stale_urls = [
         ("https://example.com/stale-1", now - 300),
@@ -110,7 +109,7 @@ def test_recrawl_stale_requeues_only_oldest_rows_needed(pg_resources):
         ("https://example.com/stale-3", now - 100),
     ]
     for url, added_at in stale_urls:
-        frontier.add(CrawlTask(url=url, depth=0, added_at=added_at))
+        frontier.add(CrawlTask(url=url, added_at=added_at))
         frontier.mark_done(url)
         _save_page(storage, url, added_at)
 

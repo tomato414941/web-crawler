@@ -1,0 +1,5 @@
+ALTER TABLE pages
+    DROP COLUMN IF EXISTS depth;
+
+ALTER TABLE url_ledger
+    DROP COLUMN IF EXISTS depth;

@@ -126,7 +126,6 @@ def fetch(
 def crawl(
     start_url: str = typer.Argument(..., help="Starting URL for crawl"),
     max_pages: int = typer.Option(100, "--max-pages", "-n", help="Maximum pages to crawl"),
-    max_depth: int = typer.Option(3, "--max-depth", "-d", help="Maximum link depth"),
     same_domain: bool = typer.Option(True, "--same-domain/--any-domain", help="Stay on same domain"),
     output: str = typer.Option(None, "-o", "--output", help="Output file path (JSONL)"),
     js: bool = typer.Option(False, "--js", help="Use browser for all pages"),
@@ -141,7 +140,6 @@ def crawl(
     asyncio.run(run_crawl(
         start_url=start_url,
         max_pages=max_pages,
-        max_depth=max_depth,
         same_domain=same_domain,
         output_file=output,
         use_browser=js,
@@ -275,7 +273,6 @@ def daemon(
     seeds: list[str] = typer.Argument(..., help="Seed URLs to crawl"),
     cycle_pages: int = typer.Option(500, "--cycle-pages", help="Pages per cycle"),
     recrawl_ttl: int = typer.Option(86400, "--recrawl-ttl", help="Re-crawl pages older than N seconds"),
-    max_depth: int = typer.Option(3, "--max-depth", "-d", help="Maximum link depth"),
     concurrency: int = typer.Option(5, "--concurrency", "-c", help="Concurrent requests"),
     delay: float = typer.Option(1.0, "--delay", help="Delay between requests (seconds)"),
     cycle_pause: float = typer.Option(5.0, "--cycle-pause", help="Pause between cycles (seconds)"),
@@ -300,7 +297,6 @@ def daemon(
         postgres_dsn=postgres,
         cycle_pages=cycle_pages,
         recrawl_ttl=recrawl_ttl,
-        max_depth=max_depth,
         concurrency=concurrency,
         delay=delay,
         cycle_pause=cycle_pause,
