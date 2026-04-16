@@ -1064,14 +1064,13 @@ class TestFrontier:
         assert terminal_reason is None
         assert terminalized_at is None
 
-    def test_defer_overcrowded_backlog_delays_excess_low_priority_urls(self, frontier):
+    def test_defer_overcrowded_backlog_delays_excess_ready_urls(self, frontier):
         frontier.add(CrawlTask(url="http://a.com/1", depth=1, priority=0.55, added_at=1000))
         frontier.add(CrawlTask(url="http://a.com/2", depth=1, priority=0.55, added_at=1001))
         frontier.add(CrawlTask(url="http://a.com/3", depth=1, priority=0.55, added_at=1002))
 
         delayed = frontier.defer_overcrowded_backlog(
             keep_ready_per_domain=1,
-            low_priority_threshold=0.75,
             defer_seconds=60.0,
         )
 
@@ -1089,7 +1088,7 @@ class TestFrontier:
         assert ready == ["http://a.com/1"]
         assert deferred == ["http://a.com/2", "http://a.com/3"]
 
-    def test_defer_overcrowded_backlog_delays_excess_low_priority_branch_urls(self, frontier):
+    def test_defer_overcrowded_backlog_delays_excess_branch_urls(self, frontier):
         frontier.add(CrawlTask(url="http://a.com/docs/python/1", depth=1, priority=0.55, added_at=1000))
         frontier.add(CrawlTask(url="http://a.com/docs/python/2", depth=1, priority=0.55, added_at=1001))
         frontier.add(CrawlTask(url="http://a.com/docs/rust/1", depth=1, priority=0.55, added_at=1002))
@@ -1097,7 +1096,6 @@ class TestFrontier:
         delayed = frontier.defer_overcrowded_backlog(
             keep_ready_per_domain=10,
             keep_ready_per_branch=1,
-            low_priority_threshold=0.75,
             defer_seconds=60.0,
         )
 

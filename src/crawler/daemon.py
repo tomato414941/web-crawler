@@ -56,7 +56,6 @@ class CrawlDaemon:
         idle_sleep: float = 60.0,
         backlog_ready_per_domain: int | None = None,
         backlog_ready_per_branch: int | None = None,
-        backlog_low_priority: float | None = None,
         backlog_defer_seconds: float | None = None,
         min_ready_sleep: float | None = None,
     ):
@@ -79,11 +78,6 @@ class CrawlDaemon:
             settings.daemon_keep_ready_per_branch
             if backlog_ready_per_branch is None
             else backlog_ready_per_branch
-        )
-        self._backlog_low_priority = (
-            settings.daemon_backlog_low_priority
-            if backlog_low_priority is None
-            else backlog_low_priority
         )
         self._backlog_defer_seconds = (
             settings.daemon_backlog_defer_seconds
@@ -131,7 +125,6 @@ class CrawlDaemon:
             quarantine_retire_after_seconds=self._quarantine_retire_after_seconds,
             backlog_ready_per_domain=self._backlog_ready_per_domain,
             backlog_ready_per_branch=self._backlog_ready_per_branch,
-            backlog_low_priority=self._backlog_low_priority,
             backlog_defer_seconds=self._backlog_defer_seconds,
         )
 
