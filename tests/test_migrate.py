@@ -124,6 +124,8 @@ def test_apply_migrations_drops_legacy_url_ledger_columns(migrated_dsn):
     assert "discovery_kind" not in columns
     assert "archetype" not in columns
     assert "depth" not in columns
+    assert "lease_token" not in columns
+    assert "lease_expires_at" not in columns
 
     conn = psycopg2.connect(migrated_dsn)
     try:

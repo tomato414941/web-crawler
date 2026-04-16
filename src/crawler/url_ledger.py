@@ -28,7 +28,6 @@ QUEUE_EXPLORATION = "exploration"
 QUEUE_BACKLOG = "backlog"
 QUEUE_RECRAWL = "recrawl"
 
-EXPLORATION_DOMAIN_BUDGET = 8
 DEFAULT_LEASE_SECONDS = 300.0
 DEFAULT_RETRY_BACKOFF_SECONDS = 30.0
 MAX_RETRY_BACKOFF_SECONDS = 1800.0
@@ -46,8 +45,6 @@ URL_LEDGER_REQUIRED_COLUMNS = {
     "next_fetch_at",
     "last_success_at",
     "fail_streak",
-    "lease_token",
-    "lease_expires_at",
     "last_error",
     "terminal_reason",
     "terminalized_at",
@@ -316,12 +313,10 @@ class UrlLedger:
             return queue_class
         return QUEUE_BACKLOG
 
-    def _classify_queue(self, task: CrawlTask, *, known_count: int = 0) -> str:
+    def _classify_queue(self, task: CrawlTask) -> str:
         """Map a task into the queue class used by the scheduler."""
         if task.queue_class in FRONTIER_ALLOWED_QUEUE_CLASSES:
             return task.queue_class
-        if known_count >= EXPLORATION_DOMAIN_BUDGET:
-            return QUEUE_BACKLOG
         return QUEUE_BACKLOG
 
     def _merge_queue_class(self, current: str | None, candidate: str | None) -> str:
@@ -364,39 +359,19 @@ class UrlLedger:
             else:
                 merged[normalized.url] = self._merge_task(existing, normalized)
 
-        domain_counts = self.get_domain_known_counts({urlparse(task.url).netloc for task in merged.values()})
-        batch_counts: Counter[str] = Counter()
         prepared: list[CrawlTask] = []
         for task in merged.values():
-            domain = urlparse(task.url).netloc
-            known_count = domain_counts.get(domain, 0) + batch_counts[domain]
             prepared.append(
                 CrawlTask(
                     url=task.url,
                     priority=task.priority,
-                    queue_class=self._classify_queue(task, known_count=known_count),
+                    queue_class=self._classify_queue(task),
                     source_url=task.source_url,
                     added_at=task.added_at,
                     next_fetch_at=task.next_fetch_at,
                 )
             )
-            batch_counts[domain] += 1
         return prepared
-
-    def get_domain_known_counts(self, domains: set[str]) -> dict[str, int]:
-        """Return known URL counts per domain from the URL ledger."""
-        known_domains = {domain for domain in domains if domain}
-        if not known_domains:
-            return {}
-        with self._conn.cursor() as cur:
-            cur.execute(
-                f"""SELECT domain, COUNT(*)
-                   FROM {URL_LEDGER_TABLE}
-                   WHERE domain = ANY(%s)
-                   GROUP BY domain""",
-                (sorted(known_domains),),
-            )
-            return {domain: count for domain, count in cur.fetchall()}
 
     def _lease_order_by_sql(self, alias: str, prioritize_breadth: bool) -> str:
         """Return the ORDER BY clause used for lease selection."""
@@ -816,9 +791,16 @@ class UrlLedger:
             self._recover_leased_locked(now, expired_only=True)
             with self._conn.cursor() as cur:
                 cur.execute(
-                    f"""UPDATE {URL_LEDGER_TABLE}
-                        SET next_fetch_at = next_fetch_at
-                        WHERE url = (
+                    f"""SELECT
+                            candidate.url,
+                            candidate.priority,
+                            ledger.source_url,
+                            candidate.added_at,
+                            candidate.next_fetch_at,
+                            candidate.domain
+                        {candidate_from}
+                        JOIN {URL_LEDGER_TABLE} AS ledger ON ledger.url = candidate.url
+                        WHERE candidate.url = (
                             SELECT candidate.url
                             {candidate_from}
                             WHERE {where_sql}
@@ -826,13 +808,7 @@ class UrlLedger:
                             LIMIT 1
                             FOR UPDATE OF candidate SKIP LOCKED
                         )
-                        RETURNING
-                            url,
-                            priority,
-                            source_url,
-                            added_at,
-                            next_fetch_at,
-                            domain""",
+                        FOR UPDATE OF candidate""",
                     params,
                 )
                 row = cur.fetchone()
@@ -913,9 +889,16 @@ class UrlLedger:
             self._recover_leased_locked(now, expired_only=True)
             with self._conn.cursor() as cur:
                 cur.execute(
-                    f"""UPDATE {URL_LEDGER_TABLE}
-                        SET next_fetch_at = next_fetch_at
-                        WHERE url IN (
+                    f"""SELECT
+                            candidate.url,
+                            candidate.priority,
+                            ledger.source_url,
+                            candidate.added_at,
+                            candidate.next_fetch_at,
+                            candidate.domain
+                        {candidate_from}
+                        JOIN {URL_LEDGER_TABLE} AS ledger ON ledger.url = candidate.url
+                        WHERE candidate.url IN (
                             SELECT candidate.url
                             {candidate_from}
                             WHERE {ready_sql.where}
@@ -923,13 +906,8 @@ class UrlLedger:
                             LIMIT %s
                             FOR UPDATE OF candidate SKIP LOCKED
                         )
-                        RETURNING
-                            url,
-                            priority,
-                            source_url,
-                            added_at,
-                            next_fetch_at,
-                            domain""",
+                        ORDER BY {order_by}, candidate.url ASC
+                        FOR UPDATE OF candidate""",
                     params,
                 )
                 rows = cur.fetchall()

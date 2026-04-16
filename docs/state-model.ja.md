@@ -1,6 +1,10 @@
 # Crawler State Model
 
-この文書は、将来のリファクタリングの指針となる最小の永続状態モデルを定義する。意図的に概念レベルにとどめており、現在の実装を説明するものではない。クローラーが正しく scheduling 判断するために、何を記憶しておく必要があるかを示す。
+この文書は、将来のリファクタリングの指針となる practical な状態モデルを定義する。現在の実装をそのまま説明するものではないが、理想化された上位モデルをそのまま再掲するものでもない。クローラーが正しく scheduling 判断するために、どの状態を system 上の正本として持つべきかを示す。
+
+上位原則は [crawler-model.ja.md](/home/dev/projects/web-crawler/docs/crawler-model.ja.md) に置く。
+
+この文書は、その原則へ近づくための transition/convergence model として読むべきである。
 
 ## Goals
 
@@ -8,6 +12,7 @@
 - 永続的な事実と現在の scheduling state を分離する
 - 何が正本で何が派生値かを明確にする
 - 同じ意味の状態を複数箇所に持たない
+- 現在の crawler を理想モデルへ寄せるための practical な中間表現を置く
 
 ## Core Rule
 
