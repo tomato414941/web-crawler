@@ -17,11 +17,12 @@ from .domain_manager import compute_host_budget
 from .url_ledger import (
     BLOCKED_DOMAIN_BACKOFF_TABLE,
     LEASE_TABLE,
+    QUEUE_CLASS_DEFAULT_RUNNABLE_SURFACE,
     QUEUE_CLASS_ORDER,
     QUEUE_TABLE_BY_CLASS,
     URL_LEDGER_TABLE,
 )
-from .frontier_observability import FrontierObservability
+from .scheduler_observability import SchedulerObservability
 from .config import settings
 from .result import CrawlResult, result_to_dict
 from .schema import assert_public_table_columns
@@ -61,8 +62,39 @@ def _sanitize_stored_content(content: object) -> str:
     return content
 
 
+def _pending_queue_sql() -> str:
+    queue_union = "\n                        UNION ALL\n                        ".join(
+        f"SELECT '{queue_class}' AS queue_class, url, domain, next_fetch_at FROM public.{QUEUE_TABLE_BY_CLASS[queue_class]}"
+        for queue_class in QUEUE_CLASS_ORDER
+    )
+    return f"SELECT queue_class, url, domain, next_fetch_at FROM (\n                        {queue_union}\n                    ) AS pending_queue_rows"
+
+
+def _retry_surface_sql() -> str:
+    retry_union = "\n                               UNION\n                               ".join(
+        f"SELECT url FROM public.{QUEUE_TABLE_BY_CLASS[queue_class]}"
+        for queue_class in QUEUE_CLASS_ORDER
+    )
+    return f"WITH retry_surface AS (\n                               {retry_union}\n                           )"
+
+
+def _queue_class_count_projection_sql(queue_class_expr: str) -> str:
+    return ",\n                                ".join(
+        f"COUNT(*) FILTER (WHERE {queue_class_expr} = '{queue_class}') AS queue_count_{index}"
+        for index, queue_class in enumerate(QUEUE_CLASS_ORDER)
+    )
+
+
+def _surface_counts_from_queue_count_values(queue_count_values: tuple[int, ...]) -> dict[str, int]:
+    surface_counts: dict[str, int] = {}
+    for queue_class, count in zip(QUEUE_CLASS_ORDER, queue_count_values, strict=True):
+        surface = QUEUE_CLASS_DEFAULT_RUNNABLE_SURFACE[queue_class]
+        surface_counts[surface] = surface_counts.get(surface, 0) + int(count or 0)
+    return surface_counts
+
+
 def _build_operator_summary(
-    frontier_status: Mapping[str, object],
+    scheduler_status: Mapping[str, object],
     readiness: Mapping[str, object],
     runtime: Mapping[str, object],
     active_error_breakdown: Mapping[str, int],
@@ -80,14 +112,14 @@ def _build_operator_summary(
     return {
         "scheduler_state": {
             "pending": int(readiness.get("pending", 0) or 0),
-            "ready": int(state_counts.get("ready", 0) or 0),
+            "runnable": int(state_counts.get("runnable", 0) or 0),
             "scheduled": int(state_counts.get("scheduled", 0) or 0),
             "blocked_domain_next_request": int(
                 state_counts.get("blocked_domain_next_request", 0) or 0
             ),
             "blocked_host_backoff": int(state_counts.get("blocked_host_backoff", 0) or 0),
             "retry_quarantine": int(state_counts.get("retry_quarantine", 0) or 0),
-            "leased": int(frontier_status.get("leased", 0) or 0),
+            "leased": int(scheduler_status.get("leased", 0) or 0),
         },
         "throughput": {
             "pages_per_second": runtime_payload.get("pages_per_second"),
@@ -319,9 +351,9 @@ class PgStorage:
                 cur.execute(f"SELECT to_regclass('public.{URL_LEDGER_TABLE}')")
                 url_ledger_exists = cur.fetchone()[0] is not None
 
-                frontier_status: dict[str, int] = {}
-                pending_queue_classes: dict[str, int] = {}
-                blocked_queue_classes: dict[str, int] = {}
+                scheduler_status: dict[str, int] = {}
+                pending_surfaces: dict[str, int] = {}
+                blocked_surfaces: dict[str, int] = {}
                 readiness: dict[str, object] = {}
                 top_pending_domains: list[dict[str, object]] = []
                 top_blocked_domains: list[dict[str, object]] = []
@@ -332,15 +364,9 @@ class PgStorage:
                 runtime: dict[str, object] = {}
                 operator_summary: dict[str, object] = {}
                 host_budget_summary: dict[str, object] = {}
-                pending_queue_sql = """SELECT queue_class, url, domain, next_fetch_at FROM (
-                        SELECT 'exploration' AS queue_class, url, domain, next_fetch_at FROM public.frontier_queue_exploration
-                        UNION ALL
-                        SELECT 'backlog' AS queue_class, url, domain, next_fetch_at FROM public.frontier_queue_backlog
-                        UNION ALL
-                        SELECT 'recrawl' AS queue_class, url, domain, next_fetch_at FROM public.frontier_queue_recrawl
-                    ) AS pending_queue_rows"""
-                blocked_queue_sql = """SELECT queue_class, url, domain, next_fetch_at
-                    FROM public.frontier_queue_blocked_domain_backoff"""
+                pending_queue_sql = _pending_queue_sql()
+                blocked_queue_sql = f"""SELECT queue_class, url, domain, next_fetch_at
+                    FROM public.{BLOCKED_DOMAIN_BACKOFF_TABLE}"""
                 cur.execute("SELECT to_regclass('public.crawler_runtime_stats')")
                 runtime_exists = cur.fetchone()[0] is not None
                 if runtime_exists:
@@ -361,17 +387,18 @@ class PgStorage:
                         URL_LEDGER_STATS_REQUIRED_COLUMNS,
                     )
 
-                    observability = FrontierObservability(
+                    observability = SchedulerObservability(
                         self._conn,
                         queue_table_by_class=QUEUE_TABLE_BY_CLASS,
                         queue_class_order=QUEUE_CLASS_ORDER,
+                        queue_class_default_runnable_surface=QUEUE_CLASS_DEFAULT_RUNNABLE_SURFACE,
                         blocked_queue_table=BLOCKED_DOMAIN_BACKOFF_TABLE,
                         lease_table=LEASE_TABLE,
                     )
 
-                    frontier_status = observability.status_counts()
-                    pending_queue_classes = dict(frontier_status.get("pending_queue_tables", {}))
-                    blocked_queue_classes = dict(frontier_status.get("blocked_queue_classes", {}))
+                    scheduler_status = observability.status_counts()
+                    pending_surfaces = dict(scheduler_status.get("pending_surfaces", {}))
+                    blocked_surfaces = dict(scheduler_status.get("blocked_surfaces", {}))
 
                     cur.execute(
                         f"""SELECT domain, COUNT(*)
@@ -388,9 +415,9 @@ class PgStorage:
                     readiness_snapshot = observability.readiness(now=now)
                     readiness = {
                         "pending": readiness_snapshot.pending,
-                        "ready": readiness_snapshot.ready,
-                        "ready_domains": readiness_snapshot.ready_domains,
-                        "next_ready_delay": readiness_snapshot.next_ready_delay,
+                        "runnable": readiness_snapshot.runnable,
+                        "runnable_domains": readiness_snapshot.runnable_domains,
+                        "next_runnable_delay": readiness_snapshot.next_runnable_delay,
                         "blocked": dict(readiness_snapshot.blocked),
                         "state_counts": dict(readiness_snapshot.state_counts),
                     }
@@ -501,15 +528,7 @@ class PgStorage:
                                 COUNT(*) AS pending_count,
                                 MAX(COALESCE(domain_state.latency_ewma_ms, 0)) AS latency_ewma_ms,
                                 COALESCE(MAX(domain_state.consecutive_failures), 0) AS consecutive_failures,
-                                COUNT(*) FILTER (
-                                    WHERE pending_entries.queue_class = 'exploration'
-                                ) AS exploration_count,
-                                COUNT(*) FILTER (
-                                    WHERE pending_entries.queue_class = 'backlog'
-                                ) AS backlog_count,
-                                COUNT(*) FILTER (
-                                    WHERE pending_entries.queue_class = 'recrawl'
-                                ) AS recrawl_count
+                                {_queue_class_count_projection_sql("pending_entries.queue_class")}
                             FROM pending_entries
                             JOIN public.domain_state ON domain_state.host_key = pending_entries.domain
                             WHERE COALESCE(domain_state.latency_ewma_ms, 0) > 0
@@ -520,28 +539,18 @@ class PgStorage:
                                 pending_entries.domain ASC
                             LIMIT 10"""
                     )
-                    top_slow_domains = [
-                        {
-                            "domain": domain,
-                            "pending_count": pending_count,
-                            "latency_ewma_ms": round(latency_ewma_ms, 1),
-                            "consecutive_failures": consecutive_failures,
-                            "queue_counts": {
-                                "exploration": exploration_count,
-                                "backlog": backlog_count,
-                                "recrawl": recrawl_count,
-                            },
-                        }
-                        for (
-                            domain,
-                            pending_count,
-                            latency_ewma_ms,
-                            consecutive_failures,
-                            exploration_count,
-                            backlog_count,
-                            recrawl_count,
-                        ) in cur.fetchall()
-                    ]
+                    top_slow_domains = []
+                    for row in cur.fetchall():
+                        domain, pending_count, latency_ewma_ms, consecutive_failures, *queue_count_values = row
+                        top_slow_domains.append(
+                            {
+                                "domain": domain,
+                                "pending_count": pending_count,
+                                "latency_ewma_ms": round(latency_ewma_ms, 1),
+                                "consecutive_failures": consecutive_failures,
+                                "surface_counts": _surface_counts_from_queue_count_values(tuple(queue_count_values)),
+                            }
+                        )
                     elevated_budget_domains = []
                     observed_hosts = 0
                     ineligible_due_to_failures = 0
@@ -582,13 +591,7 @@ class PgStorage:
                     }
 
                     cur.execute(
-                        """WITH retry_surface AS (
-                               SELECT url FROM public.frontier_queue_exploration
-                               UNION
-                               SELECT url FROM public.frontier_queue_backlog
-                               UNION
-                               SELECT url FROM public.frontier_queue_recrawl
-                           )
+                        _retry_surface_sql() + """
                            SELECT url_ledger.last_error, COUNT(*)
                            FROM public.url_ledger AS url_ledger
                            LEFT JOIN retry_surface ON retry_surface.url = url_ledger.url
@@ -615,13 +618,7 @@ class PgStorage:
                     }
 
                     cur.execute(
-                        """WITH retry_surface AS (
-                               SELECT url FROM public.frontier_queue_exploration
-                               UNION
-                               SELECT url FROM public.frontier_queue_backlog
-                               UNION
-                               SELECT url FROM public.frontier_queue_recrawl
-                           )
+                        _retry_surface_sql() + """
                            SELECT url_ledger.domain, COUNT(*)
                            FROM public.url_ledger AS url_ledger
                            LEFT JOIN retry_surface ON retry_surface.url = url_ledger.url
@@ -651,7 +648,7 @@ class PgStorage:
             raise
 
         operator_summary = _build_operator_summary(
-            frontier_status=frontier_status,
+            scheduler_status=scheduler_status,
             readiness=readiness,
             runtime=runtime,
             active_error_breakdown=active_error_breakdown,
@@ -664,9 +661,9 @@ class PgStorage:
             "oldest_crawl": row[2],
             "newest_crawl": row[3],
             "total_bytes": row[4],
-            "frontier_status": frontier_status,
-            "pending_queue_classes": pending_queue_classes,
-            "blocked_queue_classes": blocked_queue_classes,
+            "scheduler_status": scheduler_status,
+            "pending_surfaces": pending_surfaces,
+            "blocked_surfaces": blocked_surfaces,
             "readiness": readiness,
             "top_page_domains": top_page_domains,
             "top_pending_domains": top_pending_domains,

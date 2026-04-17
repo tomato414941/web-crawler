@@ -15,7 +15,7 @@ class _FakeFrontier:
         self.done = []
         self.added = []
 
-    def lease_next(self, prioritize_breadth=False, **_kwargs):
+    def lease_next(self, lease_strategy=None, **_kwargs):
         task, self._task = self._task, None
         return task
 
@@ -30,6 +30,13 @@ class _FakeFrontier:
 
     def place_many(self, tasks):
         self.added.extend(tasks)
+
+    def discover_many(self, tasks):
+        return len(tasks)
+
+    def admit_discovered_tasks(self, tasks):
+        self.place_many(tasks)
+        return len(tasks)
 
     def add(self, task):
         self.place(task)
@@ -88,7 +95,7 @@ async def test_crawler_engine_records_stage_timings():
     engine = CrawlerEngine(
         start_url="https://example.com/",
         max_pages=1,
-        frontier=frontier,
+        url_ledger=frontier,
         domain_manager=_FakeDomainManager(),
     )
     engine.fetcher = _FakeFetcher()
@@ -106,7 +113,7 @@ async def test_crawler_engine_records_stage_timings():
     assert result.timings.fetch_request_ms >= 0
     assert result.timings.fetch_body_read_ms >= 0
     assert result.timings.parse_ms >= 0
-    assert result.timings.frontier_ms >= 0
+    assert result.timings.scheduler_ms >= 0
     assert result.timings.persist_ms >= 0
     assert result.timings.parse_queue_wait_ms >= 0
     assert result.timings.finalize_queue_wait_ms >= 0
@@ -132,7 +139,7 @@ async def test_parse_frontier_delay_does_not_extend_fetch_slot():
     engine = CrawlerEngine(
         start_url="https://example.com/",
         max_pages=1,
-        frontier=frontier,
+        url_ledger=frontier,
         domain_manager=_FakeDomainManager(),
     )
     engine.fetcher = _FakeFetcher()
@@ -142,8 +149,8 @@ async def test_parse_frontier_delay_does_not_extend_fetch_slot():
     await engine.crawl()
 
     result = storage.saved[0]
-    assert result.timings.frontier_ms >= 200
-    assert result.timings.slot_ms < result.timings.frontier_ms
+    assert result.timings.scheduler_ms >= 200
+    assert result.timings.slot_ms < result.timings.scheduler_ms
 
 
 class _SlowStorage(_FakeStorage):
@@ -158,7 +165,7 @@ async def test_queue_wait_metrics_record_backpressure():
     engine = CrawlerEngine(
         start_url="https://example.com/",
         max_pages=1,
-        frontier=frontier,
+        url_ledger=frontier,
         domain_manager=_FakeDomainManager(),
     )
     engine.fetcher = _FakeFetcher()

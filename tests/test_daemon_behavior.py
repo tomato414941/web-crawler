@@ -8,7 +8,15 @@ import psycopg2
 import pytest
 
 from crawler.daemon import CrawlDaemon, _format_error_breakdown
-from crawler.url_ledger import CrawlTask, URL_LEDGER_TABLE, UrlLedger
+from crawler.url_ledger import (
+    BLOCKED_DOMAIN_BACKOFF_TABLE,
+    CrawlTask,
+    QUEUE_EXPLORATION,
+    QUEUE_RECRAWL,
+    QUEUE_TABLE_BY_CLASS,
+    URL_LEDGER_TABLE,
+    UrlLedger,
+)
 from crawler.migrate import apply_migrations
 from crawler.storage import PgStorage
 
@@ -25,6 +33,10 @@ def _reset_schema(dsn: str) -> None:
         with conn.cursor() as cur:
             cur.execute("DROP TABLE IF EXISTS public.schema_migrations")
             cur.execute("DROP TABLE IF EXISTS public.domain_state")
+            cur.execute(f"DROP TABLE IF EXISTS public.{QUEUE_TABLE_BY_CLASS[QUEUE_EXPLORATION]}")
+            cur.execute(f"DROP TABLE IF EXISTS public.{QUEUE_TABLE_BY_CLASS[QUEUE_RECRAWL]}")
+            cur.execute(f"DROP TABLE IF EXISTS public.{BLOCKED_DOMAIN_BACKOFF_TABLE}")
+            cur.execute("DROP TABLE IF EXISTS public.frontier_queue_recrawl")
             cur.execute("DROP TABLE IF EXISTS public.frontier_queue_blocked_domain_backoff")
             cur.execute(f"DROP TABLE IF EXISTS public.{URL_LEDGER_TABLE}")
             cur.execute("DROP TABLE IF EXISTS public.crawler_runtime_stats")
@@ -63,7 +75,7 @@ def _save_page(storage: PgStorage, url: str, timestamp: float) -> None:
     )
 
 
-def test_recrawl_stale_skips_when_pending_queue_is_full(pg_resources):
+def test_refresh_stale_skips_when_pending_queue_is_full(pg_resources):
     _dsn, storage, frontier = pg_resources
     now = time.time()
 
@@ -81,23 +93,23 @@ def test_recrawl_stale_skips_when_pending_queue_is_full(pg_resources):
         seeds=["https://example.com/"],
         postgres_dsn="postgresql://unused",
         cycle_pages=2,
-        recrawl_ttl=3600,
+        refresh_ttl=3600,
     )
 
-    daemon._recrawl_stale(storage, frontier)
+    daemon._refresh_stale(storage, frontier)
 
     with storage._conn.cursor() as cur:
         cur.execute(
-            "SELECT COUNT(*) FROM frontier_queue_recrawl WHERE url = %s",
+            f"SELECT COUNT(*) FROM {QUEUE_TABLE_BY_CLASS[QUEUE_RECRAWL]} WHERE url = %s",
             (stale_url,),
         )
-        (recrawl_count,) = cur.fetchone()
+        (refresh_count,) = cur.fetchone()
 
     assert frontier.pending_count() == 3
-    assert recrawl_count == 0
+    assert refresh_count == 0
 
 
-def test_recrawl_stale_requeues_only_oldest_rows_needed(pg_resources):
+def test_refresh_stale_requeues_only_oldest_rows_needed(pg_resources):
     _dsn, storage, frontier = pg_resources
     now = time.time()
 
@@ -117,24 +129,24 @@ def test_recrawl_stale_requeues_only_oldest_rows_needed(pg_resources):
         seeds=["https://example.com/"],
         postgres_dsn="postgresql://unused",
         cycle_pages=3,
-        recrawl_ttl=60,
+        refresh_ttl=60,
     )
 
-    daemon._recrawl_stale(storage, frontier)
+    daemon._refresh_stale(storage, frontier)
 
     with storage._conn.cursor() as cur:
         cur.execute(
-            """
+            f"""
             SELECT url
-            FROM frontier_queue_recrawl
+            FROM {QUEUE_TABLE_BY_CLASS[QUEUE_RECRAWL]}
             WHERE url LIKE 'https://example.com/stale-%'
             ORDER BY url
             """
         )
-        recrawl_urls = [url for (url,) in cur.fetchall()]
+        refresh_urls = [url for (url,) in cur.fetchall()]
 
     assert frontier.pending_count() == 3
-    assert recrawl_urls == [
+    assert refresh_urls == [
         "https://example.com/stale-1",
         "https://example.com/stale-2",
     ]
@@ -150,13 +162,13 @@ async def test_daemon_does_not_auto_requeue_failed_urls():
         def __init__(self):
             self.requeue_failed_calls = 0
 
-        def pending_count(self, queue_classes=None):
+        def pending_count(self, queue_classes=None, runnable_surface=None):
             return 1
 
         def readiness(self):
-            return SimpleNamespace(pending=1, ready=1, next_ready_delay=None)
+            return SimpleNamespace(pending=1, runnable=1, next_runnable_delay=None)
 
-        def defer_overcrowded_backlog(self, **_kwargs):
+        def defer_overcrowded_deferred_surface(self, **_kwargs):
             return 0
 
         def recover_leased(self, expired_only=False):
@@ -176,13 +188,13 @@ async def test_daemon_does_not_auto_requeue_failed_urls():
         seeds=["https://example.com/"],
         postgres_dsn="postgresql://unused",
         cycle_pages=10,
-        recrawl_ttl=3600,
+        refresh_ttl=3600,
     )
     frontier = FakeFrontier()
     storage = FakeStorage()
 
     daemon._install_signals = lambda: None
-    daemon._recrawl_stale = lambda _storage, _frontier: None
+    daemon._refresh_stale = lambda _storage, _frontier: None
 
     async def fake_connect():
         return storage, frontier
@@ -199,13 +211,13 @@ async def test_daemon_does_not_auto_requeue_failed_urls():
     assert frontier.requeue_failed_calls == 0
 
 
-def test_bootstrap_frontier_inserts_seeds_only_when_empty():
+def test_bootstrap_scheduler_inserts_seeds_only_when_empty():
     class FakeFrontier:
         def __init__(self, pending):
             self._pending = pending
             self.upsert_calls = []
 
-        def pending_count(self, queue_classes=None):
+        def pending_count(self, queue_classes=None, runnable_surface=None):
             assert queue_classes is None
             return self._pending
 
@@ -218,14 +230,14 @@ def test_bootstrap_frontier_inserts_seeds_only_when_empty():
         seeds=["https://example.com/", "https://example.org/"],
         postgres_dsn="postgresql://unused",
         cycle_pages=10,
-        recrawl_ttl=3600,
+        refresh_ttl=3600,
     )
 
     empty_frontier = FakeFrontier(pending=0)
     populated_frontier = FakeFrontier(pending=3)
 
-    inserted = daemon._bootstrap_frontier(empty_frontier)
-    skipped = daemon._bootstrap_frontier(populated_frontier)
+    inserted = daemon._bootstrap_scheduler(empty_frontier)
+    skipped = daemon._bootstrap_scheduler(populated_frontier)
 
     assert inserted == 2
     assert empty_frontier.upsert_calls == [
@@ -254,13 +266,13 @@ async def test_daemon_logs_cycle_error_breakdown(caplog):
             return None
 
     class FakeFrontier:
-        def pending_count(self, queue_classes=None):
+        def pending_count(self, queue_classes=None, runnable_surface=None):
             return 1
 
         def readiness(self):
-            return SimpleNamespace(pending=1, ready=1, next_ready_delay=None)
+            return SimpleNamespace(pending=1, runnable=1, next_runnable_delay=None)
 
-        def defer_overcrowded_backlog(self, **_kwargs):
+        def defer_overcrowded_deferred_surface(self, **_kwargs):
             return 0
 
         def recover_leased(self, expired_only=False):
@@ -276,13 +288,13 @@ async def test_daemon_logs_cycle_error_breakdown(caplog):
         seeds=["https://example.com/"],
         postgres_dsn="postgresql://unused",
         cycle_pages=10,
-        recrawl_ttl=3600,
+        refresh_ttl=3600,
     )
     frontier = FakeFrontier()
     storage = FakeStorage()
 
     daemon._install_signals = lambda: None
-    daemon._recrawl_stale = lambda _storage, _frontier: None
+    daemon._refresh_stale = lambda _storage, _frontier: None
 
     async def fake_connect():
         return storage, frontier
@@ -310,13 +322,13 @@ async def test_daemon_uses_configured_backlog_controls():
         def __init__(self):
             self.defer_args = None
 
-        def pending_count(self, queue_classes=None):
+        def pending_count(self, queue_classes=None, runnable_surface=None):
             return 1
 
         def readiness(self):
-            return SimpleNamespace(pending=1, ready=1, next_ready_delay=None)
+            return SimpleNamespace(pending=1, runnable=1, next_runnable_delay=None)
 
-        def defer_overcrowded_backlog(self, **kwargs):
+        def defer_overcrowded_deferred_surface(self, **kwargs):
             self.defer_args = kwargs
             return 0
 
@@ -333,16 +345,16 @@ async def test_daemon_uses_configured_backlog_controls():
         seeds=["https://example.com/"],
         postgres_dsn="postgresql://unused",
         cycle_pages=10,
-        recrawl_ttl=3600,
-        backlog_ready_per_domain=7,
-        backlog_ready_per_branch=2,
-        backlog_defer_seconds=12.0,
+        refresh_ttl=3600,
+        deferred_runnable_per_domain=7,
+        deferred_runnable_per_branch=2,
+        deferred_surface_defer_seconds=12.0,
     )
     frontier = FakeFrontier()
     storage = FakeStorage()
 
     daemon._install_signals = lambda: None
-    daemon._recrawl_stale = lambda _storage, _frontier: None
+    daemon._refresh_stale = lambda _storage, _frontier: None
 
     async def fake_connect():
         return storage, frontier
@@ -357,8 +369,8 @@ async def test_daemon_uses_configured_backlog_controls():
     await daemon.run()
 
     assert frontier.defer_args == {
-        "keep_ready_per_domain": 7,
-        "keep_ready_per_branch": 2,
+        "keep_runnable_per_domain": 7,
+        "keep_runnable_per_branch": 2,
         "defer_seconds": 12.0,
     }
 
@@ -376,14 +388,14 @@ async def test_daemon_persists_readiness_breakdown_while_waiting_for_ready():
             self.payloads.append((component, dict(payload)))
 
     class FakeFrontier:
-        def pending_count(self, queue_classes=None):
+        def pending_count(self, queue_classes=None, runnable_surface=None):
             return 1
 
         def readiness(self):
             return SimpleNamespace(
                 pending=3,
-                ready=0,
-                next_ready_delay=12.0,
+                runnable=0,
+                next_runnable_delay=12.0,
                 blocked={
                     "next_fetch_at": 2,
                     "domain_next_request": 1,
@@ -391,7 +403,7 @@ async def test_daemon_persists_readiness_breakdown_while_waiting_for_ready():
                     "retry_quarantine": 2,
                 },
                 state_counts={
-                    "ready": 0,
+                    "runnable": 0,
                     "scheduled": 0,
                     "blocked_domain_next_request": 1,
                     "blocked_host_backoff": 0,
@@ -399,7 +411,7 @@ async def test_daemon_persists_readiness_breakdown_while_waiting_for_ready():
                 },
             )
 
-        def defer_overcrowded_backlog(self, **_kwargs):
+        def defer_overcrowded_deferred_surface(self, **_kwargs):
             return 0
 
         def recover_leased(self, expired_only=False):
@@ -415,15 +427,15 @@ async def test_daemon_persists_readiness_breakdown_while_waiting_for_ready():
         seeds=["https://example.com/"],
         postgres_dsn="postgresql://unused",
         cycle_pages=10,
-        recrawl_ttl=3600,
+        refresh_ttl=3600,
         idle_sleep=30.0,
-        min_ready_sleep=1.0,
+        min_runnable_sleep=1.0,
     )
     frontier = FakeFrontier()
     storage = FakeStorage()
 
     daemon._install_signals = lambda: None
-    daemon._recrawl_stale = lambda _storage, _frontier: None
+    daemon._refresh_stale = lambda _storage, _frontier: None
 
     async def fake_connect():
         return storage, frontier
@@ -437,8 +449,8 @@ async def test_daemon_persists_readiness_breakdown_while_waiting_for_ready():
     await daemon.run()
 
     assert storage.payloads[-1][0] == "crawler"
-    assert storage.payloads[-1][1]["state"] == "idle_waiting_ready"
-    assert storage.payloads[-1][1]["next_ready_delay"] == 12.0
+    assert storage.payloads[-1][1]["state"] == "idle_waiting_runnable"
+    assert storage.payloads[-1][1]["next_runnable_delay"] == 12.0
     assert storage.payloads[-1][1]["readiness_blocked"] == {
         "next_fetch_at": 2,
         "domain_next_request": 1,
@@ -446,7 +458,7 @@ async def test_daemon_persists_readiness_breakdown_while_waiting_for_ready():
         "retry_quarantine": 2,
     }
     assert storage.payloads[-1][1]["scheduler_state"] == {
-        "ready": 0,
+        "runnable": 0,
         "scheduled": 0,
         "blocked_domain_next_request": 1,
         "blocked_host_backoff": 0,
@@ -454,32 +466,32 @@ async def test_daemon_persists_readiness_breakdown_while_waiting_for_ready():
     }
 
 
-def test_ensure_exploration_supply_tops_up_when_exploration_queue_is_starved():
+def test_ensure_frontline_supply_tops_up_when_frontline_surface_is_starved():
     class FakeFrontier:
         def __init__(self):
             self.upsert_calls = []
             self.host_promote_calls = []
 
-        def pending_count(self, queue_classes=None):
-            if queue_classes == ["exploration"]:
+        def pending_count(self, queue_classes=None, runnable_surface=None):
+            if runnable_surface == "frontline" or queue_classes == ["exploration"]:
                 return 1
             return 25
 
-        def ready_count(self, queue_classes=None, now=None):
-            assert queue_classes == ["exploration"]
+        def runnable_count(self, queue_classes=None, runnable_surface=None, now=None):
+            assert runnable_surface == "frontline" or queue_classes == ["exploration"]
             return 1
 
-        def pending_domain_count(self, queue_classes=None):
-            if queue_classes == ["exploration"]:
+        def pending_domain_count(self, queue_classes=None, runnable_surface=None):
+            if runnable_surface == "frontline" or queue_classes == ["exploration"]:
                 return 1
             return 10
 
-        def ready_domain_count(self, queue_classes=None, now=None):
-            if queue_classes == ["exploration"]:
+        def runnable_domain_count(self, queue_classes=None, runnable_surface=None, now=None):
+            if runnable_surface == "frontline" or queue_classes == ["exploration"]:
                 return 1
             return 10
 
-        def promote_backlog_host_heads(self, target_pending, per_domain=1):
+        def promote_deferred_host_heads(self, target_pending, per_domain=1):
             self.host_promote_calls.append((target_pending, per_domain))
             return 2
 
@@ -495,85 +507,88 @@ def test_ensure_exploration_supply_tops_up_when_exploration_queue_is_starved():
         ],
         postgres_dsn="postgresql://unused",
         cycle_pages=10,
-        recrawl_ttl=3600,
+        refresh_ttl=3600,
     )
     frontier = FakeFrontier()
 
-    daemon._ensure_exploration_supply(frontier)
-
-    assert frontier.host_promote_calls == [(5, 1)]
-    assert frontier.upsert_calls == []
-
-
-def test_ensure_exploration_supply_does_not_bootstrap_empty_frontier():
-    class FakeFrontier:
-        def __init__(self):
-            self.upsert_calls = []
-            self.host_promote_calls = []
-
-        def pending_count(self, queue_classes=None):
-            return 0
-
-        def ready_count(self, queue_classes=None, now=None):
-            assert queue_classes == ["exploration"]
-            return 0
-
-        def ready_domain_count(self, queue_classes=None, now=None):
-            assert queue_classes == ["exploration"]
-            return 0
-
-        def promote_backlog_host_heads(self, target_pending, per_domain=1):
-            self.host_promote_calls.append((target_pending, per_domain))
-            return 0
-
-        def upsert_seeds(self, urls, priority=2.0):
-            self.upsert_calls.append((list(urls), priority))
-            return len(urls)
-
-    daemon = CrawlDaemon(
-        seeds=[
-            "https://www.iana.org/",
-            "https://datatracker.ietf.org/",
-            "https://www.rfc-editor.org/",
-        ],
-        postgres_dsn="postgresql://unused",
-        cycle_pages=10,
-        recrawl_ttl=3600,
-    )
-    frontier = FakeFrontier()
-
-    daemon._ensure_exploration_supply(frontier)
+    daemon._ensure_frontline_supply(frontier)
 
     assert frontier.host_promote_calls == [(3, 1)]
     assert frontier.upsert_calls == []
 
 
-def test_ensure_exploration_supply_stays_idle_when_host_promotion_is_insufficient():
+def test_admit_discovered_backfills_pending_deficit():
+    class FakeFrontier:
+        def __init__(self):
+            self.admit_calls = []
+
+        def pending_count(self, queue_classes=None, runnable_surface=None):
+            assert queue_classes is None
+            return 3
+
+        def admit_discovered_urls(self, limit, queue_class=None, runnable_surface=None, intent=None):
+            self.admit_calls.append((limit, queue_class, runnable_surface, intent))
+            return 2
+
+    daemon = CrawlDaemon(
+        seeds=["https://example.com/"],
+        postgres_dsn="postgresql://unused",
+        cycle_pages=10,
+        refresh_ttl=3600,
+    )
+    frontier = FakeFrontier()
+
+    admitted = daemon._policy.admit_discovered(frontier)
+
+    assert admitted == 2
+    assert frontier.admit_calls == [(7, None, "deferred", "explore")]
+
+
+def test_admit_discovered_stays_idle_when_pending_is_healthy():
+    class FakeFrontier:
+        def __init__(self):
+            self.admit_calls = []
+
+        def pending_count(self, queue_classes=None, runnable_surface=None):
+            assert queue_classes is None
+            return 12
+
+        def admit_discovered_urls(self, limit, queue_class=None, runnable_surface=None, intent=None):
+            self.admit_calls.append((limit, queue_class, runnable_surface, intent))
+            return limit
+
+    daemon = CrawlDaemon(
+        seeds=["https://example.com/"],
+        postgres_dsn="postgresql://unused",
+        cycle_pages=10,
+        refresh_ttl=3600,
+    )
+    frontier = FakeFrontier()
+
+    admitted = daemon._policy.admit_discovered(frontier)
+
+    assert admitted == 0
+    assert frontier.admit_calls == []
+
+
+def test_ensure_frontline_supply_does_not_bootstrap_empty_frontier():
     class FakeFrontier:
         def __init__(self):
             self.upsert_calls = []
             self.host_promote_calls = []
 
-        def pending_count(self, queue_classes=None):
-            if queue_classes == ["exploration"]:
-                return 1
-            return 25
+        def pending_count(self, queue_classes=None, runnable_surface=None):
+            return 0
 
-        def ready_count(self, queue_classes=None, now=None):
-            assert queue_classes == ["exploration"]
-            return 1
+        def runnable_count(self, queue_classes=None, runnable_surface=None, now=None):
+            assert runnable_surface == "frontline" or queue_classes == ["exploration"]
+            return 0
 
-        def pending_domain_count(self, queue_classes=None):
-            if queue_classes == ["exploration"]:
-                return 1
-            return 10
+        def runnable_domain_count(self, queue_classes=None, runnable_surface=None, now=None):
+            assert runnable_surface == "frontline" or queue_classes == ["exploration"]
+            return 0
 
-        def ready_domain_count(self, queue_classes=None, now=None):
-            if queue_classes == ["exploration"]:
-                return 1
-            return 10
-
-        def promote_backlog_host_heads(self, target_pending, per_domain=1):
+        def promote_deferred_host_heads(self, target_pending, per_domain=1):
             self.host_promote_calls.append((target_pending, per_domain))
             return 0
 
@@ -589,37 +604,88 @@ def test_ensure_exploration_supply_stays_idle_when_host_promotion_is_insufficien
         ],
         postgres_dsn="postgresql://unused",
         cycle_pages=10,
-        recrawl_ttl=3600,
+        refresh_ttl=3600,
     )
     frontier = FakeFrontier()
 
-    daemon._ensure_exploration_supply(frontier)
+    daemon._ensure_frontline_supply(frontier)
 
-    assert frontier.host_promote_calls == [(5, 1)]
+    assert frontier.host_promote_calls == [(3, 1)]
     assert frontier.upsert_calls == []
 
 
-def test_ensure_exploration_supply_does_not_top_up_when_exploration_queue_is_healthy():
+def test_ensure_frontline_supply_stays_idle_when_host_promotion_is_insufficient():
+    class FakeFrontier:
+        def __init__(self):
+            self.upsert_calls = []
+            self.host_promote_calls = []
+
+        def pending_count(self, queue_classes=None, runnable_surface=None):
+            if runnable_surface == "frontline" or queue_classes == ["exploration"]:
+                return 1
+            return 25
+
+        def runnable_count(self, queue_classes=None, runnable_surface=None, now=None):
+            assert runnable_surface == "frontline" or queue_classes == ["exploration"]
+            return 1
+
+        def pending_domain_count(self, queue_classes=None, runnable_surface=None):
+            if runnable_surface == "frontline" or queue_classes == ["exploration"]:
+                return 1
+            return 10
+
+        def runnable_domain_count(self, queue_classes=None, runnable_surface=None, now=None):
+            if runnable_surface == "frontline" or queue_classes == ["exploration"]:
+                return 1
+            return 10
+
+        def promote_deferred_host_heads(self, target_pending, per_domain=1):
+            self.host_promote_calls.append((target_pending, per_domain))
+            return 0
+
+        def upsert_seeds(self, urls, priority=2.0):
+            self.upsert_calls.append((list(urls), priority))
+            return len(urls)
+
+    daemon = CrawlDaemon(
+        seeds=[
+            "https://www.iana.org/",
+            "https://datatracker.ietf.org/",
+            "https://www.rfc-editor.org/",
+        ],
+        postgres_dsn="postgresql://unused",
+        cycle_pages=10,
+        refresh_ttl=3600,
+    )
+    frontier = FakeFrontier()
+
+    daemon._ensure_frontline_supply(frontier)
+
+    assert frontier.host_promote_calls == [(3, 1)]
+    assert frontier.upsert_calls == []
+
+
+def test_ensure_frontline_supply_does_not_top_up_when_frontline_surface_is_healthy():
     class FakeFrontier:
         def __init__(self):
             self.upsert_calls = []
 
-        def pending_count(self, queue_classes=None):
-            if queue_classes == ["exploration"]:
+        def pending_count(self, queue_classes=None, runnable_surface=None):
+            if runnable_surface == "frontline" or queue_classes == ["exploration"]:
                 return 3
             return 25
 
-        def ready_count(self, queue_classes=None, now=None):
-            assert queue_classes == ["exploration"]
+        def runnable_count(self, queue_classes=None, runnable_surface=None, now=None):
+            assert runnable_surface == "frontline" or queue_classes == ["exploration"]
             return 3
 
-        def pending_domain_count(self, queue_classes=None):
-            if queue_classes == ["exploration"]:
+        def pending_domain_count(self, queue_classes=None, runnable_surface=None):
+            if runnable_surface == "frontline" or queue_classes == ["exploration"]:
                 return 3
             return 10
 
-        def ready_domain_count(self, queue_classes=None, now=None):
-            if queue_classes == ["exploration"]:
+        def runnable_domain_count(self, queue_classes=None, runnable_surface=None, now=None):
+            if runnable_surface == "frontline" or queue_classes == ["exploration"]:
                 return 3
             return 10
 
@@ -635,41 +701,41 @@ def test_ensure_exploration_supply_does_not_top_up_when_exploration_queue_is_hea
         ],
         postgres_dsn="postgresql://unused",
         cycle_pages=10,
-        recrawl_ttl=3600,
+        refresh_ttl=3600,
     )
     frontier = FakeFrontier()
 
-    daemon._ensure_exploration_supply(frontier)
+    daemon._ensure_frontline_supply(frontier)
 
     assert frontier.upsert_calls == []
 
 
-def test_ensure_exploration_supply_does_not_reinsert_when_exploration_pending_is_high_but_ready_is_zero():
+def test_ensure_frontline_supply_does_not_reinsert_when_frontline_pending_is_high_but_runnable_is_zero():
     class FakeFrontier:
         def __init__(self):
             self.upsert_calls = []
             self.host_promote_calls = []
 
-        def pending_count(self, queue_classes=None):
-            if queue_classes == ["exploration"]:
+        def pending_count(self, queue_classes=None, runnable_surface=None):
+            if runnable_surface == "frontline" or queue_classes == ["exploration"]:
                 return 25
             return 50
 
-        def ready_count(self, queue_classes=None, now=None):
-            assert queue_classes == ["exploration"]
+        def runnable_count(self, queue_classes=None, runnable_surface=None, now=None):
+            assert runnable_surface == "frontline" or queue_classes == ["exploration"]
             return 0
 
-        def pending_domain_count(self, queue_classes=None):
-            if queue_classes == ["exploration"]:
+        def pending_domain_count(self, queue_classes=None, runnable_surface=None):
+            if runnable_surface == "frontline" or queue_classes == ["exploration"]:
                 return 2
             return 12
 
-        def ready_domain_count(self, queue_classes=None, now=None):
-            if queue_classes == ["exploration"]:
+        def runnable_domain_count(self, queue_classes=None, runnable_surface=None, now=None):
+            if runnable_surface == "frontline" or queue_classes == ["exploration"]:
                 return 0
             return 12
 
-        def promote_backlog_host_heads(self, target_pending, per_domain=1):
+        def promote_deferred_host_heads(self, target_pending, per_domain=1):
             self.host_promote_calls.append((target_pending, per_domain))
             return 0
 
@@ -686,42 +752,42 @@ def test_ensure_exploration_supply_does_not_reinsert_when_exploration_pending_is
         ],
         postgres_dsn="postgresql://unused",
         cycle_pages=10,
-        recrawl_ttl=3600,
+        refresh_ttl=3600,
     )
     frontier = FakeFrontier()
 
-    daemon._ensure_exploration_supply(frontier)
+    daemon._ensure_frontline_supply(frontier)
 
-    assert frontier.host_promote_calls == [(32, 1)]
+    assert frontier.host_promote_calls == [(28, 1)]
     assert frontier.upsert_calls == []
 
 
-def test_ensure_exploration_supply_tops_up_when_exploration_host_diversity_is_low():
+def test_ensure_frontline_supply_tops_up_when_frontline_host_diversity_is_low():
     class FakeFrontier:
         def __init__(self):
             self.upsert_calls = []
             self.host_promote_calls = []
 
-        def pending_count(self, queue_classes=None):
-            if queue_classes == ["exploration"]:
+        def pending_count(self, queue_classes=None, runnable_surface=None):
+            if runnable_surface == "frontline" or queue_classes == ["exploration"]:
                 return 20
             return 50
 
-        def ready_count(self, queue_classes=None, now=None):
-            assert queue_classes == ["exploration"]
+        def runnable_count(self, queue_classes=None, runnable_surface=None, now=None):
+            assert runnable_surface == "frontline" or queue_classes == ["exploration"]
             return 3
 
-        def pending_domain_count(self, queue_classes=None):
-            if queue_classes == ["exploration"]:
+        def pending_domain_count(self, queue_classes=None, runnable_surface=None):
+            if runnable_surface == "frontline" or queue_classes == ["exploration"]:
                 return 1
             return 10
 
-        def ready_domain_count(self, queue_classes=None, now=None):
-            if queue_classes == ["exploration"]:
+        def runnable_domain_count(self, queue_classes=None, runnable_surface=None, now=None):
+            if runnable_surface == "frontline" or queue_classes == ["exploration"]:
                 return 1
             return 10
 
-        def promote_backlog_host_heads(self, target_pending, per_domain=1):
+        def promote_deferred_host_heads(self, target_pending, per_domain=1):
             self.host_promote_calls.append((target_pending, per_domain))
             return 1
 
@@ -737,14 +803,54 @@ def test_ensure_exploration_supply_tops_up_when_exploration_host_diversity_is_lo
         ],
         postgres_dsn="postgresql://unused",
         cycle_pages=10,
-        recrawl_ttl=3600,
+        refresh_ttl=3600,
     )
     frontier = FakeFrontier()
 
-    daemon._ensure_exploration_supply(frontier)
+    daemon._ensure_frontline_supply(frontier)
 
     assert frontier.host_promote_calls == [(22, 1)]
     assert frontier.upsert_calls == []
+
+
+def test_ensure_frontline_supply_stays_idle_when_only_runnable_depth_is_low():
+    class FakeFrontier:
+        def __init__(self):
+            self.host_promote_calls = []
+
+        def pending_count(self, queue_classes=None, runnable_surface=None):
+            if runnable_surface == "frontline" or queue_classes == ["exploration"]:
+                return 6
+            return 30
+
+        def runnable_count(self, queue_classes=None, runnable_surface=None, now=None):
+            assert runnable_surface == "frontline" or queue_classes == ["exploration"]
+            return 1
+
+        def runnable_domain_count(self, queue_classes=None, runnable_surface=None, now=None):
+            if runnable_surface == "frontline" or queue_classes == ["exploration"]:
+                return 3
+            return 10
+
+        def promote_deferred_host_heads(self, target_pending, per_domain=1):
+            self.host_promote_calls.append((target_pending, per_domain))
+            return 1
+
+    daemon = CrawlDaemon(
+        seeds=[
+            "https://www.iana.org/",
+            "https://datatracker.ietf.org/",
+            "https://www.rfc-editor.org/",
+        ],
+        postgres_dsn="postgresql://unused",
+        cycle_pages=10,
+        refresh_ttl=3600,
+    )
+    frontier = FakeFrontier()
+
+    daemon._ensure_frontline_supply(frontier)
+
+    assert frontier.host_promote_calls == []
 
 
 def test_promote_blocked_retry_restores_small_subset_when_ready_is_thin():
@@ -752,16 +858,16 @@ def test_promote_blocked_retry_restores_small_subset_when_ready_is_thin():
         def __init__(self):
             self.calls = []
 
-        def ready_count(self, queue_classes=None, now=None):
+        def runnable_count(self, queue_classes=None, runnable_surface=None, now=None):
             assert queue_classes is None
             return 3
 
-        def pending_domain_count(self, queue_classes=None):
-            assert queue_classes == ["exploration"]
+        def pending_domain_count(self, queue_classes=None, runnable_surface=None):
+            assert runnable_surface == "frontline" or queue_classes == ["exploration"]
             return 3
 
-        def ready_domain_count(self, queue_classes=None, now=None):
-            assert queue_classes == ["exploration"]
+        def runnable_domain_count(self, queue_classes=None, runnable_surface=None, now=None):
+            assert runnable_surface == "frontline" or queue_classes == ["exploration"]
             return 3
 
         def promote_blocked_domain_backoff(self, limit, per_domain=1, max_consecutive_failures=None):
@@ -776,7 +882,7 @@ def test_promote_blocked_retry_restores_small_subset_when_ready_is_thin():
         ],
         postgres_dsn="postgresql://unused",
         cycle_pages=10,
-        recrawl_ttl=3600,
+        refresh_ttl=3600,
     )
     frontier = FakeFrontier()
 
@@ -786,21 +892,21 @@ def test_promote_blocked_retry_restores_small_subset_when_ready_is_thin():
     assert frontier.calls == [(17, 1, 8)]
 
 
-def test_promote_blocked_retry_surges_when_ready_is_zero():
+def test_promote_blocked_retry_surges_when_runnable_is_zero():
     class FakeFrontier:
         def __init__(self):
             self.calls = []
 
-        def ready_count(self, queue_classes=None, now=None):
+        def runnable_count(self, queue_classes=None, runnable_surface=None, now=None):
             assert queue_classes is None
             return 0
 
-        def pending_domain_count(self, queue_classes=None):
-            assert queue_classes == ["exploration"]
+        def pending_domain_count(self, queue_classes=None, runnable_surface=None):
+            assert runnable_surface == "frontline" or queue_classes == ["exploration"]
             return 3
 
-        def ready_domain_count(self, queue_classes=None, now=None):
-            assert queue_classes == ["exploration"]
+        def runnable_domain_count(self, queue_classes=None, runnable_surface=None, now=None):
+            assert runnable_surface == "frontline" or queue_classes == ["exploration"]
             return 3
 
         def promote_blocked_domain_backoff(self, limit, per_domain=1, max_consecutive_failures=None):
@@ -815,7 +921,7 @@ def test_promote_blocked_retry_surges_when_ready_is_zero():
         ],
         postgres_dsn="postgresql://unused",
         cycle_pages=10,
-        recrawl_ttl=3600,
+        refresh_ttl=3600,
     )
     frontier = FakeFrontier()
 
@@ -825,21 +931,21 @@ def test_promote_blocked_retry_surges_when_ready_is_zero():
     assert frontier.calls == [(20, 20, 8)]
 
 
-def test_promote_blocked_retry_skips_when_ready_is_healthy():
+def test_promote_blocked_retry_skips_when_runnable_is_healthy():
     class FakeFrontier:
         def __init__(self):
             self.calls = []
 
-        def ready_count(self, queue_classes=None, now=None):
+        def runnable_count(self, queue_classes=None, runnable_surface=None, now=None):
             assert queue_classes is None
             return 20
 
-        def pending_domain_count(self, queue_classes=None):
-            assert queue_classes == ["exploration"]
+        def pending_domain_count(self, queue_classes=None, runnable_surface=None):
+            assert runnable_surface == "frontline" or queue_classes == ["exploration"]
             return 3
 
-        def ready_domain_count(self, queue_classes=None, now=None):
-            assert queue_classes == ["exploration"]
+        def runnable_domain_count(self, queue_classes=None, runnable_surface=None, now=None):
+            assert runnable_surface == "frontline" or queue_classes == ["exploration"]
             return 3
 
         def promote_blocked_domain_backoff(self, limit, per_domain=1, max_consecutive_failures=None):
@@ -854,7 +960,7 @@ def test_promote_blocked_retry_skips_when_ready_is_healthy():
         ],
         postgres_dsn="postgresql://unused",
         cycle_pages=10,
-        recrawl_ttl=3600,
+        refresh_ttl=3600,
     )
     frontier = FakeFrontier()
 
@@ -864,21 +970,21 @@ def test_promote_blocked_retry_skips_when_ready_is_healthy():
     assert frontier.calls == []
 
 
-def test_promote_blocked_retry_runs_when_ready_is_healthy_but_host_diversity_is_low():
+def test_promote_blocked_retry_runs_when_runnable_is_healthy_but_host_diversity_is_low():
     class FakeFrontier:
         def __init__(self):
             self.calls = []
 
-        def ready_count(self, queue_classes=None, now=None):
+        def runnable_count(self, queue_classes=None, runnable_surface=None, now=None):
             assert queue_classes is None
             return 20
 
-        def pending_domain_count(self, queue_classes=None):
-            assert queue_classes == ["exploration"]
+        def pending_domain_count(self, queue_classes=None, runnable_surface=None):
+            assert runnable_surface == "frontline" or queue_classes == ["exploration"]
             return 1
 
-        def ready_domain_count(self, queue_classes=None, now=None):
-            assert queue_classes == ["exploration"]
+        def runnable_domain_count(self, queue_classes=None, runnable_surface=None, now=None):
+            assert runnable_surface == "frontline" or queue_classes == ["exploration"]
             return 1
 
         def promote_blocked_domain_backoff(self, limit, per_domain=1, max_consecutive_failures=None):
@@ -893,7 +999,7 @@ def test_promote_blocked_retry_runs_when_ready_is_healthy_but_host_diversity_is_
         ],
         postgres_dsn="postgresql://unused",
         cycle_pages=10,
-        recrawl_ttl=3600,
+        refresh_ttl=3600,
     )
     frontier = FakeFrontier()
 
@@ -920,7 +1026,7 @@ def test_retire_blocked_retry_uses_configured_thresholds():
         ],
         postgres_dsn="postgresql://unused",
         cycle_pages=10,
-        recrawl_ttl=3600,
+        refresh_ttl=3600,
     )
     frontier = FakeFrontier()
 
@@ -947,7 +1053,7 @@ def test_restore_recovered_blocked_retry_uses_cycle_sized_budget():
         ],
         postgres_dsn="postgresql://unused",
         cycle_pages=300,
-        recrawl_ttl=3600,
+        refresh_ttl=3600,
     )
     frontier = FakeFrontier()
 

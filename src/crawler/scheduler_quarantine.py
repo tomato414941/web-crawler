@@ -6,16 +6,16 @@ import time
 from collections.abc import Callable
 
 
-class FrontierQuarantine:
+class SchedulerQuarantine:
     """State transitions for host-backoff quarantine queues."""
 
     def __init__(
         self,
         conn,
         *,
-        queue_exploration: str,
-        queue_backlog: str,
-        queue_recrawl: str,
+        queue_frontline: str,
+        queue_deferred: str,
+        queue_refresh: str,
         blocked_queue_table: str,
         queue_table_sql: Callable[[str], str],
         delete_queue_entries: Callable,
@@ -23,9 +23,9 @@ class FrontierQuarantine:
         insert_pending_rows: Callable,
     ):
         self._conn = conn
-        self._queue_exploration = queue_exploration
-        self._queue_backlog = queue_backlog
-        self._queue_recrawl = queue_recrawl
+        self._queue_frontline = queue_frontline
+        self._queue_deferred = queue_deferred
+        self._queue_refresh = queue_refresh
         self._blocked_queue_table = blocked_queue_table
         self._queue_table_sql = queue_table_sql
         self._delete_queue_entries = delete_queue_entries
@@ -41,27 +41,27 @@ class FrontierQuarantine:
             cur.execute(
                 f"""SELECT queue.url, queue.domain, queue.priority, queue.next_fetch_at, queue.added_at,
                            %s AS queue_class
-                    FROM {self._queue_table_sql(self._queue_exploration)} AS queue
+                    FROM {self._queue_table_sql(self._queue_frontline)} AS queue
                     JOIN domain_state ON domain_state.host_key = queue.domain
                     WHERE domain_state.backoff_until > %s
                     UNION ALL
                     SELECT queue.url, queue.domain, queue.priority, queue.next_fetch_at, queue.added_at,
                            %s AS queue_class
-                    FROM {self._queue_table_sql(self._queue_backlog)} AS queue
+                    FROM {self._queue_table_sql(self._queue_deferred)} AS queue
                     JOIN domain_state ON domain_state.host_key = queue.domain
                     WHERE domain_state.backoff_until > %s
                     UNION ALL
                     SELECT queue.url, queue.domain, queue.priority, queue.next_fetch_at, queue.added_at,
                            %s AS queue_class
-                    FROM {self._queue_table_sql(self._queue_recrawl)} AS queue
+                    FROM {self._queue_table_sql(self._queue_refresh)} AS queue
                     JOIN domain_state ON domain_state.host_key = queue.domain
                     WHERE domain_state.backoff_until > %s""",
                 (
-                    self._queue_exploration,
+                    self._queue_frontline,
                     now,
-                    self._queue_backlog,
+                    self._queue_deferred,
                     now,
-                    self._queue_recrawl,
+                    self._queue_refresh,
                     now,
                 ),
             )
@@ -134,7 +134,7 @@ class FrontierQuarantine:
         per_domain: int,
         now: float | None = None,
     ) -> int:
-        """Return recovered blocked URLs to backlog."""
+        """Return recovered blocked URLs to the deferred runnable surface."""
         if limit <= 0 or per_domain <= 0:
             return 0
 
@@ -174,7 +174,7 @@ class FrontierQuarantine:
                         blocked.next_fetch_at,
                         blocked.added_at,
                         %s AS queue_class""",
-                (self._queue_backlog, now, per_domain, limit, self._queue_backlog),
+                (self._queue_deferred, now, per_domain, limit, self._queue_deferred),
             )
             rows = cur.fetchall()
             if rows:
@@ -190,7 +190,7 @@ class FrontierQuarantine:
         max_consecutive_failures: int | None = None,
         now: float | None = None,
     ) -> int:
-        """Return a small cooled-down subset from blocked queue back into backlog."""
+        """Return a small cooled-down subset from blocked queue back into the deferred runnable surface."""
         if limit <= 0 or per_domain <= 0:
             return 0
 
@@ -248,13 +248,13 @@ class FrontierQuarantine:
                         blocked.added_at,
                         %s AS queue_class""",
                 (
-                    self._queue_backlog,
+                    self._queue_deferred,
                     now,
                     effective_max_failures,
                     effective_max_failures,
                     per_domain,
                     limit,
-                    self._queue_backlog,
+                    self._queue_deferred,
                 ),
             )
             rows = cur.fetchall()

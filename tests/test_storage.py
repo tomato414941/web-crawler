@@ -8,7 +8,15 @@ import psycopg2
 from psycopg2.extensions import TRANSACTION_STATUS_IDLE
 
 from crawler.migrate import apply_migrations
-from crawler.url_ledger import URL_LEDGER_TABLE
+from crawler.url_ledger import (
+    BLOCKED_DOMAIN_BACKOFF_TABLE,
+    LEASE_TABLE,
+    QUEUE_BACKLOG,
+    QUEUE_EXPLORATION,
+    QUEUE_RECRAWL,
+    QUEUE_TABLE_BY_CLASS,
+    URL_LEDGER_TABLE,
+)
 
 # Skip all tests if no Postgres available
 pytestmark = pytest.mark.skipif(
@@ -18,17 +26,24 @@ pytestmark = pytest.mark.skipif(
 
 
 def _reset_schema(dsn: str) -> None:
+    frontline_table = QUEUE_TABLE_BY_CLASS[QUEUE_EXPLORATION]
+    deferred_table = QUEUE_TABLE_BY_CLASS[QUEUE_BACKLOG]
+    refresh_table = QUEUE_TABLE_BY_CLASS[QUEUE_RECRAWL]
     conn = psycopg2.connect(dsn)
     conn.autocommit = False
     try:
         with conn.cursor() as cur:
             cur.execute("DROP TABLE IF EXISTS public.schema_migrations")
             cur.execute("DROP TABLE IF EXISTS public.domain_state")
+            cur.execute(f"DROP TABLE IF EXISTS public.{frontline_table}")
+            cur.execute(f"DROP TABLE IF EXISTS public.{deferred_table}")
+            cur.execute(f"DROP TABLE IF EXISTS public.{refresh_table}")
+            cur.execute(f"DROP TABLE IF EXISTS public.{BLOCKED_DOMAIN_BACKOFF_TABLE}")
             cur.execute("DROP TABLE IF EXISTS public.frontier_queue_exploration")
             cur.execute("DROP TABLE IF EXISTS public.frontier_queue_backlog")
             cur.execute("DROP TABLE IF EXISTS public.frontier_queue_recrawl")
             cur.execute("DROP TABLE IF EXISTS public.frontier_queue_blocked_domain_backoff")
-            cur.execute("DROP TABLE IF EXISTS public.active_leases")
+            cur.execute(f"DROP TABLE IF EXISTS public.{LEASE_TABLE}")
             cur.execute("DROP TABLE IF EXISTS public.frontier_lease_active")
             cur.execute(f"DROP TABLE IF EXISTS public.{URL_LEDGER_TABLE}")
             cur.execute("DROP TABLE IF EXISTS public.crawler_runtime_stats")
@@ -150,8 +165,8 @@ def test_get_stats_includes_frontier_breakdown(pg_storage):
             """
         )
         cur.execute(
-            """
-            INSERT INTO frontier_queue_exploration (url, domain, priority, next_fetch_at, added_at, branch_key)
+            f"""
+            INSERT INTO {QUEUE_TABLE_BY_CLASS[QUEUE_EXPLORATION]} (url, domain, priority, next_fetch_at, added_at, branch_key)
             VALUES
                 ('https://example.com/page2', 'example.com', 1.25, 1710000002.0, 1710000002.0, '/page2'),
                 ('https://other.com/page1', 'other.com', 0.8, 1710000003.0, 1710000003.0, '/page1')
@@ -163,14 +178,14 @@ def test_get_stats_includes_frontier_breakdown(pg_storage):
 
     assert stats["total_pages"] == 2
     assert stats["domains"] == 2
-    assert stats["frontier_status"] == {"done": 1, "pending": 2}
-    assert stats["pending_queue_classes"] == {"exploration": 2}
-    assert stats["blocked_queue_classes"] == {}
+    assert stats["scheduler_status"] == {"done": 1, "pending": 2}
+    assert stats["pending_surfaces"] == {"frontline": 2}
+    assert stats["blocked_surfaces"] == {}
     assert stats["readiness"] == {
         "pending": 2,
-        "ready": 2,
-        "ready_domains": 2,
-        "next_ready_delay": 0.0,
+        "runnable": 2,
+        "runnable_domains": 2,
+        "next_runnable_delay": 0.0,
         "blocked": {
             "next_fetch_at": 0,
             "domain_next_request": 0,
@@ -178,7 +193,7 @@ def test_get_stats_includes_frontier_breakdown(pg_storage):
             "retry_quarantine": 0,
         },
         "state_counts": {
-            "ready": 2,
+            "runnable": 2,
             "scheduled": 0,
             "blocked_domain_next_request": 0,
             "blocked_host_backoff": 0,
@@ -233,7 +248,7 @@ def test_get_stats_includes_runtime_snapshot(pg_storage):
     assert stats["operator_summary"] == {
         "scheduler_state": {
             "pending": 0,
-            "ready": 0,
+            "runnable": 0,
             "scheduled": 0,
             "blocked_domain_next_request": 0,
             "blocked_host_backoff": 0,
@@ -283,8 +298,8 @@ def test_get_stats_includes_readiness_breakdown(pg_storage):
             (now, now, now, now + 30.0, now, now),
         )
         cur.execute(
-            """
-            INSERT INTO frontier_queue_exploration (url, domain, priority, next_fetch_at, added_at, branch_key)
+            f"""
+            INSERT INTO {QUEUE_TABLE_BY_CLASS[QUEUE_EXPLORATION]} (url, domain, priority, next_fetch_at, added_at, branch_key)
             VALUES
                 ('https://ready.example/', 'ready.example', 1.0, %s, %s, '/'),
                 ('https://future.example/', 'future.example', 1.0, %s, %s, '/'),
@@ -315,9 +330,9 @@ def test_get_stats_includes_readiness_breakdown(pg_storage):
     stats = pg_storage.get_stats()
 
     assert stats["readiness"]["pending"] == 3
-    assert stats["readiness"]["ready"] == 1
-    assert stats["readiness"]["ready_domains"] == 1
-    assert stats["readiness"]["next_ready_delay"] == pytest.approx(20.0, abs=1e-3)
+    assert stats["readiness"]["runnable"] == 1
+    assert stats["readiness"]["runnable_domains"] == 1
+    assert stats["readiness"]["next_runnable_delay"] == pytest.approx(20.0, abs=1e-3)
     assert stats["readiness"]["blocked"] == {
         "next_fetch_at": 1,
         "domain_next_request": 1,
@@ -325,7 +340,7 @@ def test_get_stats_includes_readiness_breakdown(pg_storage):
         "retry_quarantine": 0,
     }
     assert stats["readiness"]["state_counts"] == {
-        "ready": 1,
+        "runnable": 1,
         "scheduled": 1,
         "blocked_domain_next_request": 1,
         "blocked_host_backoff": 0,
@@ -347,7 +362,7 @@ def test_get_stats_includes_readiness_breakdown(pg_storage):
     ]
     assert stats["operator_summary"]["scheduler_state"] == {
         "pending": 3,
-        "ready": 1,
+        "runnable": 1,
         "scheduled": 1,
         "blocked_domain_next_request": 1,
         "blocked_host_backoff": 0,
@@ -374,8 +389,8 @@ def test_get_stats_prioritizes_domains_blocked_by_backoff(pg_storage):
             (now, now, now, now, now, now),
         )
         cur.execute(
-            """
-            INSERT INTO frontier_queue_exploration (url, domain, priority, next_fetch_at, added_at, branch_key)
+            f"""
+            INSERT INTO {QUEUE_TABLE_BY_CLASS[QUEUE_EXPLORATION]} (url, domain, priority, next_fetch_at, added_at, branch_key)
             VALUES
                 ('https://backoff.example/a', 'backoff.example', 1.0, %s, %s, '/a'),
                 ('https://backoff.example/b', 'backoff.example', 1.0, %s, %s, '/b'),
@@ -421,7 +436,7 @@ def test_get_stats_prioritizes_domains_blocked_by_backoff(pg_storage):
     assert stats["top_blocked_domains"][0]["consecutive_failures"] == 3
 
 
-def test_get_stats_counts_blocked_queue_classes(pg_storage):
+def test_get_stats_counts_blocked_surfaces(pg_storage):
     now = time.time()
 
     with pg_storage._conn.cursor() as cur:
@@ -438,8 +453,8 @@ def test_get_stats_counts_blocked_queue_classes(pg_storage):
             (now, now, now, now),
         )
         cur.execute(
-            """
-            INSERT INTO frontier_queue_blocked_domain_backoff (
+            f"""
+            INSERT INTO {BLOCKED_DOMAIN_BACKOFF_TABLE} (
                 url, domain, queue_class, priority, next_fetch_at, added_at, branch_key
             )
             VALUES
@@ -472,11 +487,11 @@ def test_get_stats_counts_blocked_queue_classes(pg_storage):
 
     stats = pg_storage.get_stats()
 
-    assert stats["pending_queue_classes"] == {}
-    assert stats["blocked_queue_classes"] == {"backlog": 1, "exploration": 1}
-    assert stats["frontier_status"]["pending"] == 2
+    assert stats["pending_surfaces"] == {}
+    assert stats["blocked_surfaces"] == {"deferred": 1, "frontline": 1}
+    assert stats["scheduler_status"]["pending"] == 2
     assert stats["readiness"]["pending"] == 2
-    assert stats["readiness"]["ready"] == 0
+    assert stats["readiness"]["runnable"] == 0
     assert stats["readiness"]["state_counts"]["blocked_host_backoff"] == 0
     assert stats["readiness"]["state_counts"]["retry_quarantine"] == 2
     assert stats["top_blocked_domains"] == [
@@ -513,8 +528,8 @@ def test_get_stats_includes_top_slow_domains(pg_storage):
             (now, now, now, now, now, now),
         )
         cur.execute(
-            """
-            INSERT INTO frontier_queue_exploration (url, domain, priority, next_fetch_at, added_at, branch_key)
+            f"""
+            INSERT INTO {QUEUE_TABLE_BY_CLASS[QUEUE_EXPLORATION]} (url, domain, priority, next_fetch_at, added_at, branch_key)
             VALUES
                 ('https://slow.example/a', 'slow.example', 1.0, %s, %s, '/a'),
                 ('https://fast.example/', 'fast.example', 1.0, %s, %s, '/')
@@ -522,8 +537,8 @@ def test_get_stats_includes_top_slow_domains(pg_storage):
             (now, now, now, now),
         )
         cur.execute(
-            """
-            INSERT INTO frontier_queue_blocked_domain_backoff (
+            f"""
+            INSERT INTO {BLOCKED_DOMAIN_BACKOFF_TABLE} (
                 url, domain, queue_class, priority, next_fetch_at, added_at, branch_key
             )
             VALUES ('https://slow.example/b', 'slow.example', 'backlog', 1.0, %s, %s, '/b')
@@ -564,10 +579,10 @@ def test_get_stats_includes_top_slow_domains(pg_storage):
             "pending_count": 2,
             "latency_ewma_ms": 900.0,
             "consecutive_failures": 4,
-            "queue_counts": {
-                "exploration": 1,
-                "backlog": 1,
-                "recrawl": 0,
+            "surface_counts": {
+                "frontline": 1,
+                "deferred": 1,
+                "refresh": 0,
             },
         },
         {
@@ -575,10 +590,10 @@ def test_get_stats_includes_top_slow_domains(pg_storage):
             "pending_count": 1,
             "latency_ewma_ms": 80.0,
             "consecutive_failures": 0,
-            "queue_counts": {
-                "exploration": 1,
-                "backlog": 0,
-                "recrawl": 0,
+            "surface_counts": {
+                "frontline": 1,
+                "deferred": 0,
+                "refresh": 0,
             },
         },
     ]
@@ -588,10 +603,10 @@ def test_get_stats_includes_top_slow_domains(pg_storage):
             "pending_count": 1,
             "latency_ewma_ms": 80.0,
             "consecutive_failures": 0,
-            "queue_counts": {
-                "exploration": 1,
-                "backlog": 0,
-                "recrawl": 0,
+            "surface_counts": {
+                "frontline": 1,
+                "deferred": 0,
+                "refresh": 0,
             },
             "host_budget": 2,
         }

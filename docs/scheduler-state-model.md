@@ -1,8 +1,8 @@
-# Crawler State Model
+# Scheduler State Model
 
 This document defines a practical state model for future refactors. It does not describe the current implementation directly, but it is also not the top-level idealized model. Its job is to describe which states the system should treat as source-of-truth in order to make correct scheduling decisions.
 
-The higher-level principles live in [crawler-model.md](/home/dev/projects/web-crawler/docs/crawler-model.md).
+The higher-level principles live in [crawler-principles.md](/home/dev/projects/web-crawler/docs/crawler-principles.md).
 
 This document should be read as a transition/convergence model that helps move the current crawler toward that ideal.
 
@@ -18,7 +18,7 @@ This document should be read as a transition/convergence model that helps move t
 
 One URL should have one durable ledger record and at most one current scheduler membership.
 
-`ready` is derived. It is not a durable state.
+Operator-facing `runnable` is derived. It is not a separately stored durable state.
 
 ## Durable State Groups
 
@@ -52,20 +52,20 @@ The scheduler answers: how should this URL be treated now?
 Minimal live states:
 
 - `discovered`
+- `scheduled`
 - `runnable`
 - `leased`
-- `quarantined`
-- `done`
-- `failed`
+- `blocked`
+- `terminal`
 
 Interpretation:
 
-- `discovered`: known, but not currently eligible for normal leasing
-- `runnable`: eligible for normal leasing now
+- `discovered`: known, but not yet admitted into normal scheduler membership
+- `scheduled`: admitted into scheduler membership, but not runnable yet
+- `runnable`: admitted and runnable now
 - `leased`: currently owned by a worker
-- `quarantined`: intentionally excluded from normal leasing
-- `done`: terminal success state
-- `failed`: terminal failure state
+- `blocked`: temporarily excluded from runnable leasing by host/backoff/quarantine constraints
+- `terminal`: terminal end state, whether success or failure
 
 The scheduler should own these states directly. The ledger should not duplicate them as a second source of truth.
 
@@ -87,20 +87,20 @@ This state is host-scoped, not URL-scoped.
 
 These values are useful, but they are not primary state.
 
-- `ready`
+- `runnable` (in readiness / operator views)
 - `pending_total`
 - `blocked_host_backoff`
 - `blocked_domain_next_request`
 - `pages_per_second`
 - top pending / blocked domain tables
 
-`ready` is derived from:
+The operator-facing `runnable` view is derived from:
 
-- membership in `runnable`
+- scheduler membership
 - no active lease
 - host state allowing execution now
 
-If `ready` is persisted as a primary state, it will drift.
+If this derived `runnable` view is persisted as a separate primary state, it will drift.
 
 ## State Transitions
 
@@ -109,32 +109,34 @@ If `ready` is persisted as a primary state, it will drift.
 Normal path:
 
 1. `discovered -> runnable`
-2. `runnable -> leased`
-3. `leased -> done`
+2. `discovered -> scheduled`
+3. `scheduled -> runnable`
+4. `runnable -> leased`
+5. `leased -> terminal`
 
 Failure path:
 
-1. `leased -> quarantined`
-2. `leased -> failed`
+1. `leased -> blocked`
+2. `leased -> terminal`
 
 Retry path:
 
-1. `quarantined -> runnable`
+1. `blocked -> runnable`
 
 Recrawl path:
 
-1. `done -> discovered`
+1. `terminal -> discovered`
 
 ## Invariants
 
 These must always hold.
 
 1. A URL cannot be in both `runnable` and `leased`.
-2. A URL cannot be in both `runnable` and `quarantined`.
-3. A `done` URL cannot be in any live scheduler queue.
-4. A `failed` URL cannot be in any live scheduler queue.
+2. A URL cannot be in both `runnable` and `blocked`.
+3. A `terminal` URL cannot be in any live scheduler queue.
+4. A `discovered` URL should not also appear in normal scheduler membership.
 5. Every `leased` URL must have an active lease record.
-6. `ready` must be derivable from scheduler membership plus host state.
+6. The operator-facing `runnable` view must be derivable from scheduler membership plus host state.
 7. Queue membership must be the single source of truth for current scheduler state.
 
 ## What seeds are
@@ -149,18 +151,26 @@ Once admitted into the system, seed-derived URLs should be treated by the same d
 
 Current concepts should converge toward this meaning:
 
-- `backlog` => discovered pool
-- `exploration` => runnable pool
-- `frontier_lease_active` => lease state
+- `exploration` => frontline runnable surface
+- `backlog` => deferred scheduled surface
+- `active_leases` => lease state
 - blocked-domain-backoff queue => quarantine pool
 - host scheduler tables => host state
 
 This is a convergence target, not a claim about current implementation quality.
 
+The conceptual split should happen before naming cleanup.
+
+- state and intent should be modeled separately now
+- existing names may remain temporarily while that split is introduced
+- `backlog` should not be overloaded to mean `discovered`
+- lanes are optional operational groupings, not primary scheduler concepts
+
 ## Immediate Design Consequences
 
 1. The URL ledger should stop being the scheduler's current-state truth.
 2. Queue membership should become the only truth for live scheduler state.
-3. `ready` should remain derived.
+3. The operator-facing `runnable` view should remain derived.
 4. Bootstrap should be separated from normal exploration supply.
 5. Seed-derived special treatment should disappear from the scheduler.
+6. If worker lanes exist, they should be derived from state and strategy, not the other way around.

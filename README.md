@@ -12,7 +12,7 @@ entry points for discovery, not an allowlist and not a statement of the crawler'
 - **Adaptive Fetching** — HTTP first, auto-switches to browser rendering for JS-heavy sites
 - **AI Agent** — Claude-powered autonomous browsing for complex tasks
 - **Web-scale Discovery** — Seed URLs start the crawl, but discovered external domains are valid crawl targets
-- **Postgres-backed Frontier** — Persistent crawl scheduler with URL leasing and retry backoff
+- **Postgres-backed Scheduler** — Persistent crawl scheduler with URL leasing and retry backoff
 - **Physical Scheduler Queues** — Exploration / backlog / recrawl queues plus retry quarantine
 - **Host Scheduling State** — Durable per-host crawl delay and cooldown tracking in PostgreSQL
 - **REST API** — Serve crawled pages via `/pages`, `/stats` endpoints
@@ -76,7 +76,7 @@ crawler serve --port 8080 \
 | Command | Description |
 |---|---|
 | `fetch` | Fetch a single page (`--js` for browser, `--auto` for adaptive) |
-| `crawl` | Crawl a site with frontier management |
+| `crawl` | Crawl a site with persistent scheduler management |
 | `check-links` | Find broken links (`-r` for recursive) |
 | `extract` | Extract data with CSS/XPath selectors |
 | `agent` | AI-powered autonomous browsing |
@@ -97,7 +97,7 @@ Options:
   --any-domain        Follow links to other domains
   --js                Use browser rendering for all pages
   -o, --output        Stream results to JSONL file
-  --postgres DSN      Required: store frontier and pages in PostgreSQL
+  --postgres DSN      Required: store scheduler state and pages in PostgreSQL
   --no-content        Exclude page content from output
 ```
 
@@ -137,7 +137,7 @@ crawler serve --port 8080 --postgres postgresql://user:pass@localhost/db
 | `GET /health` | Health check |
 | `GET /pages` | List pages (`?since=`, `?limit=`, `?domain=`) |
 | `GET /pages/{url_hash}` | Get page details with content |
-| `GET /stats` | Crawl statistics, including frontier error breakdown and top error domains |
+| `GET /stats` | Crawl statistics, including scheduler error breakdown and top error domains |
 
 Daemon logs also emit a per-cycle `errors=...` summary using the same categories as `/stats`.
 
@@ -155,7 +155,7 @@ docker compose run --rm crawler crawler crawl https://example.com -n 100
 ```
 
 Default compose services:
-- `postgres` — persistent crawl data, frontier state, and host scheduling state
+- `postgres` — persistent crawl data, scheduler state, and host scheduling state
 - `migrate` — one-shot schema migration runner
 - `api` — FastAPI server on port `8080`
 - `crawler` — continuous daemon worker
@@ -167,9 +167,9 @@ crawler/
 ├── cli.py              # Typer CLI
 ├── api.py              # FastAPI REST server
 ├── crawl.py            # Crawler engine (worker pool)
-├── frontier.py         # Scheduler facade
-├── frontier_observability.py  # Read-only scheduler snapshots
-├── frontier_quarantine.py     # Retry quarantine state transitions
+├── url_ledger.py       # Scheduler facade and URL ledger state
+├── scheduler_observability.py # Read-only scheduler snapshots
+├── scheduler_quarantine.py    # Retry quarantine state transitions
 ├── daemon_policy.py    # Pre-cycle scheduler policy
 ├── domain_manager.py   # robots.txt, runtime host state
 ├── domain_store.py     # Persistent host scheduling state
@@ -204,36 +204,36 @@ Current runtime note:
   writes pages/output.
 - `finalize` uses a dedicated connection / executor so scheduler mutations no longer run on the
   main event loop.
-- The remaining hot-path coupling is mostly on the failure side: fetch workers still record
-  failure state directly, and scheduling is still backoff-driven rather than latency-aware.
+- The remaining hot-path coupling is mostly on the failure side: runtime error bookkeeping still
+  begins in workers, and latency is still a secondary scheduler signal rather than a primary one.
 
 ### Deduplication
 
 Two layers:
 1. **URL normalization** — scheme/host lowering, query sort, fragment removal
-2. **PostgreSQL frontier** — unique URL primary key with `pending` / `leased` / `done` / `failed` state
+2. **PostgreSQL scheduler state** — `url_ledger` plus queue tables persist scheduler state
 
 ### Scheduling
 
 Two persistent schedulers work together:
-1. **URL frontier** — controls retry timing, leasing, and recrawl eligibility
+1. **URL scheduler** — controls retry timing, leasing, and recrawl eligibility
 2. **Host state** — controls per-host crawl delay and cooldown via `domain_state`
 
 Current scheduler state is split across explicit physical tables:
 
-- `frontier` — URL ledger and crawl result metadata
-- `frontier_queue_exploration` — ready or schedulable discovery work
-- `frontier_queue_backlog` — deferred discovery work
-- `frontier_queue_recrawl` — stale-page revisit work
-- `frontier_queue_blocked_domain_backoff` — retry quarantine for host-cooled URLs
-- `frontier_lease_active` — active leases only
+- `url_ledger` — URL ledger and crawl result metadata
+- `scheduler_queue_frontline` — frontline runnable or scheduled discovery work
+- `scheduler_queue_deferred` — deferred discovery work
+- `scheduler_queue_refresh` — stale-page revisit work
+- `scheduler_queue_retry_quarantine` — retry quarantine for host-cooled URLs
+- `active_leases` — active leases only
 
 Current module boundaries:
 
-- `frontier.py` — scheduler-facing facade used by the crawler
-- `frontier_observability.py` — queue and readiness snapshots
-- `frontier_quarantine.py` — host-backoff quarantine policy and state transitions
-- `daemon_policy.py` — pre-cycle frontier maintenance policy
+- `url_ledger.py` — scheduler-facing facade used by the crawler
+- `scheduler_observability.py` — queue and readiness snapshots
+- `scheduler_quarantine.py` — host-backoff quarantine policy and state transitions
+- `daemon_policy.py` — pre-cycle scheduler maintenance policy
 
 Current runtime queue stages exposed in daemon stats:
 
@@ -244,7 +244,7 @@ Current runtime queue stages exposed in daemon stats:
 `pending` in `/stats` should be read as "not done yet", not as "immediately runnable".
 For actual scheduler state, prefer `readiness`:
 
-- `ready` — runnable now
+- `runnable` — runnable now
 - `scheduled` — waiting on `next_fetch_at`
 - `blocked_domain_next_request` — waiting on per-host request slot timing
 - `blocked_host_backoff` — still in host cooldown while in normal queues

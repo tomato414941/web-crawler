@@ -16,7 +16,7 @@ from .domain_manager import DomainManager
 from .domain_store import DomainStore
 from .discovery import seed_hosts_from_urls
 from .storage import PgStorage
-from .url_ledger import UrlLedger
+from .url_ledger import RUNNABLE_SURFACE_FRONTLINE, UrlLedger
 
 logger = logging.getLogger(__name__)
 
@@ -41,58 +41,58 @@ def _format_error_breakdown(error_breakdown: dict[str, int]) -> str:
 
 
 class CrawlDaemon:
-    """Runs CrawlerEngine in cycles, re-crawling stale pages and re-seeding."""
+    """Runs CrawlerEngine in cycles, refreshing stale pages and re-seeding."""
 
     def __init__(
         self,
         seeds: list[str],
         postgres_dsn: str,
         cycle_pages: int = 500,
-        recrawl_ttl: int = 86400,
+        refresh_ttl: int = 86400,
         concurrency: int = 5,
         delay: float = 1.0,
         cycle_pause: float = 5.0,
         idle_sleep: float = 60.0,
-        backlog_ready_per_domain: int | None = None,
-        backlog_ready_per_branch: int | None = None,
-        backlog_defer_seconds: float | None = None,
-        min_ready_sleep: float | None = None,
+        deferred_runnable_per_domain: int | None = None,
+        deferred_runnable_per_branch: int | None = None,
+        deferred_surface_defer_seconds: float | None = None,
+        min_runnable_sleep: float | None = None,
     ):
         self._seeds = seeds
         self._seed_hosts = sorted(seed_hosts_from_urls(seeds))
         self._postgres_dsn = postgres_dsn
         self._cycle_pages = cycle_pages
-        self._recrawl_ttl = recrawl_ttl
+        self._refresh_ttl = refresh_ttl
         self._concurrency = concurrency
         self._delay = delay
         self._cycle_pause = cycle_pause
         self._idle_sleep = idle_sleep
-        self._backlog_ready_per_domain = (
-            settings.daemon_keep_ready_per_domain
-            if backlog_ready_per_domain is None
-            else backlog_ready_per_domain
+        self._deferred_runnable_per_domain = (
+            settings.daemon_keep_runnable_per_domain
+            if deferred_runnable_per_domain is None
+            else deferred_runnable_per_domain
         )
-        self._backlog_ready_per_branch = (
-            settings.daemon_keep_ready_per_branch
-            if backlog_ready_per_branch is None
-            else backlog_ready_per_branch
+        self._deferred_runnable_per_branch = (
+            settings.daemon_keep_runnable_per_branch
+            if deferred_runnable_per_branch is None
+            else deferred_runnable_per_branch
         )
-        self._backlog_defer_seconds = (
-            settings.daemon_backlog_defer_seconds
-            if backlog_defer_seconds is None
-            else backlog_defer_seconds
+        self._deferred_surface_defer_seconds = (
+            settings.daemon_deferred_surface_defer_seconds
+            if deferred_surface_defer_seconds is None
+            else deferred_surface_defer_seconds
         )
-        self._min_ready_sleep = (
-            settings.daemon_min_ready_sleep if min_ready_sleep is None else min_ready_sleep
+        self._min_runnable_sleep = (
+            settings.daemon_min_runnable_sleep if min_runnable_sleep is None else min_runnable_sleep
         )
-        self._min_exploration_ready = max(
-            1, min(len(self._seeds), settings.daemon_min_exploration_ready)
+        self._min_frontline_runnable = max(
+            1, min(len(self._seeds), settings.daemon_min_frontline_runnable)
         )
-        self._min_exploration_hosts = max(
+        self._min_frontline_hosts = max(
             1,
             min(
                 len(self._seed_hosts) or len(self._seeds) or 1,
-                settings.daemon_min_exploration_hosts,
+                settings.daemon_min_frontline_hosts,
             ),
         )
         self._blocked_retry_budget = max(0, settings.daemon_blocked_retry_budget)
@@ -112,56 +112,58 @@ class CrawlDaemon:
         )
         self._policy = DaemonSchedulerPolicy(
             cycle_pages=self._cycle_pages,
-            min_exploration_ready=self._min_exploration_ready,
-            min_exploration_hosts=self._min_exploration_hosts,
+            min_frontline_runnable=self._min_frontline_runnable,
+            min_frontline_hosts=self._min_frontline_hosts,
             blocked_retry_budget=self._blocked_retry_budget,
             blocked_retry_per_domain=self._blocked_retry_per_domain,
             blocked_retry_max_consecutive_failures=self._blocked_retry_max_consecutive_failures,
             quarantine_retire_min_consecutive_failures=self._quarantine_retire_min_consecutive_failures,
             quarantine_retire_after_seconds=self._quarantine_retire_after_seconds,
-            backlog_ready_per_domain=self._backlog_ready_per_domain,
-            backlog_ready_per_branch=self._backlog_ready_per_branch,
-            backlog_defer_seconds=self._backlog_defer_seconds,
+            deferred_runnable_per_domain=self._deferred_runnable_per_domain,
+            deferred_runnable_per_branch=self._deferred_runnable_per_branch,
+            deferred_surface_defer_seconds=self._deferred_surface_defer_seconds,
         )
 
     async def run(self):
         """Main daemon loop."""
         self._install_signals()
         logger.info(
-            "Daemon starting: seeds=%s, cycle_pages=%d, recrawl_ttl=%ds",
+            "Daemon starting: seeds=%s, cycle_pages=%d, refresh_ttl=%ds",
             self._seeds,
             self._cycle_pages,
-            self._recrawl_ttl,
+            self._refresh_ttl,
         )
 
         storage = None
-        frontier = None
+        url_ledger = None
         cycle = 0
 
         try:
             while not self._shutdown:
                 # Ensure DB connection
                 if storage is None:
-                    storage, frontier = await self._connect()
+                    storage, url_ledger = await self._connect()
                     if storage is None:
                         await self._interruptible_sleep(self._idle_sleep)
                         continue
 
                 try:
-                    bootstrapped = self._bootstrap_frontier(frontier)
+                    bootstrapped = self._bootstrap_scheduler(url_ledger)
                     if bootstrapped:
-                        logger.info("Bootstrapped frontier with %d seed URLs", bootstrapped)
-                    maintenance = self._policy.prepare_frontier(
-                        frontier,
-                        recrawl_stale=lambda: self._recrawl_stale(storage, frontier),
+                        logger.info("Bootstrapped scheduler with %d seed URLs", bootstrapped)
+                    maintenance = self._policy.prepare_scheduler(
+                        url_ledger,
+                        refresh_stale=lambda: self._refresh_stale(storage, url_ledger),
                     )
+                    if maintenance["admitted"]:
+                        logger.info("Admitted %d discovered URLs into the deferred surface", maintenance["admitted"])
                     if maintenance["rebalanced_before"]:
                         logger.info(
                             "Rebalanced blocked-domain-backoff queue: quarantined=%d restored=0",
                             maintenance["rebalanced_before"],
                         )
                     if maintenance["deferred"]:
-                        logger.info("Deferred %d low-priority backlog URLs", maintenance["deferred"])
+                        logger.info("Deferred %d low-priority deferred-surface URLs", maintenance["deferred"])
                     if maintenance["rebalanced_after"]:
                         logger.info(
                             "Rebalanced blocked-domain-backoff queue: quarantined=%d restored=0",
@@ -174,7 +176,7 @@ class CrawlDaemon:
                     if maintenance["promoted"]:
                         logger.info("Promoted %d blocked-domain-backoff URLs for retry", maintenance["promoted"])
 
-                    readiness = frontier.readiness()
+                    readiness = url_ledger.readiness()
                     pending = readiness.pending
                     if pending == 0:
                         logger.info("No URLs to crawl, sleeping %ds", self._idle_sleep)
@@ -183,36 +185,36 @@ class CrawlDaemon:
                             self._idle_runtime_payload(
                                 state="idle_no_pending",
                                 pending=pending,
-                                ready=0,
+                                runnable=0,
                                 cycle=cycle,
                             ),
                         )
                         await self._interruptible_sleep(self._idle_sleep)
                         continue
 
-                    ready = readiness.ready
-                    if ready == 0:
-                        next_ready_delay = readiness.next_ready_delay
+                    runnable = readiness.runnable
+                    if runnable == 0:
+                        next_runnable_delay = readiness.next_runnable_delay
                         sleep_seconds = self._idle_sleep
-                        if next_ready_delay is not None:
+                        if next_runnable_delay is not None:
                             sleep_seconds = min(
                                 self._idle_sleep,
-                                max(self._min_ready_sleep, next_ready_delay),
+                                max(self._min_runnable_sleep, next_runnable_delay),
                             )
                         logger.info(
-                            "No ready URLs (pending=%d), sleeping %.1fs",
+                            "No runnable URLs (pending=%d), sleeping %.1fs",
                             pending,
                             sleep_seconds,
                         )
                         self._persist_runtime_payload(
                             storage,
                             self._idle_runtime_payload(
-                                state="idle_waiting_ready",
+                                state="idle_waiting_runnable",
                                 pending=pending,
-                                ready=ready,
+                                runnable=runnable,
                                 cycle=cycle,
                             ) | {
-                                "next_ready_delay": next_ready_delay,
+                                "next_runnable_delay": next_runnable_delay,
                                 "readiness_blocked": dict(readiness.blocked),
                                 "scheduler_state": dict(readiness.state_counts),
                             },
@@ -221,9 +223,9 @@ class CrawlDaemon:
                         continue
 
                     cycle += 1
-                    logger.info("Cycle %d: %d ready / %d pending URLs", cycle, ready, pending)
+                    logger.info("Cycle %d: %d runnable / %d pending URLs", cycle, runnable, pending)
                     start = time.time()
-                    pages, error_breakdown = await self._run_cycle(storage, frontier)
+                    pages, error_breakdown = await self._run_cycle(storage, url_ledger)
                     elapsed = time.time() - start
                     rate = pages / elapsed if elapsed > 0 else 0
                     logger.info(
@@ -233,12 +235,12 @@ class CrawlDaemon:
                         elapsed,
                         rate,
                         _format_error_breakdown(error_breakdown),
-                        frontier.stats(),
+                        url_ledger.stats(),
                     )
                     cycle_payload = self._idle_runtime_payload(
                         state="cycle_complete",
                         pending=pending,
-                        ready=ready,
+                        runnable=runnable,
                         cycle=cycle,
                     )
                     cycle_payload.update(
@@ -257,7 +259,7 @@ class CrawlDaemon:
                 except (psycopg2.OperationalError, psycopg2.InterfaceError) as e:
                     logger.error("Database connection lost: %s", e)
                     storage = self._close_storage(storage)
-                    frontier = None
+                    url_ledger = None
                     await self._interruptible_sleep(_RECONNECT_DELAY)
 
         finally:
@@ -277,7 +279,7 @@ class CrawlDaemon:
         *,
         state: str,
         pending: int,
-        ready: int,
+        runnable: int,
         cycle: int,
     ) -> dict[str, object]:
         """Build daemon-level runtime stats outside active crawl cycles."""
@@ -286,7 +288,7 @@ class CrawlDaemon:
             "state": state,
             "cycle": cycle,
             "pending": pending,
-            "ready": ready,
+            "runnable": runnable,
             "concurrency": self._concurrency,
             "cycle_pages": self._cycle_pages,
             "parse_queue_size": 0,
@@ -315,7 +317,7 @@ class CrawlDaemon:
     def _report_runtime_stats(self, stop_event: threading.Event, engine: CrawlerEngine) -> None:
         """Persist crawler runtime stats for API consumers.
 
-        Run outside the main event loop so long synchronous frontier/DB work inside crawl
+        Run outside the main event loop so long synchronous scheduler/DB work inside crawl
         workers does not stall runtime visibility.
         """
         storage = PgStorage(self._postgres_dsn)
@@ -334,29 +336,31 @@ class CrawlDaemon:
         self._persist_runtime_payload(storage, engine.snapshot_runtime_stats())
 
     async def _connect(self) -> tuple[PgStorage | None, UrlLedger | None]:
-        """Connect to Postgres and initialize frontier."""
+        """Connect to Postgres and initialize scheduler state."""
         for attempt in range(1, _MAX_RECONNECT_ATTEMPTS + 1):
             try:
                 storage = PgStorage(self._postgres_dsn)
-                frontier = UrlLedger(storage.conn)
+                url_ledger = UrlLedger(storage.conn)
                 self._domain_store = DomainStore(storage.conn, default_delay=self._delay)
-                frontier.attach_domain_store(self._domain_store)
+                url_ledger.attach_domain_store(self._domain_store)
                 self._domain_manager.attach_store(self._domain_store)
-                count = frontier.recover_leased(expired_only=False)
+                count = url_ledger.recover_leased(expired_only=False)
                 if count:
                     logger.info("Recovered %d leased URLs", count)
-                prime = self._policy.prime_frontier(frontier)
+                prime = self._policy.prime_scheduler(url_ledger)
+                if prime["admitted"]:
+                    logger.info("Admitted %d discovered URLs into the deferred surface", prime["admitted"])
                 if prime["rebalanced"]:
                     logger.info(
                         "Rebalanced blocked-domain-backoff queue: quarantined=%d restored=0",
                         prime["rebalanced"],
                     )
                 if prime["deferred"]:
-                    logger.info("Deferred %d low-priority backlog URLs", prime["deferred"])
+                    logger.info("Deferred %d low-priority deferred-surface URLs", prime["deferred"])
                 if prime["promoted"]:
                     logger.info("Promoted %d blocked-domain-backoff URLs for retry", prime["promoted"])
                 logger.info("Database connected (attempt %d)", attempt)
-                return storage, frontier
+                return storage, url_ledger
             except psycopg2.OperationalError as e:
                 logger.error(
                     "Connection attempt %d/%d failed: %s", attempt, _MAX_RECONNECT_ATTEMPTS, e
@@ -375,7 +379,7 @@ class CrawlDaemon:
         return None
 
     async def _run_cycle(
-        self, storage: PgStorage, frontier: UrlLedger
+        self, storage: PgStorage, url_ledger: UrlLedger
     ) -> tuple[int, dict[str, int]]:
         """Run one crawl cycle."""
         runtime_storage = PgStorage(self._postgres_dsn)
@@ -386,7 +390,7 @@ class CrawlDaemon:
                 delay=self._delay,
                 concurrency=self._concurrency,
                 pg_storage=storage,
-                frontier=frontier,
+url_ledger=url_ledger,
                 domain_manager=self._domain_manager,
                 domain_store=self._domain_store,
                 seed_urls=self._seeds,
@@ -411,49 +415,49 @@ class CrawlDaemon:
         finally:
             runtime_storage.close()
 
-    def _ensure_exploration_supply(self, frontier: UrlLedger):
-        """Keep exploration supplied from existing scheduler state."""
-        before_pending = frontier.pending_count()
-        before_ready = frontier.ready_count(queue_classes=["exploration"])
-        before_exploration_pending = frontier.pending_count(queue_classes=["exploration"])
-        self._policy.ensure_exploration_supply(frontier)
-        after_pending = frontier.pending_count()
-        after_ready = frontier.ready_count(queue_classes=["exploration"])
-        after_exploration_pending = frontier.pending_count(queue_classes=["exploration"])
-        if after_pending == before_pending and after_ready == before_ready:
+    def _ensure_frontline_supply(self, url_ledger: UrlLedger):
+        """Keep the frontline runnable surface supplied from existing scheduler state."""
+        before_pending = url_ledger.pending_count()
+        before_runnable = url_ledger.runnable_count(runnable_surface=RUNNABLE_SURFACE_FRONTLINE)
+        before_frontline_pending = url_ledger.pending_count(runnable_surface=RUNNABLE_SURFACE_FRONTLINE)
+        self._policy.ensure_frontline_supply(url_ledger)
+        after_pending = url_ledger.pending_count()
+        after_runnable = url_ledger.runnable_count(runnable_surface=RUNNABLE_SURFACE_FRONTLINE)
+        after_frontline_pending = url_ledger.pending_count(runnable_surface=RUNNABLE_SURFACE_FRONTLINE)
+        if after_pending == before_pending and after_runnable == before_runnable:
             return
         logger.info(
-            "Ensured exploration supply: pending_total=%d->%d ready_exploration=%d->%d pending_exploration=%d->%d target_ready=%d",
+            "Ensured frontline supply: pending_total=%d->%d runnable_frontline=%d->%d pending_frontline=%d->%d target_runnable=%d",
             before_pending,
             after_pending,
-            before_ready,
-            after_ready,
-            before_exploration_pending,
-            after_exploration_pending,
-            self._min_exploration_ready,
+            before_runnable,
+            after_runnable,
+            before_frontline_pending,
+            after_frontline_pending,
+            self._min_frontline_runnable,
         )
 
-    def _bootstrap_frontier(self, frontier: UrlLedger) -> int:
-        """Seed an empty frontier through a dedicated bootstrap path."""
-        if frontier.pending_count() != 0:
+    def _bootstrap_scheduler(self, url_ledger: UrlLedger) -> int:
+        """Seed an empty scheduler through a dedicated bootstrap path."""
+        if url_ledger.pending_count() != 0:
             return 0
-        return frontier.upsert_seeds(self._seeds, priority=2.0)
+        return url_ledger.upsert_seeds(self._seeds, priority=2.0)
 
-    def _promote_blocked_retry(self, frontier: UrlLedger) -> int:
-        """Restore a small cooled-down subset from blocked retry queue when ready work is thin."""
-        return self._policy.promote_blocked_retry(frontier)
+    def _promote_blocked_retry(self, url_ledger: UrlLedger) -> int:
+        """Restore a small cooled-down subset from blocked retry queue when runnable work is thin."""
+        return self._policy.promote_blocked_retry(url_ledger)
 
-    def _retire_blocked_retry(self, frontier: UrlLedger) -> int:
+    def _retire_blocked_retry(self, url_ledger: UrlLedger) -> int:
         """Retire long-stuck blocked retry URLs out of pending scheduler state."""
-        return self._policy.retire_blocked_retry(frontier)
+        return self._policy.retire_blocked_retry(url_ledger)
 
-    def _restore_recovered_blocked_retry(self, frontier: UrlLedger) -> int:
+    def _restore_recovered_blocked_retry(self, url_ledger: UrlLedger) -> int:
         """Restore healthy blocked retry domains before using bounded retry promotion."""
-        return self._policy.restore_recovered_blocked_retry(frontier)
+        return self._policy.restore_recovered_blocked_retry(url_ledger)
 
-    def _recrawl_stale(self, storage: PgStorage, frontier: UrlLedger):
-        """Re-queue pages older than recrawl_ttl."""
-        pending = frontier.pending_count()
+    def _refresh_stale(self, storage: PgStorage, url_ledger: UrlLedger):
+        """Re-queue stale pages for refresh intent."""
+        pending = url_ledger.pending_count()
         if pending >= self._cycle_pages:
             return
 
@@ -461,7 +465,7 @@ class CrawlDaemon:
         if batch_size <= 0:
             return
 
-        cutoff = time.time() - self._recrawl_ttl
+        cutoff = time.time() - self._refresh_ttl
         now = time.time()
         with storage.conn.cursor() as cur:
             cur.execute(
@@ -476,19 +480,19 @@ class CrawlDaemon:
             )
             candidate_urls = [url for (url,) in cur.fetchall()]
 
-        count = frontier.requeue_urls(
+        count = url_ledger.requeue_refresh_urls(
             candidate_urls,
-            queue_class='recrawl',
             next_fetch_at=now,
         )
         if count:
             logger.info(
-                "Re-queued %d stale pages (TTL=%ds, pending=%d, target=%d)",
+                "Re-queued %d stale pages for refresh (TTL=%ds, pending=%d, target=%d)",
                 count,
-                self._recrawl_ttl,
+                self._refresh_ttl,
                 pending,
                 self._cycle_pages,
             )
+
 
     def _install_signals(self):
         """Register signal handlers for graceful shutdown."""

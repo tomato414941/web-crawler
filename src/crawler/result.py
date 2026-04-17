@@ -16,7 +16,7 @@ class CrawlStageTimings:
     fetch_request_ms: float = 0.0
     fetch_body_read_ms: float = 0.0
     parse_ms: float = 0.0
-    frontier_ms: float = 0.0
+    scheduler_ms: float = 0.0
     persist_ms: float = 0.0
     output_ms: float = 0.0
     # Queue backpressure is part of the steady-state observability surface,
