@@ -18,12 +18,25 @@ class FakeFrontier:
         self.added_batches: list[list[CrawlTask]] = []
         self.lease_calls: list[dict[str, object]] = []
 
-    def lease_next(self, prioritize_breadth: bool = False, **kwargs: object):
+    def lease_next(
+        self,
+        lease_strategy: str | None = None,
+        **kwargs: object,
+    ):
         exclude_domains = set(kwargs.get("exclude_domains") or [])
         queue_classes = list(kwargs.get("queue_classes") or [])
+        runnable_surface = kwargs.get("runnable_surface")
+        if not queue_classes:
+            if runnable_surface == "frontline":
+                queue_classes = ["exploration"]
+            elif runnable_surface == "deferred":
+                queue_classes = ["backlog"]
+            elif runnable_surface == "refresh":
+                queue_classes = ["recrawl"]
         self.lease_calls.append(
             {
-                "prioritize_breadth": prioritize_breadth,
+                "lease_strategy": lease_strategy,
+                "runnable_surface": runnable_surface,
                 "exclude_domains": sorted(exclude_domains),
                 "queue_classes": queue_classes,
             }
@@ -43,11 +56,18 @@ class FakeFrontier:
         for task in tasks:
             queue_class = task.queue_class
             if queue_class is None:
-                queue_class = "backlog"
+                if task.runnable_surface == "frontline":
+                    queue_class = "exploration"
+                elif task.runnable_surface == "refresh":
+                    queue_class = "recrawl"
+                else:
+                    queue_class = "backlog"
             prepared.append(CrawlTask(
                 url=task.url,
                 priority=task.priority,
                 queue_class=queue_class,
+                runnable_surface=task.runnable_surface,
+                intent=task.intent,
                 source_url=task.source_url,
                 added_at=task.added_at,
                 next_fetch_at=task.next_fetch_at,
@@ -62,6 +82,12 @@ class FakeFrontier:
         self.added_batches.append(tasks)
         self.tasks.extend(tasks)
         return len(tasks)
+
+    def discover_many(self, tasks: list[CrawlTask]):
+        return len(tasks)
+
+    def admit_discovered_tasks(self, tasks: list[CrawlTask]):
+        return self.place_many(tasks)
 
     def add(self, task: CrawlTask):
         return self.place(task)
@@ -96,13 +122,14 @@ class FakeFrontier:
 
 
 class FakeDomainManager:
-    def __init__(self, budgets: dict[str, int] | None = None):
+    def __init__(self, budgets: dict[str, int] | None = None, *, allowed: bool = True):
         self.errors: list[str] = []
         self.successes: list[str] = []
         self.budgets = budgets or {}
+        self.allowed = allowed
 
     async def is_allowed(self, url: str) -> bool:
-        return True
+        return self.allowed
 
     async def wait_for_rate_limit(self, url: str):
         return None
@@ -158,7 +185,7 @@ async def test_crawler_marks_client_errors_done_without_saving():
 
     async with CrawlerEngine(
         max_pages=10,
-        frontier=frontier,
+        url_ledger=frontier,
         domain_manager=domain_manager,
     ) as engine:
         engine.fetcher = fetcher
@@ -168,6 +195,27 @@ async def test_crawler_marks_client_errors_done_without_saving():
     assert engine.pages_crawled == 0
     assert frontier.done == ["https://example.com/missing"]
     assert frontier.failed == []
+
+
+@pytest.mark.asyncio
+async def test_crawler_finalizes_robots_denied_without_counting_failure():
+    frontier = FakeFrontier([CrawlTask(url="https://example.com/private")])
+    domain_manager = FakeDomainManager(allowed=False)
+
+    async with CrawlerEngine(
+        max_pages=10,
+        url_ledger=frontier,
+        domain_manager=domain_manager,
+    ) as engine:
+        results = await engine.crawl()
+
+    assert results == []
+    assert engine.pages_crawled == 0
+    assert frontier.done == ["https://example.com/private"]
+    assert frontier.failed == []
+    assert engine.failure_breakdown == {}
+    assert domain_manager.errors == []
+    assert domain_manager.successes == []
 
 
 @pytest.mark.asyncio
@@ -185,7 +233,7 @@ async def test_crawler_marks_auth_walls_failed_and_records_host_error():
 
     async with CrawlerEngine(
         max_pages=10,
-        frontier=frontier,
+        url_ledger=frontier,
         domain_manager=domain_manager,
     ) as engine:
         engine.fetcher = fetcher
@@ -223,7 +271,7 @@ async def test_crawler_marks_server_errors_failed():
 
     async with CrawlerEngine(
         max_pages=10,
-        frontier=frontier,
+        url_ledger=frontier,
         domain_manager=domain_manager,
     ) as engine:
         engine.fetcher = fetcher
@@ -252,7 +300,7 @@ async def test_crawler_marks_parse_errors_failed():
 
     async with CrawlerEngine(
         max_pages=10,
-        frontier=frontier,
+        url_ledger=frontier,
         domain_manager=domain_manager,
     ) as engine:
         engine.fetcher = fetcher
@@ -293,7 +341,7 @@ async def test_crawler_does_not_exceed_max_pages_with_concurrency():
     async with CrawlerEngine(
         max_pages=1,
         concurrency=3,
-        frontier=frontier,
+        url_ledger=frontier,
         domain_manager=domain_manager,
     ) as engine:
         engine.fetcher = fetcher
@@ -333,7 +381,7 @@ async def test_crawler_collects_failure_breakdown():
     async with CrawlerEngine(
         max_pages=10,
         concurrency=1,
-        frontier=frontier,
+        url_ledger=frontier,
         domain_manager=domain_manager,
     ) as engine:
         engine.fetcher = fetcher
@@ -364,7 +412,7 @@ async def test_crawler_assigns_discovery_metadata_to_outlinks():
     async with CrawlerEngine(
         max_pages=1,
         same_domain=False,
-        frontier=frontier,
+        url_ledger=frontier,
         domain_manager=domain_manager,
         seed_urls=["https://example.com/", "https://docs.example.com/"],
     ) as engine:
@@ -406,7 +454,7 @@ async def test_crawler_assigns_known_hosts_to_backlog_queue():
     async with CrawlerEngine(
         max_pages=1,
         same_domain=False,
-        frontier=frontier,
+        url_ledger=frontier,
         domain_manager=domain_manager,
         seed_urls=["https://example.com/"],
     ) as engine:
@@ -435,7 +483,7 @@ async def test_crawler_treats_pdf_as_metadata_only():
 
     async with CrawlerEngine(
         max_pages=1,
-        frontier=frontier,
+        url_ledger=frontier,
         domain_manager=domain_manager,
     ) as engine:
         engine.fetcher = fetcher
@@ -469,7 +517,7 @@ async def test_crawler_reserves_some_leases_for_breadth():
     async with CrawlerEngine(
         max_pages=2,
         concurrency=1,
-        frontier=frontier,
+        url_ledger=frontier,
         domain_manager=domain_manager,
     ) as engine:
         engine.fetcher = fetcher
@@ -477,12 +525,14 @@ async def test_crawler_reserves_some_leases_for_breadth():
 
     assert frontier.lease_calls[:2] == [
         {
-            "prioritize_breadth": True,
+            "lease_strategy": "host_first",
+            "runnable_surface": "frontline",
             "exclude_domains": [],
             "queue_classes": ["exploration"],
         },
         {
-            "prioritize_breadth": True,
+            "lease_strategy": "host_first",
+            "runnable_surface": "frontline",
             "exclude_domains": [],
             "queue_classes": ["exploration"],
         },
@@ -492,7 +542,7 @@ async def test_crawler_reserves_some_leases_for_breadth():
 
 @pytest.mark.asyncio
 @pytest.mark.asyncio
-async def test_crawler_prefers_exploration_before_backlog_and_recrawl():
+async def test_crawler_prefers_exploration_before_backlog_and_refresh():
     frontier = FakeFrontier([CrawlTask(url="https://example.com/page")])
     domain_manager = FakeDomainManager()
     fetcher = FakeFetcher([
@@ -502,13 +552,13 @@ async def test_crawler_prefers_exploration_before_backlog_and_recrawl():
     async with CrawlerEngine(
         max_pages=1,
         concurrency=1,
-        frontier=frontier,
+        url_ledger=frontier,
         domain_manager=domain_manager,
     ) as engine:
         engine.fetcher = fetcher
         await engine.crawl()
 
-    assert frontier.lease_calls[0]["queue_classes"] == ["exploration"]
+    assert frontier.lease_calls[0]["runnable_surface"] == "frontline"
 
 
 @pytest.mark.asyncio
@@ -532,7 +582,7 @@ async def test_crawler_avoids_leasing_same_host_while_request_in_flight():
     async with CrawlerEngine(
         max_pages=2,
         concurrency=3,
-        frontier=frontier,
+        url_ledger=frontier,
         domain_manager=domain_manager,
     ) as engine:
         engine.max_inflight_requests_per_host = 1
@@ -565,7 +615,7 @@ async def test_crawler_allows_second_inflight_for_fast_host_budget():
     async with CrawlerEngine(
         max_pages=3,
         concurrency=3,
-        frontier=frontier,
+        url_ledger=frontier,
         domain_manager=domain_manager,
     ) as engine:
         engine.max_inflight_requests_per_host = 1
@@ -578,7 +628,7 @@ async def test_crawler_allows_second_inflight_for_fast_host_budget():
 
 
 @pytest.mark.asyncio
-async def test_crawler_splits_worker_pools_by_queue_class():
+async def test_crawler_splits_worker_pools_by_surface():
     frontier = FakeFrontier([CrawlTask(url="https://example.com/page", queue_class="exploration")])
     domain_manager = FakeDomainManager()
     fetcher = FakeFetcher([
@@ -588,14 +638,15 @@ async def test_crawler_splits_worker_pools_by_queue_class():
     async with CrawlerEngine(
         max_pages=1,
         concurrency=6,
-        frontier=frontier,
+        url_ledger=frontier,
         domain_manager=domain_manager,
     ) as engine:
         engine.fetcher = fetcher
         runtime = engine.snapshot_runtime_stats()
-        assert runtime["exploration_workers"] == 5
-        assert runtime["backlog_workers"] == 0
-        assert runtime["recrawl_workers"] == 1
+        assert runtime["frontline_workers"] == 5
+        assert runtime["deferred_workers"] == 0
+        assert runtime["refresh_workers"] == 1
+        assert runtime["refresh_workers"] == 1
         await engine.crawl()
 
-    assert frontier.lease_calls[0]["queue_classes"] == ["exploration"]
+    assert frontier.lease_calls[0]["runnable_surface"] == "frontline"

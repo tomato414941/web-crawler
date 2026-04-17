@@ -5,8 +5,12 @@ runtime overview.
 
 - [README.md](/home/dev/projects/web-crawler/README.md) — current project overview, runtime model, current queue stages, CLI/API usage, and deployment notes
 - [plan.md](/home/dev/projects/web-crawler/plan.md) — target architecture, migration phases, and the current gap between runtime and target design
-- [crawler-model.md](/home/dev/projects/web-crawler/docs/crawler-model.md) — abstract WWW crawler model, state-vs-intent separation, and naming guidance
-- [crawler-model.ja.md](/home/dev/projects/web-crawler/docs/crawler-model.ja.md) — 抽象的な WWW crawler model、state と intent の分離、命名指針
-- [state-model.md](/home/dev/projects/web-crawler/docs/state-model.md) — English state model, source-of-truth boundaries, and URL/host state invariants
-- [state-model.ja.md](/home/dev/projects/web-crawler/docs/state-model.ja.md) — 日本語の状態モデル、正本境界、URL/host state の invariant
+- [crawler-principles.md](/home/dev/projects/web-crawler/docs/crawler-principles.md) — abstract WWW crawler principles, state-vs-intent separation, and naming guidance
+- [crawler-principles.ja.md](/home/dev/projects/web-crawler/docs/crawler-principles.ja.md) — 抽象的な WWW crawler の原則、state と intent の分離、命名指針
+- [system-architecture.md](/home/dev/projects/web-crawler/docs/system-architecture.md) — project-wide system decomposition between ideal principles and runtime implementation
+- [system-architecture.ja.md](/home/dev/projects/web-crawler/docs/system-architecture.ja.md) — ideal principles と runtime 実装の間で project 全体をどう分解して捉えるか
+- [discovered-representation.md](/home/dev/projects/web-crawler/docs/discovered-representation.md) — representation of `discovered` between durable ledger, scheduler membership, and operational admission surfaces
+- [discovered-representation.ja.md](/home/dev/projects/web-crawler/docs/discovered-representation.ja.md) — `discovered` を durable ledger、scheduler membership、operational surface の間でどう表現するか
+- [scheduler-state-model.md](/home/dev/projects/web-crawler/docs/scheduler-state-model.md) — scheduler state model, source-of-truth boundaries, and URL/host state invariants
+- [scheduler-state-model.ja.md](/home/dev/projects/web-crawler/docs/scheduler-state-model.ja.md) — scheduler の状態モデル、正本境界、URL/host state の invariant
 - [CONTENT_POLICY.md](/home/dev/projects/web-crawler/docs/CONTENT_POLICY.md) — content handling, metadata-only resources, and deferred document extraction

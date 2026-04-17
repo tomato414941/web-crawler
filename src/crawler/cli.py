@@ -272,7 +272,7 @@ def migrate(
 def daemon(
     seeds: list[str] = typer.Argument(..., help="Seed URLs to crawl"),
     cycle_pages: int = typer.Option(500, "--cycle-pages", help="Pages per cycle"),
-    recrawl_ttl: int = typer.Option(86400, "--recrawl-ttl", help="Re-crawl pages older than N seconds"),
+    refresh_ttl: int = typer.Option(86400, "--refresh-ttl", help="Refresh pages older than N seconds"),
     concurrency: int = typer.Option(5, "--concurrency", "-c", help="Concurrent requests"),
     delay: float = typer.Option(1.0, "--delay", help="Delay between requests (seconds)"),
     cycle_pause: float = typer.Option(5.0, "--cycle-pause", help="Pause between cycles (seconds)"),
@@ -296,7 +296,7 @@ def daemon(
         seeds=seeds,
         postgres_dsn=postgres,
         cycle_pages=cycle_pages,
-        recrawl_ttl=recrawl_ttl,
+        refresh_ttl=refresh_ttl,
         concurrency=concurrency,
         delay=delay,
         cycle_pause=cycle_pause,

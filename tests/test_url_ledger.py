@@ -8,10 +8,20 @@ import pytest
 
 from crawler.domain_store import DomainStore
 from crawler.url_ledger import (
+    BLOCKED_DOMAIN_BACKOFF_TABLE,
     CrawlTask,
+    INTENT_EXPLORE,
+    INTENT_REFRESH,
+    LEASE_TABLE,
+    LEASE_STRATEGY_HOST_FIRST,
     QUEUE_BACKLOG,
     QUEUE_EXPLORATION,
     QUEUE_RECRAWL,
+    QUEUE_TABLE_BY_CLASS,
+    RUNNABLE_SURFACE_FRONTLINE,
+    RUNNABLE_SURFACE_DEFERRED,
+    RUNNABLE_SURFACE_REFRESH,
+    RUNNABLE_SURFACE_NORMAL,
     URL_LEDGER_TABLE,
     UrlLedger,
 )
@@ -98,8 +108,12 @@ class TestUrlLedger:
         conn.autocommit = False
         with conn.cursor() as cur:
             cur.execute("DROP TABLE IF EXISTS schema_migrations")
-            cur.execute("DROP TABLE IF EXISTS active_leases")
+            cur.execute(f"DROP TABLE IF EXISTS {LEASE_TABLE}")
             cur.execute("DROP TABLE IF EXISTS frontier_lease_active")
+            cur.execute(f"DROP TABLE IF EXISTS {QUEUE_TABLE_BY_CLASS[QUEUE_EXPLORATION]}")
+            cur.execute(f"DROP TABLE IF EXISTS {QUEUE_TABLE_BY_CLASS[QUEUE_BACKLOG]}")
+            cur.execute(f"DROP TABLE IF EXISTS {QUEUE_TABLE_BY_CLASS[QUEUE_RECRAWL]}")
+            cur.execute(f"DROP TABLE IF EXISTS {BLOCKED_DOMAIN_BACKOFF_TABLE}")
             cur.execute("DROP TABLE IF EXISTS frontier_queue_exploration")
             cur.execute("DROP TABLE IF EXISTS frontier_queue_backlog")
             cur.execute("DROP TABLE IF EXISTS frontier_queue_recrawl")
@@ -120,11 +134,11 @@ class TestUrlLedger:
 
     def _queue_counts(self, frontier, url: str) -> tuple[int, int, int]:
         with frontier._conn.cursor() as cur:
-            cur.execute("SELECT COUNT(*) FROM frontier_queue_exploration WHERE url = %s", (url,))
+            cur.execute(f"SELECT COUNT(*) FROM {QUEUE_TABLE_BY_CLASS[QUEUE_EXPLORATION]} WHERE url = %s", (url,))
             (exploration_count,) = cur.fetchone()
-            cur.execute("SELECT COUNT(*) FROM frontier_queue_backlog WHERE url = %s", (url,))
+            cur.execute(f"SELECT COUNT(*) FROM {QUEUE_TABLE_BY_CLASS[QUEUE_BACKLOG]} WHERE url = %s", (url,))
             (backlog_count,) = cur.fetchone()
-            cur.execute("SELECT COUNT(*) FROM frontier_queue_recrawl WHERE url = %s", (url,))
+            cur.execute(f"SELECT COUNT(*) FROM {QUEUE_TABLE_BY_CLASS[QUEUE_RECRAWL]} WHERE url = %s", (url,))
             (recrawl_count,) = cur.fetchone()
         return exploration_count, backlog_count, recrawl_count
 
@@ -151,6 +165,197 @@ class TestUrlLedger:
             CrawlTask(url="http://example.com/1"),
         ]
         assert frontier.add_many(tasks) == 2
+
+    def test_discover_keeps_url_out_of_queue_tables(self, frontier):
+        task = CrawlTask(url="http://example.com/discovered")
+
+        assert frontier.discover(task) is True
+
+        with frontier._conn.cursor() as cur:
+            cur.execute(
+                f"SELECT COUNT(*) FROM {URL_LEDGER_TABLE} WHERE url = %s",
+                ("http://example.com/discovered",),
+            )
+            (ledger_count,) = cur.fetchone()
+        exploration_count, backlog_count, recrawl_count = self._queue_counts(
+            frontier, "http://example.com/discovered"
+        )
+        assert ledger_count == 1
+        assert exploration_count == 0
+        assert backlog_count == 0
+        assert recrawl_count == 0
+
+    def test_admit_urls_assigns_scheduler_membership(self, frontier):
+        frontier.discover(CrawlTask(url="http://example.com/discovered"))
+
+        scheduled = frontier.admit_urls(
+            ["http://example.com/discovered"],
+            queue_class=QUEUE_EXPLORATION,
+        )
+
+        exploration_count, backlog_count, recrawl_count = self._queue_counts(
+            frontier, "http://example.com/discovered"
+        )
+        assert scheduled == 1
+        assert exploration_count == 1
+        assert backlog_count == 0
+        assert recrawl_count == 0
+
+    def test_admit_urls_can_schedule_unchanged_ledger_row(self, frontier):
+        frontier.discover(CrawlTask(url="http://example.com/discovered"))
+        assert frontier.add(CrawlTask(url="http://example.com/discovered")) is False
+
+        scheduled = frontier.admit_urls(["http://example.com/discovered"])
+
+        exploration_count, backlog_count, recrawl_count = self._queue_counts(
+            frontier, "http://example.com/discovered"
+        )
+        assert scheduled == 1
+        assert exploration_count == 0
+        assert backlog_count == 1
+        assert recrawl_count == 0
+
+    def test_admit_urls_can_target_refresh_intent_surface(self, frontier):
+        frontier.discover(CrawlTask(url="http://example.com/discovered"))
+
+        scheduled = frontier.admit_urls(
+            ["http://example.com/discovered"],
+            runnable_surface=RUNNABLE_SURFACE_REFRESH,
+            intent=INTENT_REFRESH,
+        )
+
+        exploration_count, backlog_count, recrawl_count = self._queue_counts(
+            frontier, "http://example.com/discovered"
+        )
+        assert scheduled == 1
+        assert exploration_count == 0
+        assert backlog_count == 0
+        assert recrawl_count == 1
+
+    def test_admit_discovered_tasks_uses_task_queue_classes(self, frontier):
+        frontier.discover_many(
+            [
+                CrawlTask(url="http://example.com/explore", queue_class=QUEUE_EXPLORATION),
+                CrawlTask(url="http://example.com/again", queue_class=QUEUE_RECRAWL),
+            ]
+        )
+
+        admitted = frontier.admit_discovered_tasks(
+            [
+                CrawlTask(url="http://example.com/explore", queue_class=QUEUE_EXPLORATION),
+                CrawlTask(url="http://example.com/again", queue_class=QUEUE_RECRAWL),
+            ]
+        )
+
+        explore_counts = self._queue_counts(frontier, "http://example.com/explore")
+        recrawl_counts = self._queue_counts(frontier, "http://example.com/again")
+        assert admitted == 2
+        assert explore_counts == (1, 0, 0)
+        assert recrawl_counts == (0, 0, 1)
+
+    def test_admit_discovered_tasks_can_use_intent_and_surface(self, frontier):
+        frontier.discover_many(
+            [
+                CrawlTask(
+                    url="http://example.com/explore",
+                    runnable_surface=RUNNABLE_SURFACE_DEFERRED,
+                    intent=INTENT_EXPLORE,
+                ),
+                CrawlTask(
+                    url="http://example.com/again",
+                    runnable_surface=RUNNABLE_SURFACE_REFRESH,
+                    intent=INTENT_REFRESH,
+                ),
+            ]
+        )
+
+        admitted = frontier.admit_discovered_tasks(
+            [
+                CrawlTask(
+                    url="http://example.com/explore",
+                    runnable_surface=RUNNABLE_SURFACE_DEFERRED,
+                    intent=INTENT_EXPLORE,
+                ),
+                CrawlTask(
+                    url="http://example.com/again",
+                    runnable_surface=RUNNABLE_SURFACE_REFRESH,
+                    intent=INTENT_REFRESH,
+                ),
+            ]
+        )
+
+        explore_counts = self._queue_counts(frontier, "http://example.com/explore")
+        recrawl_counts = self._queue_counts(frontier, "http://example.com/again")
+        assert admitted == 2
+        assert explore_counts == (0, 1, 0)
+        assert recrawl_counts == (0, 0, 1)
+
+    def test_prepare_tasks_restores_surface_and_intent_from_queue_class(self, frontier):
+        prepared = frontier._prepare_tasks(
+            [
+                CrawlTask(url="http://example.com/seed", queue_class=QUEUE_EXPLORATION),
+                CrawlTask(url="http://example.com/seed", queue_class=QUEUE_BACKLOG),
+                CrawlTask(url="http://example.com/refresh", queue_class=QUEUE_RECRAWL),
+                CrawlTask(url="http://example.com/refresh", queue_class=QUEUE_RECRAWL),
+            ]
+        )
+
+        by_url = {task.url: task for task in prepared}
+        assert by_url["http://example.com/seed"].queue_class is None
+        assert by_url["http://example.com/seed"].runnable_surface == RUNNABLE_SURFACE_FRONTLINE
+        assert by_url["http://example.com/seed"].intent == INTENT_EXPLORE
+        assert by_url["http://example.com/refresh"].queue_class is None
+        assert by_url["http://example.com/refresh"].runnable_surface == RUNNABLE_SURFACE_REFRESH
+        assert by_url["http://example.com/refresh"].intent == INTENT_REFRESH
+
+    def test_prepare_tasks_prefers_more_urgent_surface_over_queue_class(self, frontier):
+        prepared = frontier._prepare_tasks(
+            [
+                CrawlTask(
+                    url="http://example.com/page",
+                    runnable_surface=RUNNABLE_SURFACE_DEFERRED,
+                    intent=INTENT_EXPLORE,
+                ),
+                CrawlTask(
+                    url="http://example.com/page",
+                    runnable_surface=RUNNABLE_SURFACE_FRONTLINE,
+                    intent=INTENT_EXPLORE,
+                ),
+            ]
+        )
+
+        assert len(prepared) == 1
+        task = prepared[0]
+        assert task.queue_class is None
+        assert task.runnable_surface == RUNNABLE_SURFACE_FRONTLINE
+        assert task.intent == INTENT_EXPLORE
+
+    def test_admit_discovered_urls_assigns_backlog_membership(self, frontier):
+        frontier.discover_many(
+            [
+                CrawlTask(url="http://example.com/discovered-1"),
+                CrawlTask(url="http://example.com/discovered-2"),
+            ]
+        )
+
+        admitted = frontier.admit_discovered_urls(1)
+
+        counts_1 = self._queue_counts(frontier, "http://example.com/discovered-1")
+        counts_2 = self._queue_counts(frontier, "http://example.com/discovered-2")
+        assert admitted == 1
+        assert counts_1 in ((0, 1, 0), (0, 0, 0))
+        assert counts_2 in ((0, 1, 0), (0, 0, 0))
+        assert counts_1 != counts_2
+
+    def test_admit_discovered_urls_skips_done_rows(self, frontier):
+        frontier.discover(CrawlTask(url="http://example.com/done"))
+        frontier.admit_urls(["http://example.com/done"])
+        frontier.mark_done("http://example.com/done")
+
+        admitted = frontier.admit_discovered_urls(10)
+
+        assert admitted == 0
+        assert self._queue_counts(frontier, "http://example.com/done") == (0, 0, 0)
 
     def test_add_preserves_first_seen_source_url_when_priority_improves(self, frontier):
         assert frontier.add(
@@ -239,7 +444,7 @@ class TestUrlLedger:
             cur.execute(f"SELECT COUNT(*) FROM {URL_LEDGER_TABLE} WHERE url = %s", ("http://example.com/seed",))
             (frontier_count,) = cur.fetchone()
             cur.execute(
-                "SELECT COUNT(*) FROM frontier_queue_exploration WHERE url = %s",
+                f"SELECT COUNT(*) FROM {QUEUE_TABLE_BY_CLASS[QUEUE_EXPLORATION]} WHERE url = %s",
                 ("http://example.com/seed",),
             )
             (queue_count,) = cur.fetchone()
@@ -331,10 +536,67 @@ class TestUrlLedger:
             frontier.add(CrawlTask(url=f"http://a.com/{i}", priority=1.0, added_at=1000 + i))
         frontier.add(CrawlTask(url="http://b.com/1", priority=0.8, added_at=2000))
 
-        result = frontier.lease_next(prioritize_breadth=True)
+        result = frontier.lease_next(lease_strategy=LEASE_STRATEGY_HOST_FIRST)
 
         assert result is not None
         assert result.url == "http://b.com/1"
+
+    def test_runnable_host_heads_returns_one_head_per_host(self, frontier):
+        frontier.add(CrawlTask(url="http://a.com/1", priority=1.0, added_at=1000))
+        frontier.add(CrawlTask(url="http://a.com/2", priority=1.0, added_at=1001))
+        frontier.add(CrawlTask(url="http://b.com/1", priority=0.8, added_at=2000))
+
+        heads = frontier.runnable_host_heads(runnable_surface=RUNNABLE_SURFACE_FRONTLINE)
+
+        assert [(head.host_key, head.url) for head in heads] == [
+            ("a.com", "http://a.com/1"),
+            ("b.com", "http://b.com/1"),
+        ]
+
+    def test_runnable_host_heads_can_read_normal_runnable_surface(self, frontier):
+        frontier.add(CrawlTask(url="http://a.com/1", priority=1.0, added_at=1000, queue_class=QUEUE_EXPLORATION))
+        frontier.add(CrawlTask(url="http://b.com/1", priority=0.8, added_at=2000, queue_class=QUEUE_BACKLOG))
+
+        heads = frontier.runnable_host_heads(runnable_surface=RUNNABLE_SURFACE_NORMAL)
+
+        assert [(head.host_key, head.url) for head in heads] == [
+            ("a.com", "http://a.com/1"),
+            ("b.com", "http://b.com/1"),
+        ]
+
+    def test_runnable_host_heads_orders_hosts_by_host_first_priority(self, frontier):
+        frontier.add(CrawlTask(url="http://slow.com/1", priority=1.0, added_at=1000))
+        frontier.add(CrawlTask(url="http://fast.com/1", priority=1.0, added_at=1200))
+
+        self.domain_store.record_success("slow.com", now=time.time(), request_latency_ms=900.0)
+        self.domain_store.record_success("fast.com", now=time.time(), request_latency_ms=80.0)
+
+        heads = frontier.runnable_host_heads(runnable_surface=RUNNABLE_SURFACE_FRONTLINE)
+
+        assert [head.host_key for head in heads] == ["fast.com", "slow.com"]
+
+    def test_select_runnable_host_head_uses_same_host_first_order(self, frontier):
+        frontier.add(CrawlTask(url="http://slow.com/1", priority=1.0, added_at=1000))
+        frontier.add(CrawlTask(url="http://fast.com/1", priority=1.0, added_at=1200))
+
+        self.domain_store.record_success("slow.com", now=time.time(), request_latency_ms=900.0)
+        self.domain_store.record_success("fast.com", now=time.time(), request_latency_ms=80.0)
+
+        head = frontier.select_runnable_host_head(runnable_surface=RUNNABLE_SURFACE_FRONTLINE)
+
+        assert head is not None
+        assert head.host_key == "fast.com"
+        assert head.url == "http://fast.com/1"
+
+    def test_select_runnable_host_head_can_use_normal_runnable_surface(self, frontier):
+        frontier.add(CrawlTask(url="http://a.com/1", priority=1.0, added_at=1000, queue_class=QUEUE_EXPLORATION))
+        frontier.add(CrawlTask(url="http://b.com/1", priority=0.8, added_at=2000, queue_class=QUEUE_BACKLOG))
+
+        head = frontier.select_runnable_host_head(runnable_surface=RUNNABLE_SURFACE_NORMAL)
+
+        assert head is not None
+        assert head.host_key == "a.com"
+        assert head.url == "http://a.com/1"
 
     def test_lease_next_marks_leased(self, frontier):
         frontier.add(CrawlTask(url="http://example.com"))
@@ -342,7 +604,7 @@ class TestUrlLedger:
         assert frontier.lease_next() is None
 
         with frontier._conn.cursor() as cur:
-            cur.execute("SELECT count(*) FROM active_leases WHERE url = %s", ("http://example.com/",))
+            cur.execute(f"SELECT count(*) FROM {LEASE_TABLE} WHERE url = %s", ("http://example.com/",))
             (active_count,) = cur.fetchone()
 
         assert active_count == 1
@@ -360,8 +622,8 @@ class TestUrlLedger:
 
         batch = frontier.lease_batch(
             count=2,
-            prioritize_breadth=True,
-            queue_classes=[QUEUE_EXPLORATION],
+            lease_strategy=LEASE_STRATEGY_HOST_FIRST,
+            runnable_surface=RUNNABLE_SURFACE_FRONTLINE,
         )
 
         assert {task.url for task in batch} == {
@@ -375,12 +637,18 @@ class TestUrlLedger:
         frontier.add(CrawlTask(url="http://a.com/docs/rust/1", priority=1.0, added_at=2000))
         frontier.add(CrawlTask(url="http://b.com/1", priority=1.5, added_at=5000))
 
-        first = frontier.lease_next(prioritize_breadth=True, queue_classes=[QUEUE_EXPLORATION])
+        first = frontier.lease_next(
+            lease_strategy=LEASE_STRATEGY_HOST_FIRST,
+            runnable_surface=RUNNABLE_SURFACE_FRONTLINE,
+        )
         assert first is not None
         assert first.url == "http://a.com/docs/python/1"
         frontier.mark_done(first.url, lease_token=first.lease_token)
 
-        second = frontier.lease_next(prioritize_breadth=True, queue_classes=[QUEUE_EXPLORATION])
+        second = frontier.lease_next(
+            lease_strategy=LEASE_STRATEGY_HOST_FIRST,
+            runnable_surface=RUNNABLE_SURFACE_FRONTLINE,
+        )
         assert second is not None
         assert second.url == "http://b.com/1"
 
@@ -390,7 +658,7 @@ class TestUrlLedger:
         frontier.mark_done(result.url, lease_token=result.lease_token)
         assert frontier.stats().get("done", 0) == 1
         with frontier._conn.cursor() as cur:
-            cur.execute("SELECT count(*) FROM active_leases WHERE url = %s", (result.url,))
+            cur.execute(f"SELECT count(*) FROM {LEASE_TABLE} WHERE url = %s", (result.url,))
             (active_count,) = cur.fetchone()
             cur.execute(
                 f"SELECT last_success_at, fail_streak, last_error, terminal_reason, terminalized_at FROM {URL_LEDGER_TABLE} WHERE url = %s",
@@ -422,7 +690,7 @@ class TestUrlLedger:
             )
             lease_columns = [column_name for (column_name,) in cur.fetchall()]
             cur.execute(
-                "SELECT lease_token, lease_expires_at FROM active_leases WHERE url = %s",
+                f"SELECT lease_token, lease_expires_at FROM {LEASE_TABLE} WHERE url = %s",
                 (result.url,),
             )
             active_lease_token, active_lease_expires_at = cur.fetchone()
@@ -437,7 +705,7 @@ class TestUrlLedger:
 
         with frontier._conn.cursor() as cur:
             cur.execute(
-                "UPDATE active_leases SET lease_token = %s WHERE url = %s",
+                f"UPDATE {LEASE_TABLE} SET lease_token = %s WHERE url = %s",
                 ("tampered", result.url),
             )
         frontier._conn.commit()
@@ -450,7 +718,7 @@ class TestUrlLedger:
 
         with frontier._conn.cursor() as cur:
             cur.execute(
-                "UPDATE active_leases SET lease_expires_at = %s WHERE url = %s",
+                f"UPDATE {LEASE_TABLE} SET lease_expires_at = %s WHERE url = %s",
                 (time.time() + 3600, result.url),
             )
         frontier._conn.commit()
@@ -507,7 +775,10 @@ class TestUrlLedger:
         assert frontier.pending_count() == 1
 
         with frontier._conn.cursor() as cur:
-            cur.execute("SELECT COUNT(*) FROM frontier_queue_exploration WHERE url = %s", ("http://example.com/",))
+            cur.execute(
+                f"SELECT COUNT(*) FROM {QUEUE_TABLE_BY_CLASS[QUEUE_EXPLORATION]} WHERE url = %s",
+                ("http://example.com/",),
+            )
             (queue_count,) = cur.fetchone()
 
         assert queue_count == 1
@@ -557,7 +828,7 @@ class TestUrlLedger:
         frontier.add(CrawlTask(url="http://other.com/1"))
 
         assert frontier.pending_domain_count() == 2
-        assert frontier.pending_domain_count(queue_classes=[QUEUE_EXPLORATION]) == 2
+        assert frontier.pending_domain_count(runnable_surface=RUNNABLE_SURFACE_FRONTLINE) == 2
 
     def test_ready_domain_count_ignores_scheduled_and_blocked_hosts(self, frontier):
         now = time.time()
@@ -567,7 +838,7 @@ class TestUrlLedger:
         frontier.add(CrawlTask(url="http://c.com/backoff", next_fetch_at=now))
         self.domain_store.record_failure("c.com", backoff_seconds=20.0, now=now)
 
-        assert frontier.ready_domain_count(now=now) == 1
+        assert frontier.runnable_domain_count(now=now) == 1
 
     def test_ready_count_ignores_future_next_fetch(self, frontier):
         now = time.time()
@@ -580,8 +851,10 @@ class TestUrlLedger:
         frontier.add(CrawlTask(url="http://example.com/ready", next_fetch_at=now))
 
         assert frontier.pending_count() == 2
-        assert frontier.ready_count(now=now) == 1
-        assert frontier.next_ready_delay(now=now) == pytest.approx(0.0, abs=1e-6)
+        assert frontier.runnable_count(now=now) == 1
+        assert frontier.runnable_count(now=now) == 1
+        assert frontier.scheduled_count(now=now) == 1
+        assert frontier.next_runnable_delay(now=now) == pytest.approx(0.0, abs=1e-6)
 
     def test_ready_count_respects_domain_backoff(self, frontier):
         now = time.time()
@@ -589,8 +862,10 @@ class TestUrlLedger:
         self.domain_store.record_failure("a.com", backoff_seconds=30.0, now=now)
 
         assert frontier.pending_count() == 1
-        assert frontier.ready_count(now=now) == 0
-        assert frontier.next_ready_delay(now=now) == pytest.approx(30.0, abs=1e-3)
+        assert frontier.runnable_count(now=now) == 0
+        assert frontier.runnable_count(now=now) == 0
+        assert frontier.scheduled_count(now=now) == 0
+        assert frontier.next_runnable_delay(now=now) == pytest.approx(30.0, abs=1e-3)
 
     def test_ready_count_can_filter_queue_classes(self, frontier):
         now = time.time()
@@ -599,8 +874,8 @@ class TestUrlLedger:
         self.domain_store.record_failure("a.com", backoff_seconds=20.0, now=now)
         frontier.add(CrawlTask(url="http://b.com/explore", next_fetch_at=now))
 
-        assert frontier.ready_count(now=now, queue_classes=[QUEUE_EXPLORATION]) == 1
-        assert frontier.ready_count(now=now, queue_classes=[QUEUE_BACKLOG]) == 0
+        assert frontier.runnable_count(now=now, runnable_surface=RUNNABLE_SURFACE_FRONTLINE) == 1
+        assert frontier.runnable_count(now=now, runnable_surface=RUNNABLE_SURFACE_DEFERRED) == 0
 
     def test_readiness_summarizes_pending_and_ready(self, frontier):
         now = time.time()
@@ -611,9 +886,11 @@ class TestUrlLedger:
         readiness = frontier.readiness(now=now)
 
         assert readiness.pending == 2
-        assert readiness.ready == 0
-        assert readiness.ready_domains == 0
-        assert readiness.next_ready_delay == pytest.approx(20.0, abs=1e-3)
+        assert readiness.runnable == 0
+        assert readiness.runnable == 0
+        assert readiness.scheduled == 1
+        assert readiness.runnable_domains == 0
+        assert readiness.next_runnable_delay == pytest.approx(20.0, abs=1e-3)
         assert readiness.blocked == {
             "next_fetch_at": 1,
             "domain_next_request": 0,
@@ -621,7 +898,7 @@ class TestUrlLedger:
             "retry_quarantine": 0,
         }
         assert readiness.state_counts == {
-            "ready": 0,
+            "runnable": 0,
             "scheduled": 1,
             "blocked_domain_next_request": 0,
             "blocked_host_backoff": 1,
@@ -643,10 +920,10 @@ class TestUrlLedger:
 
         readiness = frontier.readiness(now=now)
         assert readiness.pending == 2
-        assert readiness.ready == 1
-        assert readiness.ready_domains == 1
+        assert readiness.runnable == 1
+        assert readiness.runnable_domains == 1
         assert readiness.state_counts == {
-            "ready": 1,
+            "runnable": 1,
             "scheduled": 0,
             "blocked_domain_next_request": 0,
             "blocked_host_backoff": 0,
@@ -669,14 +946,14 @@ class TestUrlLedger:
 
         assert promoted == 2
         assert frontier.pending_count() == 2
-        assert frontier.pending_count(queue_classes=[QUEUE_BACKLOG]) == 2
+        assert frontier.pending_count(runnable_surface=RUNNABLE_SURFACE_DEFERRED) == 2
         assert frontier.blocked_domain_backoff_count() == 1
 
         readiness = frontier.readiness(now=now + 31.0)
-        assert readiness.ready == 2
-        assert readiness.ready_domains == 2
+        assert readiness.runnable == 2
+        assert readiness.runnable_domains == 2
         assert readiness.state_counts == {
-            "ready": 2,
+            "runnable": 2,
             "scheduled": 0,
             "blocked_domain_next_request": 0,
             "blocked_host_backoff": 0,
@@ -708,7 +985,7 @@ class TestUrlLedger:
         assert leased is not None
         assert leased.url == "http://b.com/blocked"
 
-    def test_promote_blocked_domain_backoff_returns_ready_urls_to_backlog_without_domain_bias(self, frontier):
+    def test_promote_blocked_domain_backoff_returns_ready_urls_to_deferred_surface_without_domain_bias(self, frontier):
         now = time.time()
         frontier.add(CrawlTask(url="http://a.com/blocked", next_fetch_at=now))
         frontier.add(CrawlTask(url="http://b.com/blocked", next_fetch_at=now + 5.0))
@@ -723,13 +1000,13 @@ class TestUrlLedger:
         promoted = frontier.promote_blocked_domain_backoff(1, per_domain=1, now=now + 31.0)
 
         assert promoted == 1
-        assert frontier.pending_count(queue_classes=[QUEUE_BACKLOG]) == 2
+        assert frontier.pending_count(runnable_surface=RUNNABLE_SURFACE_DEFERRED) == 2
         leased = frontier.lease_next(now=now + 31.0)
         assert leased is not None
         assert leased.url == "http://a.com/ready-2"
         assert frontier.blocked_domain_backoff_count() == 1
 
-        leased = frontier.lease_next(now=now + 31.0, queue_classes=[QUEUE_BACKLOG])
+        leased = frontier.lease_next(now=now + 31.0, runnable_surface=RUNNABLE_SURFACE_DEFERRED)
         assert leased is not None
         assert leased.url == "http://a.com/blocked"
 
@@ -743,7 +1020,7 @@ class TestUrlLedger:
 
         with frontier._conn.cursor() as cur:
             cur.execute(
-                "UPDATE frontier_queue_blocked_domain_backoff SET quarantined_at = %s WHERE url = %s",
+                f"UPDATE {BLOCKED_DOMAIN_BACKOFF_TABLE} SET quarantined_at = %s WHERE url = %s",
                 (now - 100.0, "http://a.com/blocked"),
             )
         frontier._conn.commit()
@@ -787,10 +1064,10 @@ class TestUrlLedger:
 
         assert restored == 2
         assert frontier.pending_count() == 2
-        assert frontier.pending_count(queue_classes=[QUEUE_BACKLOG]) == 2
+        assert frontier.pending_count(runnable_surface=RUNNABLE_SURFACE_DEFERRED) == 2
         assert frontier.blocked_domain_backoff_count() == 1
 
-        leased = frontier.lease_batch(count=2, queue_classes=[QUEUE_BACKLOG], now=now + 31.0)
+        leased = frontier.lease_batch(count=2, runnable_surface=RUNNABLE_SURFACE_DEFERRED, now=now + 31.0)
         assert {task.url for task in leased} == {"http://a.com/blocked-1", "http://a.com/blocked-2"}
 
     def test_readiness_filters_blocked_queue_by_queue_class(self, frontier):
@@ -800,8 +1077,8 @@ class TestUrlLedger:
         self.domain_store.record_failure("a.com", backoff_seconds=30.0, now=now)
         frontier.rebalance_blocked_domain_backoff(now=now)
 
-        exploration = frontier.readiness(now=now, queue_classes=[QUEUE_EXPLORATION])
-        backlog = frontier.readiness(now=now, queue_classes=[QUEUE_BACKLOG])
+        exploration = frontier.readiness(now=now, runnable_surface=RUNNABLE_SURFACE_FRONTLINE)
+        backlog = frontier.readiness(now=now, runnable_surface=RUNNABLE_SURFACE_DEFERRED)
 
         assert exploration.pending == 1
         assert exploration.state_counts["retry_quarantine"] == 1
@@ -829,7 +1106,7 @@ class TestUrlLedger:
         frontier.add(CrawlTask(url="http://a.com/explore"))
         frontier.add(CrawlTask(url="http://a.com/backlog"))
 
-        result = frontier.lease_next(queue_classes=[QUEUE_BACKLOG])
+        result = frontier.lease_next(runnable_surface=RUNNABLE_SURFACE_DEFERRED)
 
         assert result is not None
         assert result.url == "http://a.com/backlog"
@@ -938,22 +1215,25 @@ class TestUrlLedger:
         frontier.upsert_seeds(["http://example.com"])
 
         with frontier._conn.cursor() as cur:
-            cur.execute("SELECT COUNT(*) FROM frontier_queue_exploration WHERE url = %s", ("http://example.com/",))
+            cur.execute(
+                f"SELECT COUNT(*) FROM {QUEUE_TABLE_BY_CLASS[QUEUE_EXPLORATION]} WHERE url = %s",
+                ("http://example.com/",),
+            )
             (queue_count,) = cur.fetchone()
 
         assert queue_count == 1
 
-    def test_promote_backlog_host_heads_promotes_distinct_backlog_domains(self, frontier):
+    def test_promote_deferred_host_heads_promotes_distinct_backlog_domains(self, frontier):
         frontier.add(CrawlTask(url="http://example.com/docs/a", queue_class=QUEUE_BACKLOG))
         frontier.add(CrawlTask(url="http://example.com/docs/b", queue_class=QUEUE_BACKLOG))
         frontier.add(CrawlTask(url="http://other.com/news/a", queue_class=QUEUE_BACKLOG))
         frontier.add(CrawlTask(url="http://third.com/start", queue_class=QUEUE_BACKLOG))
 
-        promoted = frontier.promote_backlog_host_heads(target_pending=2, per_domain=1, candidate_limit=10)
+        promoted = frontier.promote_deferred_host_heads(target_pending=2, per_domain=1, candidate_limit=10)
 
         assert promoted == 2
         with frontier._conn.cursor() as cur:
-            cur.execute("SELECT url FROM frontier_queue_exploration ORDER BY url")
+            cur.execute(f"SELECT url FROM {QUEUE_TABLE_BY_CLASS[QUEUE_EXPLORATION]} ORDER BY url")
             promoted_urls = [url for (url,) in cur.fetchall()]
 
         assert promoted_urls == [
@@ -961,7 +1241,7 @@ class TestUrlLedger:
             "http://other.com/news/a",
         ]
 
-    def test_promote_backlog_host_heads_uses_queue_membership_not_frontier_queue_class(self, frontier):
+    def test_promote_deferred_host_heads_uses_queue_membership_not_frontier_queue_class(self, frontier):
         frontier.add(CrawlTask(url="http://example.com/docs/a", queue_class=QUEUE_BACKLOG))
         frontier.add(CrawlTask(url="http://other.com/news/a", queue_class=QUEUE_BACKLOG))
 
@@ -975,11 +1255,11 @@ class TestUrlLedger:
             )
         frontier._conn.commit()
 
-        promoted = frontier.promote_backlog_host_heads(target_pending=2, per_domain=1, candidate_limit=10)
+        promoted = frontier.promote_deferred_host_heads(target_pending=2, per_domain=1, candidate_limit=10)
 
         assert promoted == 2
         with frontier._conn.cursor() as cur:
-            cur.execute("SELECT url FROM frontier_queue_exploration ORDER BY url")
+            cur.execute(f"SELECT url FROM {QUEUE_TABLE_BY_CLASS[QUEUE_EXPLORATION]} ORDER BY url")
             promoted_urls = [url for (url,) in cur.fetchall()]
 
         assert promoted_urls == [
@@ -993,10 +1273,10 @@ class TestUrlLedger:
         assert leased is not None
         frontier.mark_done(leased.url, lease_token=leased.lease_token)
 
-        requeued = frontier.requeue_urls([leased.url], queue_class=QUEUE_RECRAWL)
+        requeued = frontier.requeue_refresh_urls([leased.url])
         assert requeued == 1
 
-        recrawl = frontier.lease_next(queue_classes=[QUEUE_RECRAWL])
+        recrawl = frontier.lease_next(runnable_surface=RUNNABLE_SURFACE_REFRESH)
         assert recrawl is not None
         assert recrawl.url == leased.url
 
@@ -1006,10 +1286,10 @@ class TestUrlLedger:
         assert leased is not None
         frontier.mark_done(leased.url, lease_token=leased.lease_token)
 
-        requeued = frontier.requeue_urls([leased.url], queue_class=QUEUE_RECRAWL)
+        requeued = frontier.requeue_refresh_urls([leased.url])
         assert requeued == 1
 
-        recrawl = frontier.lease_next(queue_classes=[QUEUE_RECRAWL])
+        recrawl = frontier.lease_next(runnable_surface=RUNNABLE_SURFACE_REFRESH)
         assert recrawl is not None
         assert recrawl.url == leased.url
 
@@ -1044,13 +1324,13 @@ class TestUrlLedger:
         assert terminal_reason is None
         assert terminalized_at is None
 
-    def test_defer_overcrowded_backlog_delays_excess_ready_urls(self, frontier):
+    def test_defer_overcrowded_deferred_surface_delays_excess_ready_urls(self, frontier):
         frontier.add(CrawlTask(url="http://a.com/1", priority=0.55, added_at=1000))
         frontier.add(CrawlTask(url="http://a.com/2", priority=0.55, added_at=1001))
         frontier.add(CrawlTask(url="http://a.com/3", priority=0.55, added_at=1002))
 
-        delayed = frontier.defer_overcrowded_backlog(
-            keep_ready_per_domain=1,
+        delayed = frontier.defer_overcrowded_deferred_surface(
+            keep_runnable_per_domain=1,
             defer_seconds=60.0,
         )
 
@@ -1068,14 +1348,14 @@ class TestUrlLedger:
         assert ready == ["http://a.com/1"]
         assert deferred == ["http://a.com/2", "http://a.com/3"]
 
-    def test_defer_overcrowded_backlog_delays_excess_branch_urls(self, frontier):
+    def test_defer_overcrowded_deferred_surface_delays_excess_branch_urls(self, frontier):
         frontier.add(CrawlTask(url="http://a.com/docs/python/1", priority=0.55, added_at=1000))
         frontier.add(CrawlTask(url="http://a.com/docs/python/2", priority=0.55, added_at=1001))
         frontier.add(CrawlTask(url="http://a.com/docs/rust/1", priority=0.55, added_at=1002))
 
-        delayed = frontier.defer_overcrowded_backlog(
-            keep_ready_per_domain=10,
-            keep_ready_per_branch=1,
+        delayed = frontier.defer_overcrowded_deferred_surface(
+            keep_runnable_per_domain=10,
+            keep_runnable_per_branch=1,
             defer_seconds=60.0,
         )
 

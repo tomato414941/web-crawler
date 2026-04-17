@@ -1,4 +1,4 @@
-# Idealized WWW Crawler Model
+# WWW Crawler Principles
 
 この文書は、理想化された WWW crawler の抽象モデルを整理する。現在の `web-crawler` 実装の説明ではなく、命名や責務分離を判断するための設計原則を置く。
 
@@ -52,6 +52,9 @@
 したがって理想形では、`explore` は intent として残し、surface 名は `scheduled` や `runnable` のような state 語に寄せる方が自然である。
 
 ## Frontier Principle
+
+ここでいう `frontier` は、特定の module 名や table 名ではなく、scheduler が持つ runnable frontier
+を指す概念語である。
 
 理想的な frontier は URL の集合そのものではなく、`runnable capability` の集合として考えるべきである。
 

@@ -25,9 +25,13 @@ from .domain_store import DomainStore
 from .error_stats import categorize_crawl_error
 from .url_ledger import (
     CrawlTask,
-    QUEUE_BACKLOG,
-    QUEUE_EXPLORATION,
-    QUEUE_RECRAWL,
+    INTENT_EXPLORE,
+    INTENT_REFRESH,
+    LEASE_STRATEGY_HOST_FIRST,
+    LEASE_STRATEGY_URL_ORDER,
+    RUNNABLE_SURFACE_DEFERRED,
+    RUNNABLE_SURFACE_FRONTLINE,
+    RUNNABLE_SURFACE_REFRESH,
     UrlLedger,
 )
 from .output import StreamingOutputWriter
@@ -52,7 +56,7 @@ _META_ROBOTS_PATTERN = re.compile(
 
 
 def _split_worker_pools(concurrency: int) -> tuple[int, int, int]:
-    """Split worker capacity into exploration and recrawl pools."""
+    """Split worker capacity into frontline, deferred, and refresh pools."""
     total = max(1, concurrency)
     if total == 1:
         return 1, 0, 0
@@ -60,14 +64,14 @@ def _split_worker_pools(concurrency: int) -> tuple[int, int, int]:
         return 1, 0, 1
     if total == 3:
         return 2, 0, 1
-    exploration = max(2, math.ceil(total * 0.75))
-    exploration = min(exploration, total - 1)
-    backlog = 0
-    recrawl = total - exploration
-    if recrawl <= 0:
-        recrawl = 1
-        exploration = total - backlog - recrawl
-    return exploration, backlog, recrawl
+    frontline = max(2, math.ceil(total * 0.75))
+    frontline = min(frontline, total - 1)
+    deferred = 0
+    refresh = total - frontline
+    if refresh <= 0:
+        refresh = 1
+        frontline = total - deferred - refresh
+    return frontline, deferred, refresh
 
 
 def _elapsed_ms(started_at: float) -> float:
@@ -81,7 +85,7 @@ def _format_timings(timings: CrawlStageTimings | None) -> str:
         return ""
     return (
         "lease=%0.1fms precheck=%0.1fms fetch=%0.1fms request=%0.1fms body=%0.1fms parse=%0.1fms "
-        "frontier=%0.1fms persist=%0.1fms output=%0.1fms "
+        "scheduler=%0.1fms persist=%0.1fms output=%0.1fms "
         "parse_q_wait=%0.1fms finalize_q_wait=%0.1fms publish_q_wait=%0.1fms process=%0.1fms slot=%0.1fms "
         "parse_q_depth=%d finalize_q_depth=%d publish_q_depth=%d"
     ) % (
@@ -91,7 +95,7 @@ def _format_timings(timings: CrawlStageTimings | None) -> str:
         timings.fetch_request_ms,
         timings.fetch_body_read_ms,
         timings.parse_ms,
-        timings.frontier_ms,
+        timings.scheduler_ms,
         timings.persist_ms,
         timings.output_ms,
         timings.parse_queue_wait_ms,
@@ -117,6 +121,15 @@ class _FetchedPage:
     queue_depth: int = 0
 
 
+@dataclass(frozen=True, slots=True)
+class _LeaseLane:
+    """Operational lease surface for one worker pool, not a first-class scheduler concept."""
+
+    runnable_surface: str
+    lease_strategy: str
+    intent: str | None = None
+
+
 @dataclass(slots=True)
 class _PublishItem:
     """Finalized result handed from finalizer to publisher."""
@@ -132,6 +145,7 @@ class _FinalizeItem:
 
     parsed: _ParsedPage | None = None
     failed: _FailedTask | None = None
+    skipped: _SkippedTask | None = None
     enqueued_at: float = 0.0
     queue_depth: int = 0
 
@@ -159,6 +173,16 @@ class _FailedTask:
     backoff_seconds: float | None = None
 
 
+@dataclass(slots=True)
+class _SkippedTask:
+    """Skipped crawl handed to finalizer for non-error scheduler mutation."""
+
+    task: CrawlTask
+    reason: str
+    timings: CrawlStageTimings
+    process_started: float
+
+
 class CrawlerEngine:
     """Async crawler engine with concurrent processing."""
 
@@ -172,7 +196,7 @@ class CrawlerEngine:
         concurrency: int = 5,
         output_writer: StreamingOutputWriter | None = None,
         pg_storage: "PgStorage | None" = None,
-        frontier: UrlLedger | None = None,
+        url_ledger: UrlLedger | None = None,
         domain_manager: DomainManager | None = None,
         domain_store: DomainStore | None = None,
         seed_urls: list[str] | None = None,
@@ -187,33 +211,33 @@ class CrawlerEngine:
         self.parser_workers = max(1, min(concurrency, 4))
         self.max_inflight_requests_per_host = max(1, settings.max_inflight_requests_per_host)
         (
-            self.exploration_workers,
-            self.backlog_workers,
-            self.recrawl_workers,
+            self.frontline_workers,
+            self.deferred_workers,
+            self.refresh_workers,
         ) = _split_worker_pools(concurrency)
         self._publisher_executor: concurrent.futures.ThreadPoolExecutor | None = None
         self._publisher_storage = None
         self._finalizer_executor: concurrent.futures.ThreadPoolExecutor | None = None
         self._finalizer_storage = None
-        self._finalizer_frontier: UrlLedger | None = None
+        self._finalizer_scheduler: UrlLedger | None = None
         self._finalizer_domain_store: DomainStore | None = None
 
         self.start_domain = urlparse(start_url).netloc if start_url else ""
         self.seed_hosts = seed_hosts_from_urls(seed_urls or [])
         if self.start_domain:
             self.seed_hosts.add(self.start_domain.lower())
-        if frontier:
-            self.frontier = frontier
+        if url_ledger:
+            self.scheduler = url_ledger
         elif pg_storage:
-            self.frontier = UrlLedger(pg_storage.conn)
+            self.scheduler = UrlLedger(pg_storage.conn)
         else:
-            raise ValueError("Postgres connection required for frontier")
+            raise ValueError("Postgres connection required for scheduler state")
 
         if domain_store is None and pg_storage is not None:
             domain_store = DomainStore(pg_storage.conn, default_delay=delay)
         self.domain_store = domain_store
         if self.domain_store is not None:
-            self.frontier.attach_domain_store(self.domain_store)
+            self.scheduler.attach_domain_store(self.domain_store)
 
         if domain_manager:
             self.domain_manager = domain_manager
@@ -266,9 +290,9 @@ class CrawlerEngine:
             "max_pages": self.max_pages,
             "concurrency": self.concurrency,
             "parser_workers": self.parser_workers,
-            "exploration_workers": self.exploration_workers,
-            "backlog_workers": self.backlog_workers,
-            "recrawl_workers": self.recrawl_workers,
+            "frontline_workers": self.frontline_workers,
+            "deferred_workers": self.deferred_workers,
+            "refresh_workers": self.refresh_workers,
             "active_hosts": len(self._active_host_counts),
             "parse_queue_size": self._parse_queue.qsize() if self._parse_queue is not None else 0,
             "finalize_queue_size": self._finalize_queue.qsize()
@@ -289,6 +313,11 @@ class CrawlerEngine:
             "failure_breakdown": dict(self._failure_counts),
         }
 
+    @property
+    def frontier(self) -> UrlLedger:
+        """Compatibility alias for older callers that still expect ``frontier``."""
+        return self.scheduler
+
     async def __aenter__(self) -> "CrawlerEngine":
         return self
 
@@ -306,7 +335,7 @@ class CrawlerEngine:
         if self._finalizer_executor is not None:
             self._finalizer_executor.shutdown(wait=True, cancel_futures=False)
             self._finalizer_executor = None
-        self._finalizer_frontier = None
+        self._finalizer_scheduler = None
         self._finalizer_domain_store = None
         if self._finalizer_storage is not None:
             self._finalizer_storage.close()
@@ -323,9 +352,13 @@ class CrawlerEngine:
         request_latency_ms: float | None,
     ) -> None:
         """Apply durable scheduler mutations on the dedicated finalizer connection."""
-        frontier = self._finalizer_frontier or self.frontier
+        scheduler = self._finalizer_scheduler or self.scheduler
         if new_tasks:
-            frontier.place_many(new_tasks)
+            if hasattr(scheduler, "discover_many") and hasattr(scheduler, "admit_discovered_tasks"):
+                scheduler.discover_many(new_tasks)
+                scheduler.admit_discovered_tasks(new_tasks)
+            else:
+                scheduler.place_many(new_tasks)
 
         domain_store = self._finalizer_domain_store or self._domain_store_for_success_tracking()
         if domain_store is not None:
@@ -334,7 +367,7 @@ class CrawlerEngine:
                 request_latency_ms=request_latency_ms,
             )
 
-        frontier.mark_done(task.url, lease_token=task.lease_token)
+        scheduler.mark_done(task.url, lease_token=task.lease_token)
 
     def _domain_store_for_success_tracking(self) -> DomainStore | None:
         """Return the durable store used for host success resets when available."""
@@ -364,7 +397,7 @@ class CrawlerEngine:
 
     def _finalize_failed_sync(self, failed: _FailedTask) -> None:
         """Apply durable failure mutations on the dedicated finalizer connection."""
-        frontier = self._finalizer_frontier or self.frontier
+        scheduler = self._finalizer_scheduler or self.scheduler
         domain_store = self._finalizer_domain_store or self._domain_store_for_success_tracking()
         if failed.record_success and domain_store is not None:
             domain_store.record_success(self._host_key_for_url(failed.task.url))
@@ -375,10 +408,10 @@ class CrawlerEngine:
             )
 
         if failed.mark_done:
-            frontier.mark_done(failed.task.url, lease_token=failed.task.lease_token)
+            scheduler.mark_done(failed.task.url, lease_token=failed.task.lease_token)
             return
 
-        frontier.mark_failed(
+        scheduler.mark_failed(
             failed.task.url,
             retryable=failed.failure.retryable,
             error=failed.failure.error,
@@ -389,7 +422,7 @@ class CrawlerEngine:
     async def _finalize_failed_task(self, failed: _FailedTask) -> CrawlFailure:
         """Apply scheduler mutations for a failed crawl outside fetch and parse workers."""
         failure = failed.failure
-        frontier_started = time.perf_counter()
+        scheduler_started = time.perf_counter()
         if self._finalizer_executor is not None:
             loop = asyncio.get_running_loop()
             await loop.run_in_executor(
@@ -399,7 +432,7 @@ class CrawlerEngine:
             )
         else:
             self._finalize_failed_sync(failed)
-        failure.timings.frontier_ms += _elapsed_ms(frontier_started)
+        failure.timings.scheduler_ms += _elapsed_ms(scheduler_started)
         failure.timings.process_ms = _elapsed_ms(failed.process_started)
         return failure
 
@@ -410,12 +443,13 @@ class CrawlerEngine:
         return True
 
     def _build_seed_task(self, url: str) -> CrawlTask:
-        """Build the initial frontier task for an explicit seed URL."""
+        """Build the initial scheduler task for an explicit seed URL."""
         decision = rank_seed_url(url)
         return CrawlTask(
             url=url,
             priority=decision.priority,
-            queue_class=QUEUE_EXPLORATION,
+            runnable_surface=RUNNABLE_SURFACE_FRONTLINE,
+            intent=INTENT_EXPLORE,
         )
 
     def _build_page_signals(self, response) -> PageSignals:
@@ -459,14 +493,37 @@ class CrawlerEngine:
                 CrawlTask(
                     url=link,
                     priority=decision.priority,
+                    runnable_surface=RUNNABLE_SURFACE_DEFERRED,
+                    intent=INTENT_EXPLORE,
                     source_url=parent_url,
                 )
             )
-        if hasattr(self.frontier, "preview_tasks"):
-            return self.frontier.preview_tasks(tasks)
+        if hasattr(self.scheduler, "preview_tasks"):
+            return self.scheduler.preview_tasks(tasks)
         return tasks
 
-    async def _process_url(self, task: CrawlTask) -> _FetchedPage | _FailedTask | None:
+    def _finalize_skipped_sync(self, skipped: _SkippedTask) -> None:
+        """Apply durable scheduler mutation for a skipped crawl."""
+        scheduler = self._finalizer_scheduler or self.scheduler
+        scheduler.mark_done(skipped.task.url, lease_token=skipped.task.lease_token)
+
+    async def _finalize_skipped_task(self, skipped: _SkippedTask) -> _SkippedTask:
+        """Apply scheduler mutations for a skipped crawl outside fetch workers."""
+        scheduler_started = time.perf_counter()
+        if self._finalizer_executor is not None:
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(
+                self._finalizer_executor,
+                self._finalize_skipped_sync,
+                skipped,
+            )
+        else:
+            self._finalize_skipped_sync(skipped)
+        skipped.timings.scheduler_ms += _elapsed_ms(scheduler_started)
+        skipped.timings.process_ms = _elapsed_ms(skipped.process_started)
+        return skipped
+
+    async def _process_url(self, task: CrawlTask) -> _FetchedPage | _FailedTask | _SkippedTask | None:
         """Process a single URL."""
         url = task.url
         timings = CrawlStageTimings()
@@ -475,11 +532,12 @@ class CrawlerEngine:
         precheck_started = time.perf_counter()
         if not await self.domain_manager.is_allowed(url):
             timings.precheck_ms = _elapsed_ms(precheck_started)
-            frontier_started = time.perf_counter()
-            self.frontier.mark_done(url, lease_token=task.lease_token)
-            timings.frontier_ms = _elapsed_ms(frontier_started)
-            timings.process_ms = _elapsed_ms(process_started)
-            return None
+            return _SkippedTask(
+                task=task,
+                reason="robots_denied",
+                timings=timings,
+                process_started=process_started,
+            )
 
         await self.domain_manager.wait_for_rate_limit(url)
         timings.precheck_ms = _elapsed_ms(precheck_started)
@@ -630,10 +688,9 @@ class CrawlerEngine:
         self,
         worker_id: int,
         *,
-        queue_classes: list[str],
-        prioritize_breadth: bool,
+        lease_lane: _LeaseLane,
     ):
-        """Worker coroutine that processes URLs from a dedicated queue class."""
+        """Worker coroutine that processes URLs from a dedicated runnable surface."""
         idle_ticks = 0
 
         while self._running:
@@ -642,10 +699,7 @@ class CrawlerEngine:
 
             slot_started = time.perf_counter()
             lease_started = time.perf_counter()
-            task = await self._lease_task(
-                queue_classes=queue_classes,
-                prioritize_breadth=prioritize_breadth,
-            )
+            task = await self._lease_task(lease_lane=lease_lane)
             lease_ms = _elapsed_ms(lease_started)
             if not task:
                 await self._release_page_slot(success=False)
@@ -664,7 +718,27 @@ class CrawlerEngine:
                 await self._release_page_slot(success=False)
                 continue
 
-            if isinstance(result, _FailedTask):
+            if isinstance(result, _SkippedTask):
+                result.timings.lease_ms = lease_ms
+                result.timings.slot_ms = _elapsed_ms(slot_started)
+                await self._release_page_slot(success=False)
+                if self._finalize_queue is not None:
+                    queue_item = _FinalizeItem(
+                        skipped=result,
+                        enqueued_at=time.perf_counter(),
+                        queue_depth=self._finalize_queue.qsize(),
+                    )
+                    self._enqueue_finalize_item(queue_item)
+                    await self._finalize_queue.put(queue_item)
+                else:
+                    skipped = await self._finalize_skipped_task(result)
+                    logger.info(
+                        "Skipped %s: %s (%s)",
+                        skipped.task.url,
+                        skipped.reason,
+                        _format_timings(skipped.timings),
+                    )
+            elif isinstance(result, _FailedTask):
                 result.failure.timings.lease_ms = lease_ms
                 result.failure.timings.slot_ms = _elapsed_ms(slot_started)
                 await self._release_page_slot(success=False)
@@ -863,7 +937,7 @@ class CrawlerEngine:
     async def _finalize_parsed_page(self, parsed: _ParsedPage) -> CrawlResult:
         """Apply scheduler mutations after parse and before persistence."""
         result = parsed.result
-        frontier_started = time.perf_counter()
+        scheduler_started = time.perf_counter()
         if self._finalizer_executor is not None:
             loop = asyncio.get_running_loop()
             await loop.run_in_executor(
@@ -879,10 +953,14 @@ class CrawlerEngine:
                 self.domain_manager.record_success(parsed.task.url)
         else:
             if parsed.new_tasks:
-                self.frontier.place_many(parsed.new_tasks)
+                if hasattr(self.scheduler, "discover_many") and hasattr(self.scheduler, "admit_discovered_tasks"):
+                    self.scheduler.discover_many(parsed.new_tasks)
+                    self.scheduler.admit_discovered_tasks(parsed.new_tasks)
+                else:
+                    self.scheduler.place_many(parsed.new_tasks)
             self.domain_manager.record_success(parsed.task.url)
-            self.frontier.mark_done(parsed.task.url, lease_token=parsed.task.lease_token)
-        result.timings.frontier_ms += _elapsed_ms(frontier_started)
+            self.scheduler.mark_done(parsed.task.url, lease_token=parsed.task.lease_token)
+        result.timings.scheduler_ms += _elapsed_ms(scheduler_started)
         result.timings.process_ms = _elapsed_ms(parsed.process_started)
 
         return result
@@ -958,6 +1036,17 @@ class CrawlerEngine:
                             result.url,
                             _format_timings(result.timings),
                         )
+                elif queue_item.skipped is not None:
+                    skipped = queue_item.skipped
+                    skipped.timings.finalize_queue_wait_ms = queue_wait_ms
+                    skipped.timings.finalize_queue_depth = queue_item.queue_depth
+                    skipped = await self._finalize_skipped_task(skipped)
+                    logger.info(
+                        "Skipped %s: %s (%s)",
+                        skipped.task.url,
+                        skipped.reason,
+                        _format_timings(skipped.timings),
+                    )
                 else:
                     failed = queue_item.failed
                     failed.failure.timings.finalize_queue_wait_ms = queue_wait_ms
@@ -1013,19 +1102,18 @@ class CrawlerEngine:
     async def _lease_task(
         self,
         *,
-        queue_classes: list[str],
-        prioritize_breadth: bool,
+        lease_lane: _LeaseLane,
     ) -> CrawlTask | None:
-        """Lease work for a specific queue class worker pool."""
+        """Lease work for a specific runnable worker pool."""
         async with self._lease_lock:
             excluded_hosts = [
                 host
                 for host, count in self._active_host_counts.items()
                 if count >= self._host_inflight_budget(host)
             ]
-            task = self.frontier.lease_next(
-                queue_classes=queue_classes,
-                prioritize_breadth=prioritize_breadth,
+            task = self.scheduler.lease_next(
+                runnable_surface=lease_lane.runnable_surface,
+                lease_strategy=lease_lane.lease_strategy,
                 exclude_domains=excluded_hosts or None,
             )
             if task is not None:
@@ -1050,8 +1138,8 @@ class CrawlerEngine:
         self._finalize_queue_depth_max = 0
         self._publish_queue_depth_max = 0
 
-        if self.start_url and self.frontier.pending_count() == 0:
-            self.frontier.place(self._build_seed_task(self.start_url))
+        if self.start_url and self.scheduler.pending_count() == 0:
+            self.scheduler.place(self._build_seed_task(self.start_url))
 
         self._parse_queue = asyncio.Queue()
         self._finalize_queue = asyncio.Queue()
@@ -1062,7 +1150,7 @@ class CrawlerEngine:
 
             self._publisher_storage = PgStorage(publisher_dsn)
             self._finalizer_storage = PgStorage(publisher_dsn)
-            self._finalizer_frontier = UrlLedger(self._finalizer_storage.conn)
+            self._finalizer_scheduler = UrlLedger(self._finalizer_storage.conn)
             self._finalizer_domain_store = DomainStore(
                 self._finalizer_storage.conn,
                 default_delay=self.domain_manager.default_delay,
@@ -1083,35 +1171,46 @@ class CrawlerEngine:
 
         workers: list[asyncio.Task] = []
         worker_id = 0
-        for _ in range(self.exploration_workers):
+        frontline_lane = _LeaseLane(
+            runnable_surface=RUNNABLE_SURFACE_FRONTLINE,
+            lease_strategy=LEASE_STRATEGY_HOST_FIRST,
+            intent=INTENT_EXPLORE,
+        )
+        deferred_lane = _LeaseLane(
+            runnable_surface=RUNNABLE_SURFACE_DEFERRED,
+            lease_strategy=LEASE_STRATEGY_HOST_FIRST,
+        )
+        refresh_lane = _LeaseLane(
+            runnable_surface=RUNNABLE_SURFACE_REFRESH,
+            lease_strategy=LEASE_STRATEGY_URL_ORDER,
+            intent=INTENT_REFRESH,
+        )
+        for _ in range(self.frontline_workers):
             workers.append(
                 asyncio.create_task(
                     self._worker(
                         worker_id,
-                        queue_classes=[QUEUE_EXPLORATION],
-                        prioritize_breadth=True,
+                        lease_lane=frontline_lane,
                     )
                 )
             )
             worker_id += 1
-        for _ in range(self.backlog_workers):
+        for _ in range(self.deferred_workers):
             workers.append(
                 asyncio.create_task(
                     self._worker(
                         worker_id,
-                        queue_classes=[QUEUE_BACKLOG],
-                        prioritize_breadth=True,
+                        lease_lane=deferred_lane,
                     )
                 )
             )
             worker_id += 1
-        for _ in range(self.recrawl_workers):
+        for _ in range(self.refresh_workers):
             workers.append(
                 asyncio.create_task(
                     self._worker(
                         worker_id,
-                        queue_classes=[QUEUE_RECRAWL],
-                        prioritize_breadth=False,
+                        lease_lane=refresh_lane,
                     )
                 )
             )
@@ -1190,7 +1289,7 @@ async def run_crawl(
                 typer.echo(f"Postgres: {pg_storage.count} pages saved")
                 if output_file:
                     typer.echo(f"Results saved to {output_file}")
-                typer.echo(f"Queue stats: {engine.frontier.stats()}")
+                typer.echo(f"Scheduler stats: {engine.scheduler.stats()}")
         finally:
             if writer:
                 writer.__exit__(None, None, None)

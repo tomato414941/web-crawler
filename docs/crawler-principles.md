@@ -1,4 +1,4 @@
-# Idealized WWW Crawler Model
+# WWW Crawler Principles
 
 This document captures an abstract model for an idealized WWW crawler. It is not a description of the current `web-crawler` implementation. Its role is to provide design principles for naming and responsibility boundaries.
 
@@ -52,6 +52,9 @@ Reasons:
 In the ideal model, `explore` remains an intent, while surface names converge toward state terms such as `scheduled` and `runnable`.
 
 ## Frontier Principle
+
+Here, `frontier` is a conceptual term for the scheduler's runnable frontier, not a specific
+module or table name.
 
 An ideal frontier is not just a set of URLs. It is better understood as a set of `runnable capability`.
 
