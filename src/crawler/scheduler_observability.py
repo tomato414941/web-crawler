@@ -7,18 +7,23 @@ import time
 
 
 @dataclass(frozen=True)
-class FrontierReadiness:
+class SchedulerReadiness:
     """Summary of the current pending queue readiness."""
 
     pending: int
-    ready: int
-    ready_domains: int
-    next_ready_delay: float | None
+    runnable: int
+    runnable_domains: int
+    next_runnable_delay: float | None
     blocked: dict[str, int]
     state_counts: dict[str, int]
 
+    @property
+    def scheduled(self) -> int:
+        """Return scheduled-but-not-yet-runnable work count."""
+        return int(self.state_counts.get("scheduled", 0))
 
-class FrontierObservability:
+
+class SchedulerObservability:
     """Read-only queue and lease snapshots for scheduler-facing metrics."""
 
     def __init__(
@@ -27,12 +32,14 @@ class FrontierObservability:
         *,
         queue_table_by_class: dict[str, str],
         queue_class_order: tuple[str, ...],
+        queue_class_default_runnable_surface: dict[str, str],
         blocked_queue_table: str,
         lease_table: str,
     ):
         self._conn = conn
         self._queue_table_by_class = queue_table_by_class
         self._queue_class_order = queue_class_order
+        self._queue_class_default_runnable_surface = queue_class_default_runnable_surface
         self._blocked_queue_table = blocked_queue_table
         self._lease_table = lease_table
 
@@ -58,15 +65,15 @@ class FrontierObservability:
         return sql, ()
 
     def pending_queue_counts(self) -> dict[str, int]:
+        union_sql = "\n                       UNION ALL\n                       ".join(
+            f"SELECT %s AS queue_class, url FROM {self._queue_table_by_class[queue_class]}"
+            for queue_class in self._queue_class_order
+        )
         with self._conn.cursor() as cur:
             cur.execute(
-                """SELECT queue_class, count(*)
+                f"""SELECT queue_class, count(*)
                    FROM (
-                       SELECT %s AS queue_class, url FROM frontier_queue_exploration
-                       UNION ALL
-                       SELECT %s AS queue_class, url FROM frontier_queue_backlog
-                       UNION ALL
-                       SELECT %s AS queue_class, url FROM frontier_queue_recrawl
+                       {union_sql}
                    ) AS pending_queues
                    GROUP BY queue_class""",
                 self._queue_class_order,
@@ -80,9 +87,18 @@ class FrontierObservability:
             )
             return dict(cur.fetchall())
 
+    def _surface_counts(self, queue_counts: dict[str, int]) -> dict[str, int]:
+        surface_counts: dict[str, int] = {}
+        for queue_class, count in queue_counts.items():
+            surface = self._queue_class_default_runnable_surface[queue_class]
+            surface_counts[surface] = surface_counts.get(surface, 0) + count
+        return surface_counts
+
     def status_counts(self) -> dict[str, int | dict[str, int]]:
-        pending_queue_tables = self.pending_queue_counts()
-        blocked_queue_classes = self.blocked_queue_counts()
+        pending_queue_counts = self.pending_queue_counts()
+        blocked_queue_counts = self.blocked_queue_counts()
+        pending_surfaces = self._surface_counts(pending_queue_counts)
+        blocked_surfaces = self._surface_counts(blocked_queue_counts)
 
         with self._conn.cursor() as cur:
             cur.execute(f"SELECT COUNT(*) FROM {self._lease_table}")
@@ -92,13 +108,13 @@ class FrontierObservability:
             cur.execute("SELECT COUNT(*) FROM url_ledger WHERE terminal_reason IS NOT NULL")
             failed = cur.fetchone()[0]
 
-        pending = sum(pending_queue_tables.values()) + sum(blocked_queue_classes.values())
+        pending = sum(pending_queue_counts.values()) + sum(blocked_queue_counts.values())
         return {
             "leased": leased,
             "done": done,
             "failed": failed,
-            "pending_queue_tables": pending_queue_tables,
-            "blocked_queue_classes": blocked_queue_classes,
+            "pending_surfaces": pending_surfaces,
+            "blocked_surfaces": blocked_surfaces,
             "pending": pending,
             "total": done + failed + pending + leased,
         }
@@ -120,13 +136,29 @@ class FrontierObservability:
             value = cur.fetchone()[0]
         return int(value or 0)
 
-    def ready_domain_count(
+    def runnable_count(
         self,
         *,
         now: float | None = None,
         queue_classes: list[str] | None = None,
     ) -> int:
-        return self.readiness(now=now, queue_classes=queue_classes).ready_domains
+        return self.readiness(now=now, queue_classes=queue_classes).runnable
+
+    def scheduled_count(
+        self,
+        *,
+        now: float | None = None,
+        queue_classes: list[str] | None = None,
+    ) -> int:
+        return self.readiness(now=now, queue_classes=queue_classes).scheduled
+
+    def runnable_domain_count(
+        self,
+        *,
+        now: float | None = None,
+        queue_classes: list[str] | None = None,
+    ) -> int:
+        return self.readiness(now=now, queue_classes=queue_classes).runnable_domains
 
     def blocked_count(self) -> int:
         with self._conn.cursor() as cur:
@@ -138,7 +170,7 @@ class FrontierObservability:
         *,
         now: float | None = None,
         queue_classes: list[str] | None = None,
-    ) -> FrontierReadiness:
+    ) -> SchedulerReadiness:
         now = time.time() if now is None else now
         pending_queue_sql = self._pending_queue_union_sql(queue_classes)
         blocked_queue_sql, blocked_queue_params = self._blocked_queue_sql(queue_classes)
@@ -185,13 +217,13 @@ class FrontierObservability:
                               AND NOT blocked_domain_next_request
                               AND NOT blocked_host_backoff
                               AND NOT retry_quarantine
-                        ) AS ready,
+                        ) AS runnable,
                         COUNT(DISTINCT domain) FILTER (
                             WHERE NOT blocked_next_fetch
                               AND NOT blocked_domain_next_request
                               AND NOT blocked_host_backoff
                               AND NOT retry_quarantine
-                        ) AS ready_domains,
+                        ) AS runnable_domains,
                         MIN(ready_at) AS next_ready_at,
                         COUNT(*) FILTER (WHERE blocked_next_fetch) AS blocked_next_fetch,
                         COUNT(*) FILTER (WHERE blocked_domain_next_request) AS blocked_domain_next_request,
@@ -213,14 +245,14 @@ class FrontierObservability:
                               AND NOT retry_quarantine
                               AND NOT blocked_domain_next_request
                               AND NOT blocked_next_fetch
-                        ) AS state_ready
+                        ) AS state_runnable
                     FROM readiness_entries""",
                 (*blocked_queue_params, now, now, now),
             )
             (
                 pending,
-                ready,
-                ready_domains,
+                runnable,
+                runnable_domains,
                 next_ready_at,
                 blocked_next_fetch,
                 blocked_domain_next_request,
@@ -228,13 +260,13 @@ class FrontierObservability:
                 retry_quarantine,
                 state_blocked_domain_next_request,
                 state_scheduled,
-                state_ready,
+                state_runnable,
             ) = cur.fetchone()
-        return FrontierReadiness(
+        return SchedulerReadiness(
             pending=pending or 0,
-            ready=ready or 0,
-            ready_domains=ready_domains or 0,
-            next_ready_delay=None if next_ready_at is None else max(0.0, next_ready_at - now),
+            runnable=runnable or 0,
+            runnable_domains=runnable_domains or 0,
+            next_runnable_delay=None if next_ready_at is None else max(0.0, next_ready_at - now),
             blocked={
                 "next_fetch_at": blocked_next_fetch or 0,
                 "domain_next_request": blocked_domain_next_request or 0,
@@ -242,7 +274,7 @@ class FrontierObservability:
                 "retry_quarantine": retry_quarantine or 0,
             },
             state_counts={
-                "ready": state_ready or 0,
+                "runnable": state_runnable or 0,
                 "scheduled": state_scheduled or 0,
                 "blocked_domain_next_request": state_blocked_domain_next_request or 0,
                 "blocked_host_backoff": blocked_host_backoff or 0,

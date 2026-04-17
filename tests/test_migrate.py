@@ -6,7 +6,15 @@ import psycopg2
 import pytest
 
 from crawler.migrate import apply_migrations
-from crawler.url_ledger import URL_LEDGER_TABLE
+from crawler.url_ledger import (
+    BLOCKED_DOMAIN_BACKOFF_TABLE,
+    LEASE_TABLE,
+    QUEUE_BACKLOG,
+    QUEUE_EXPLORATION,
+    QUEUE_RECRAWL,
+    QUEUE_TABLE_BY_CLASS,
+    URL_LEDGER_TABLE,
+)
 
 pytestmark = pytest.mark.skipif(
     not os.environ.get("TEST_POSTGRES_DSN"),
@@ -15,17 +23,24 @@ pytestmark = pytest.mark.skipif(
 
 
 def _reset_schema(dsn: str) -> None:
+    frontline_table = QUEUE_TABLE_BY_CLASS[QUEUE_EXPLORATION]
+    deferred_table = QUEUE_TABLE_BY_CLASS[QUEUE_BACKLOG]
+    refresh_table = QUEUE_TABLE_BY_CLASS[QUEUE_RECRAWL]
     conn = psycopg2.connect(dsn)
     conn.autocommit = False
     try:
         with conn.cursor() as cur:
             cur.execute("DROP TABLE IF EXISTS public.schema_migrations")
             cur.execute("DROP TABLE IF EXISTS public.domain_state")
+            cur.execute(f"DROP TABLE IF EXISTS public.{frontline_table}")
+            cur.execute(f"DROP TABLE IF EXISTS public.{deferred_table}")
+            cur.execute(f"DROP TABLE IF EXISTS public.{refresh_table}")
+            cur.execute(f"DROP TABLE IF EXISTS public.{BLOCKED_DOMAIN_BACKOFF_TABLE}")
             cur.execute("DROP TABLE IF EXISTS public.frontier_queue_exploration")
             cur.execute("DROP TABLE IF EXISTS public.frontier_queue_backlog")
             cur.execute("DROP TABLE IF EXISTS public.frontier_queue_recrawl")
             cur.execute("DROP TABLE IF EXISTS public.frontier_queue_blocked_domain_backoff")
-            cur.execute("DROP TABLE IF EXISTS public.active_leases")
+            cur.execute(f"DROP TABLE IF EXISTS public.{LEASE_TABLE}")
             cur.execute("DROP TABLE IF EXISTS public.frontier_lease_active")
             cur.execute(f"DROP TABLE IF EXISTS public.{URL_LEDGER_TABLE}")
             cur.execute("DROP TABLE IF EXISTS public.crawler_runtime_stats")
@@ -68,23 +83,25 @@ def test_apply_migrations_creates_expected_tables(migrated_dsn):
         "019_drop_frontier_archetype.sql",
         "020_rename_frontier_to_url_ledger.sql",
         "021_drop_depth_columns.sql",
+        "022_drop_url_ledger_lease_columns.sql",
+        "023_rename_frontier_queue_tables.sql",
     ]
 
     conn = psycopg2.connect(migrated_dsn)
     try:
         with conn.cursor() as cur:
             cur.execute(
-                """
+                f"""
                 SELECT to_regclass('public.pages'),
                        to_regclass('public.url_ledger'),
                        to_regclass('public.domain_state'),
                        to_regclass('public.schema_migrations'),
                        to_regclass('public.crawler_runtime_stats'),
-                       to_regclass('public.frontier_queue_exploration'),
-                       to_regclass('public.frontier_queue_backlog'),
-                       to_regclass('public.frontier_queue_recrawl'),
-                       to_regclass('public.frontier_queue_blocked_domain_backoff'),
-                       to_regclass('public.active_leases')
+                       to_regclass('public.{QUEUE_TABLE_BY_CLASS[QUEUE_EXPLORATION]}'),
+                       to_regclass('public.{QUEUE_TABLE_BY_CLASS[QUEUE_BACKLOG]}'),
+                       to_regclass('public.{QUEUE_TABLE_BY_CLASS[QUEUE_RECRAWL]}'),
+                       to_regclass('public.{BLOCKED_DOMAIN_BACKOFF_TABLE}'),
+                       to_regclass('public.{LEASE_TABLE}')
                 """
             )
             assert cur.fetchone() == (
@@ -93,11 +110,11 @@ def test_apply_migrations_creates_expected_tables(migrated_dsn):
                 "domain_state",
                 "schema_migrations",
                 "crawler_runtime_stats",
-                "frontier_queue_exploration",
-                "frontier_queue_backlog",
-                "frontier_queue_recrawl",
-                "frontier_queue_blocked_domain_backoff",
-                "active_leases",
+                QUEUE_TABLE_BY_CLASS[QUEUE_EXPLORATION],
+                QUEUE_TABLE_BY_CLASS[QUEUE_BACKLOG],
+                QUEUE_TABLE_BY_CLASS[QUEUE_RECRAWL],
+                BLOCKED_DOMAIN_BACKOFF_TABLE,
+                LEASE_TABLE,
             )
     finally:
         conn.close()
