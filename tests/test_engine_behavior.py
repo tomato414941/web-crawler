@@ -6,7 +6,14 @@ import pytest
 
 from crawler.core import Response
 from crawler.crawl import CrawlerEngine
-from crawler.url_ledger import CrawlTask
+from crawler.url_ledger import (
+    CrawlTask,
+    INTENT_EXPLORE,
+    INTENT_REFRESH,
+    RUNNABLE_SURFACE_DEFERRED,
+    RUNNABLE_SURFACE_FRONTLINE,
+    RUNNABLE_SURFACE_REFRESH,
+)
 
 
 class FakeLedger:
@@ -24,29 +31,20 @@ class FakeLedger:
         **kwargs: object,
     ):
         exclude_domains = set(kwargs.get("exclude_domains") or [])
-        queue_classes = list(kwargs.get("queue_classes") or [])
         runnable_surface = kwargs.get("runnable_surface")
-        if not queue_classes:
-            if runnable_surface == "frontline":
-                queue_classes = ["exploration"]
-            elif runnable_surface == "deferred":
-                queue_classes = ["backlog"]
-            elif runnable_surface == "refresh":
-                queue_classes = ["recrawl"]
         self.lease_calls.append(
             {
                 "lease_strategy": lease_strategy,
                 "runnable_surface": runnable_surface,
                 "exclude_domains": sorted(exclude_domains),
-                "queue_classes": queue_classes,
             }
         )
         for index, task in enumerate(self.tasks):
             domain = task.url.split('/')[2]
             if domain in exclude_domains:
                 continue
-            effective_queue = task.queue_class or "exploration"
-            if queue_classes and effective_queue not in queue_classes:
+            effective_surface = task.runnable_surface or RUNNABLE_SURFACE_FRONTLINE
+            if runnable_surface is not None and effective_surface != runnable_surface:
                 continue
             return self.tasks.pop(index)
         return None
@@ -54,20 +52,20 @@ class FakeLedger:
     def preview_tasks(self, tasks: list[CrawlTask]):
         prepared = []
         for task in tasks:
-            queue_class = task.queue_class
-            if queue_class is None:
-                if task.runnable_surface == "frontline":
-                    queue_class = "exploration"
-                elif task.runnable_surface == "refresh":
-                    queue_class = "recrawl"
+            runnable_surface = task.runnable_surface
+            if runnable_surface is None:
+                if task.intent == INTENT_REFRESH:
+                    runnable_surface = RUNNABLE_SURFACE_REFRESH
                 else:
-                    queue_class = "backlog"
+                    runnable_surface = RUNNABLE_SURFACE_DEFERRED
+            intent = task.intent
+            if intent is None:
+                intent = INTENT_REFRESH if runnable_surface == RUNNABLE_SURFACE_REFRESH else INTENT_EXPLORE
             prepared.append(CrawlTask(
                 url=task.url,
                 priority=task.priority,
-                queue_class=queue_class,
-                runnable_surface=task.runnable_surface,
-                intent=task.intent,
+                runnable_surface=runnable_surface,
+                intent=intent,
                 source_url=task.source_url,
                 added_at=task.added_at,
                 next_fetch_at=task.next_fetch_at,
@@ -422,13 +420,15 @@ async def test_crawler_assigns_discovery_metadata_to_outlinks():
     assert by_url["https://docs.example.com/guide"].priority > by_url[
         "https://external.example.net/project"
     ].priority
-    assert by_url["https://docs.example.com/guide"].queue_class == "backlog"
-    assert by_url["https://external.example.net/project"].queue_class == "backlog"
+    assert by_url["https://docs.example.com/guide"].runnable_surface == RUNNABLE_SURFACE_DEFERRED
+    assert by_url["https://docs.example.com/guide"].intent == INTENT_EXPLORE
+    assert by_url["https://external.example.net/project"].runnable_surface == RUNNABLE_SURFACE_DEFERRED
+    assert by_url["https://external.example.net/project"].intent == INTENT_EXPLORE
 
 
 @pytest.mark.asyncio
 @pytest.mark.asyncio
-async def test_crawler_assigns_known_hosts_to_backlog_queue():
+async def test_crawler_assigns_known_hosts_to_deferred_surface():
     ledger = FakeLedger(
         [CrawlTask(url="https://example.com/")],
         known_counts={"example.com": 8},
@@ -456,7 +456,8 @@ async def test_crawler_assigns_known_hosts_to_backlog_queue():
         await engine.crawl()
 
     added = ledger.added_batches[0]
-    assert added[0].queue_class == "backlog"
+    assert added[0].runnable_surface == RUNNABLE_SURFACE_DEFERRED
+    assert added[0].intent == INTENT_EXPLORE
 
 
 
@@ -522,13 +523,11 @@ async def test_crawler_reserves_some_leases_for_breadth():
             "lease_strategy": "host_first",
             "runnable_surface": "frontline",
             "exclude_domains": [],
-            "queue_classes": ["exploration"],
         },
         {
             "lease_strategy": "host_first",
             "runnable_surface": "frontline",
             "exclude_domains": [],
-            "queue_classes": ["exploration"],
         },
     ]
 
@@ -623,7 +622,9 @@ async def test_crawler_allows_second_inflight_for_fast_host_budget():
 
 @pytest.mark.asyncio
 async def test_crawler_splits_worker_pools_by_surface():
-    ledger = FakeLedger([CrawlTask(url="https://example.com/page", queue_class="exploration")])
+    ledger = FakeLedger(
+        [CrawlTask(url="https://example.com/page", runnable_surface=RUNNABLE_SURFACE_FRONTLINE, intent=INTENT_EXPLORE)]
+    )
     domain_manager = FakeDomainManager()
     fetcher = FakeFetcher([
         Response(url="https://example.com/page", status=200, content=b"<html></html>", headers={}),

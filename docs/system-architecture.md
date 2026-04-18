@@ -2,7 +2,7 @@
 
 This document sits between the idealized crawler model and the eventual runtime implementation.
 
-It is broader than [crawler-principles.md](/home/dev/projects/web-crawler/docs/crawler-principles.md),
+It is broader than [crawler-concepts.md](/home/dev/projects/web-crawler/docs/crawler-concepts.md),
 which defines the ideal principles, and broader than
 [scheduler-state-model.md](/home/dev/projects/web-crawler/docs/scheduler-state-model.md), which focuses on scheduler
 source-of-truth boundaries.

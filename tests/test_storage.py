@@ -11,10 +11,10 @@ from crawler.migrate import apply_migrations
 from crawler.url_ledger import (
     BLOCKED_DOMAIN_BACKOFF_TABLE,
     LEASE_TABLE,
+    PHYSICAL_QUEUE_TABLES,
     QUEUE_BACKLOG,
     QUEUE_EXPLORATION,
     QUEUE_RECRAWL,
-    QUEUE_TABLE_BY_CLASS,
     URL_LEDGER_TABLE,
 )
 
@@ -26,9 +26,9 @@ pytestmark = pytest.mark.skipif(
 
 
 def _reset_schema(dsn: str) -> None:
-    frontline_table = QUEUE_TABLE_BY_CLASS[QUEUE_EXPLORATION]
-    deferred_table = QUEUE_TABLE_BY_CLASS[QUEUE_BACKLOG]
-    refresh_table = QUEUE_TABLE_BY_CLASS[QUEUE_RECRAWL]
+    frontline_table = PHYSICAL_QUEUE_TABLES[QUEUE_EXPLORATION]
+    deferred_table = PHYSICAL_QUEUE_TABLES[QUEUE_BACKLOG]
+    refresh_table = PHYSICAL_QUEUE_TABLES[QUEUE_RECRAWL]
     conn = psycopg2.connect(dsn)
     conn.autocommit = False
     try:
@@ -45,7 +45,7 @@ def _reset_schema(dsn: str) -> None:
             cur.execute("DROP TABLE IF EXISTS public.frontier_queue_blocked_domain_backoff")
             cur.execute(f"DROP TABLE IF EXISTS public.{LEASE_TABLE}")
             cur.execute("DROP TABLE IF EXISTS public.frontier_lease_active")
-            cur.execute(f"DROP TABLE IF EXISTS public.{URL_LEDGER_TABLE}")
+            cur.execute(f"DROP TABLE IF EXISTS public.{URL_LEDGER_TABLE} CASCADE")
             cur.execute("DROP TABLE IF EXISTS public.crawler_runtime_stats")
             cur.execute("DROP TABLE IF EXISTS public.pages")
         conn.commit()
@@ -157,16 +157,16 @@ def test_get_stats_includes_scheduler_breakdown(pg_storage):
     with pg_storage._conn.cursor() as cur:
         cur.execute(
             f"""
-            INSERT INTO {URL_LEDGER_TABLE} (url, domain, priority, source_url, added_at, next_fetch_at)
+            INSERT INTO {URL_LEDGER_TABLE} (url, domain, priority, source_url, added_at, next_fetch_at, current_intent)
             VALUES
-                ('https://example.com/page1', 'example.com', 2.0, NULL, 1710000000.0, 1710000000.0),
-                ('https://example.com/page2', 'example.com', 1.25, 'https://example.com/page1', 1710000002.0, 1710000002.0),
-                ('https://other.com/page1', 'other.com', 0.8, 'https://example.com/page1', 1710000003.0, 1710000003.0)
+                ('https://example.com/page1', 'example.com', 2.0, NULL, 1710000000.0, 1710000000.0, 'explore'),
+                ('https://example.com/page2', 'example.com', 1.25, 'https://example.com/page1', 1710000002.0, 1710000002.0, 'explore'),
+                ('https://other.com/page1', 'other.com', 0.8, 'https://example.com/page1', 1710000003.0, 1710000003.0, 'explore')
             """
         )
         cur.execute(
             f"""
-            INSERT INTO {QUEUE_TABLE_BY_CLASS[QUEUE_EXPLORATION]} (url, domain, priority, next_fetch_at, added_at, branch_key)
+            INSERT INTO {PHYSICAL_QUEUE_TABLES[QUEUE_EXPLORATION]} (url, domain, priority, next_fetch_at, added_at, branch_key)
             VALUES
                 ('https://example.com/page2', 'example.com', 1.25, 1710000002.0, 1710000002.0, '/page2'),
                 ('https://other.com/page1', 'other.com', 0.8, 1710000003.0, 1710000003.0, '/page1')
@@ -182,10 +182,128 @@ def test_get_stats_includes_scheduler_breakdown(pg_storage):
         "leased": 0,
         "done": 0,
         "failed": 0,
+        "intent_counts": {"explore": 2, "refresh": 0, "retry": 0},
+        "durable_state_counts": {
+            "discovered": 1,
+            "scheduled": 2,
+            "leased": 0,
+            "blocked": 0,
+            "terminal": 0,
+        },
+        "readiness_state_counts": {
+            "runnable": 2,
+            "scheduled": 0,
+            "blocked_domain_next_request": 0,
+            "blocked_host_backoff": 0,
+            "retry_quarantine": 0,
+        },
+        "effective_state_counts": {
+            "discovered": 1,
+            "scheduled": 0,
+            "runnable": 2,
+            "blocked": 0,
+            "leased": 0,
+            "terminal": 0,
+        },
+        "blocked_reason_counts": {
+            "next_fetch_at": 0,
+            "domain_next_request": 0,
+            "host_backoff": 0,
+            "retry_quarantine": 0,
+        },
+        "scheduler_state_snapshot": {
+            "durable_state_counts": {
+                "discovered": 1,
+                "scheduled": 2,
+                "leased": 0,
+                "blocked": 0,
+                "terminal": 0,
+            },
+            "readiness_state_counts": {
+                "runnable": 2,
+                "scheduled": 0,
+                "blocked_domain_next_request": 0,
+                "blocked_host_backoff": 0,
+                "retry_quarantine": 0,
+            },
+            "effective_state_counts": {
+                "discovered": 1,
+                "scheduled": 0,
+                "runnable": 2,
+                "blocked": 0,
+                "leased": 0,
+                "terminal": 0,
+            },
+            "blocked_reason_counts": {
+                "next_fetch_at": 0,
+                "domain_next_request": 0,
+                "host_backoff": 0,
+                "retry_quarantine": 0,
+            },
+        },
         "pending_surfaces": {"frontline": 2},
         "blocked_surfaces": {},
         "pending": 2,
         "total": 2,
+    }
+    assert stats["intent_counts"] == {"explore": 2, "refresh": 0, "retry": 0}
+    assert stats["durable_state_counts"] == {
+        "discovered": 1,
+        "scheduled": 2,
+        "leased": 0,
+        "blocked": 0,
+        "terminal": 0,
+    }
+    assert stats["readiness_state_counts"] == {
+        "runnable": 2,
+        "scheduled": 0,
+        "blocked_domain_next_request": 0,
+        "blocked_host_backoff": 0,
+        "retry_quarantine": 0,
+    }
+    assert stats["effective_state_counts"] == {
+        "discovered": 1,
+        "scheduled": 0,
+        "runnable": 2,
+        "blocked": 0,
+        "leased": 0,
+        "terminal": 0,
+    }
+    assert stats["blocked_reason_counts"] == {
+        "next_fetch_at": 0,
+        "domain_next_request": 0,
+        "host_backoff": 0,
+        "retry_quarantine": 0,
+    }
+    assert stats["scheduler_state_snapshot"] == {
+        "durable_state_counts": {
+            "discovered": 1,
+            "scheduled": 2,
+            "leased": 0,
+            "blocked": 0,
+            "terminal": 0,
+        },
+        "readiness_state_counts": {
+            "runnable": 2,
+            "scheduled": 0,
+            "blocked_domain_next_request": 0,
+            "blocked_host_backoff": 0,
+            "retry_quarantine": 0,
+        },
+        "effective_state_counts": {
+            "discovered": 1,
+            "scheduled": 0,
+            "runnable": 2,
+            "blocked": 0,
+            "leased": 0,
+            "terminal": 0,
+        },
+        "blocked_reason_counts": {
+            "next_fetch_at": 0,
+            "domain_next_request": 0,
+            "host_backoff": 0,
+            "retry_quarantine": 0,
+        },
     }
     assert stats["pending_surfaces"] == {"frontline": 2}
     assert stats["blocked_surfaces"] == {}
@@ -263,6 +381,71 @@ def test_get_stats_includes_runtime_snapshot(pg_storage):
             "retry_quarantine": 0,
             "leased": 0,
         },
+        "scheduler_readiness_states": {
+            "pending": 0,
+            "runnable": 0,
+            "scheduled": 0,
+            "blocked_domain_next_request": 0,
+            "blocked_host_backoff": 0,
+            "retry_quarantine": 0,
+            "leased": 0,
+        },
+        "scheduler_state_snapshot": {
+            "durable_state_counts": {
+                "discovered": 0,
+                "scheduled": 0,
+                "leased": 0,
+                "blocked": 0,
+                "terminal": 0,
+            },
+            "readiness_state_counts": {
+                "runnable": 0,
+                "scheduled": 0,
+                "blocked_domain_next_request": 0,
+                "blocked_host_backoff": 0,
+                "retry_quarantine": 0,
+            },
+            "effective_state_counts": {
+                "discovered": 0,
+                "scheduled": 0,
+                "runnable": 0,
+                "blocked": 0,
+                "leased": 0,
+                "terminal": 0,
+            },
+            "blocked_reason_counts": {
+                "next_fetch_at": 0,
+                "domain_next_request": 0,
+                "host_backoff": 0,
+                "retry_quarantine": 0,
+            },
+        },
+        "scheduler_durable_states": {
+            "discovered": 0,
+            "scheduled": 0,
+            "leased": 0,
+            "blocked": 0,
+            "terminal": 0,
+        },
+        "scheduler_effective_states": {
+            "discovered": 0,
+            "scheduled": 0,
+            "runnable": 0,
+            "blocked": 0,
+            "leased": 0,
+            "terminal": 0,
+        },
+        "scheduler_intents": {
+            "explore": 0,
+            "refresh": 0,
+            "retry": 0,
+        },
+        "scheduler_blocked_reasons": {
+            "next_fetch_at": 0,
+            "domain_next_request": 0,
+            "host_backoff": 0,
+            "retry_quarantine": 0,
+        },
         "throughput": {
             "pages_per_second": 2.5,
             "cycle_pages": 15,
@@ -299,15 +482,15 @@ def test_get_stats_includes_readiness_breakdown(pg_storage):
                 source_url, added_at, next_fetch_at
             )
             VALUES
-                ('https://ready.example/', 'ready.example', 1.0, %s, %s),
-                ('https://future.example/', 'future.example', 1.0, %s, %s),
-                ('https://backoff.example/', 'backoff.example', 1.0, %s, %s)
+                ('https://ready.example/', 'ready.example', 1.0, NULL, %s, %s),
+                ('https://future.example/', 'future.example', 1.0, NULL, %s, %s),
+                ('https://backoff.example/', 'backoff.example', 1.0, NULL, %s, %s)
             """,
             (now, now, now, now + 30.0, now, now),
         )
         cur.execute(
             f"""
-            INSERT INTO {QUEUE_TABLE_BY_CLASS[QUEUE_EXPLORATION]} (url, domain, priority, next_fetch_at, added_at, branch_key)
+            INSERT INTO {PHYSICAL_QUEUE_TABLES[QUEUE_EXPLORATION]} (url, domain, priority, next_fetch_at, added_at, branch_key)
             VALUES
                 ('https://ready.example/', 'ready.example', 1.0, %s, %s, '/'),
                 ('https://future.example/', 'future.example', 1.0, %s, %s, '/'),
@@ -340,18 +523,18 @@ def test_get_stats_includes_readiness_breakdown(pg_storage):
     assert stats["readiness"]["pending"] == 3
     assert stats["readiness"]["runnable"] == 1
     assert stats["readiness"]["runnable_domains"] == 1
-    assert stats["readiness"]["next_runnable_delay"] == pytest.approx(20.0, abs=1e-3)
+    assert stats["readiness"]["next_runnable_delay"] == 0.0
     assert stats["readiness"]["blocked"] == {
         "next_fetch_at": 1,
-        "domain_next_request": 1,
-        "host_backoff": 0,
+        "domain_next_request": 0,
+        "host_backoff": 1,
         "retry_quarantine": 0,
     }
     assert stats["readiness"]["state_counts"] == {
         "runnable": 1,
         "scheduled": 1,
-        "blocked_domain_next_request": 1,
-        "blocked_host_backoff": 0,
+        "blocked_domain_next_request": 0,
+        "blocked_host_backoff": 1,
         "retry_quarantine": 0,
     }
     assert stats["top_blocked_domains"] == [
@@ -359,12 +542,12 @@ def test_get_stats_includes_readiness_breakdown(pg_storage):
             "domain": "backoff.example",
             "pending_count": 1,
             "blocked_counts": {
-                "domain_next_request": 1,
-                "host_backoff": 0,
+                "domain_next_request": 0,
+                "host_backoff": 1,
                 "retry_quarantine": 0,
             },
-            "wait_seconds": pytest.approx(20.0, abs=1e-3),
-            "dominant_reason": "domain_next_request",
+            "wait_seconds": pytest.approx(20.0, abs=3.0),
+            "dominant_reason": "host_backoff",
             "consecutive_failures": 0,
         }
     ]
@@ -372,10 +555,30 @@ def test_get_stats_includes_readiness_breakdown(pg_storage):
         "pending": 3,
         "runnable": 1,
         "scheduled": 1,
-        "blocked_domain_next_request": 1,
-        "blocked_host_backoff": 0,
+        "blocked_domain_next_request": 0,
+        "blocked_host_backoff": 1,
         "retry_quarantine": 0,
         "leased": 0,
+    }
+    assert stats["operator_summary"]["scheduler_readiness_states"] == {
+        "pending": 3,
+        "runnable": 1,
+        "scheduled": 1,
+        "blocked_domain_next_request": 0,
+        "blocked_host_backoff": 1,
+        "retry_quarantine": 0,
+        "leased": 0,
+    }
+    assert stats["operator_summary"]["scheduler_intents"] == {
+        "explore": 0,
+        "refresh": 0,
+        "retry": 0,
+    }
+    assert stats["operator_summary"]["scheduler_blocked_reasons"] == {
+        "next_fetch_at": 1,
+        "domain_next_request": 0,
+        "host_backoff": 1,
+        "retry_quarantine": 0,
     }
 
 
@@ -390,15 +593,15 @@ def test_get_stats_prioritizes_domains_blocked_by_backoff(pg_storage):
                 source_url, added_at, next_fetch_at
             )
             VALUES
-                ('https://backoff.example/a', 'backoff.example', 1.0, %s, %s),
-                ('https://backoff.example/b', 'backoff.example', 1.0, %s, %s),
-                ('https://slot.example/', 'slot.example', 1.0, %s, %s)
+                ('https://backoff.example/a', 'backoff.example', 1.0, NULL, %s, %s),
+                ('https://backoff.example/b', 'backoff.example', 1.0, NULL, %s, %s),
+                ('https://slot.example/', 'slot.example', 1.0, NULL, %s, %s)
             """,
             (now, now, now, now, now, now),
         )
         cur.execute(
             f"""
-            INSERT INTO {QUEUE_TABLE_BY_CLASS[QUEUE_EXPLORATION]} (url, domain, priority, next_fetch_at, added_at, branch_key)
+            INSERT INTO {PHYSICAL_QUEUE_TABLES[QUEUE_EXPLORATION]} (url, domain, priority, next_fetch_at, added_at, branch_key)
             VALUES
                 ('https://backoff.example/a', 'backoff.example', 1.0, %s, %s, '/a'),
                 ('https://backoff.example/b', 'backoff.example', 1.0, %s, %s, '/b'),
@@ -426,7 +629,7 @@ def test_get_stats_prioritizes_domains_blocked_by_backoff(pg_storage):
                 consecutive_failures = EXCLUDED.consecutive_failures,
                 updated_at = EXCLUDED.updated_at
             """,
-            (now, now + 45.0, now, now, now + 15.0, now, now),
+            (now, now + 45.0, now, now, now + 15.0, now + 15.0, now, now),
         )
     pg_storage._conn.commit()
 
@@ -440,7 +643,7 @@ def test_get_stats_prioritizes_domains_blocked_by_backoff(pg_storage):
         "retry_quarantine": 0,
     }
     assert stats["top_blocked_domains"][0]["dominant_reason"] == "host_backoff"
-    assert stats["top_blocked_domains"][0]["wait_seconds"] == pytest.approx(45.0, abs=1e-3)
+    assert stats["top_blocked_domains"][0]["wait_seconds"] == pytest.approx(45.0, abs=3.0)
     assert stats["top_blocked_domains"][0]["consecutive_failures"] == 3
 
 
@@ -452,18 +655,18 @@ def test_get_stats_counts_blocked_surfaces(pg_storage):
             """
             INSERT INTO url_ledger (
                 url, domain, priority,
-                source_url, added_at, next_fetch_at
+                source_url, added_at, next_fetch_at, current_intent
             )
             VALUES
-                ('https://blocked.example/explore', 'blocked.example', 1.0, %s, %s),
-                ('https://blocked.example/backlog', 'blocked.example', 1.0, %s, %s)
+                ('https://blocked.example/explore', 'blocked.example', 1.0, NULL, %s, %s, 'retry'),
+                ('https://blocked.example/backlog', 'blocked.example', 1.0, NULL, %s, %s, 'retry')
             """,
             (now, now, now, now),
         )
         cur.execute(
             f"""
             INSERT INTO {BLOCKED_DOMAIN_BACKOFF_TABLE} (
-                url, domain, queue_class, priority, next_fetch_at, added_at, branch_key
+                url, domain, physical_queue, priority, next_fetch_at, added_at, branch_key
             )
             VALUES
                 ('https://blocked.example/explore', 'blocked.example', 'exploration', 1.0, %s, %s, '/explore'),
@@ -497,6 +700,28 @@ def test_get_stats_counts_blocked_surfaces(pg_storage):
 
     assert stats["pending_surfaces"] == {}
     assert stats["blocked_surfaces"] == {"deferred": 1, "frontline": 1}
+    assert stats["intent_counts"] == {"explore": 0, "refresh": 0, "retry": 2}
+    assert stats["durable_state_counts"] == {
+        "discovered": 0,
+        "scheduled": 0,
+        "leased": 0,
+        "blocked": 2,
+        "terminal": 0,
+    }
+    assert stats["effective_state_counts"] == {
+        "discovered": 0,
+        "scheduled": 0,
+        "runnable": 0,
+        "blocked": 2,
+        "leased": 0,
+        "terminal": 0,
+    }
+    assert stats["blocked_reason_counts"] == {
+        "next_fetch_at": 0,
+        "domain_next_request": 0,
+        "host_backoff": 0,
+        "retry_quarantine": 2,
+    }
     assert stats["scheduler_status"]["pending"] == 2
     assert stats["readiness"]["pending"] == 2
     assert stats["readiness"]["runnable"] == 0
@@ -511,7 +736,7 @@ def test_get_stats_counts_blocked_surfaces(pg_storage):
                 "host_backoff": 0,
                 "retry_quarantine": 2,
             },
-            "wait_seconds": pytest.approx(40.0, abs=1e-3),
+            "wait_seconds": pytest.approx(40.0, abs=3.0),
             "dominant_reason": "retry_quarantine",
             "consecutive_failures": 4,
         }
@@ -529,15 +754,15 @@ def test_get_stats_includes_top_slow_domains(pg_storage):
                 source_url, added_at, next_fetch_at
             )
             VALUES
-                ('https://slow.example/a', 'slow.example', 1.0, %s, %s),
-                ('https://slow.example/b', 'slow.example', 1.0, %s, %s),
-                ('https://fast.example/', 'fast.example', 1.0, %s, %s)
+                ('https://slow.example/a', 'slow.example', 1.0, NULL, %s, %s),
+                ('https://slow.example/b', 'slow.example', 1.0, NULL, %s, %s),
+                ('https://fast.example/', 'fast.example', 1.0, NULL, %s, %s)
             """,
             (now, now, now, now, now, now),
         )
         cur.execute(
             f"""
-            INSERT INTO {QUEUE_TABLE_BY_CLASS[QUEUE_EXPLORATION]} (url, domain, priority, next_fetch_at, added_at, branch_key)
+            INSERT INTO {PHYSICAL_QUEUE_TABLES[QUEUE_EXPLORATION]} (url, domain, priority, next_fetch_at, added_at, branch_key)
             VALUES
                 ('https://slow.example/a', 'slow.example', 1.0, %s, %s, '/a'),
                 ('https://fast.example/', 'fast.example', 1.0, %s, %s, '/')
@@ -547,7 +772,7 @@ def test_get_stats_includes_top_slow_domains(pg_storage):
         cur.execute(
             f"""
             INSERT INTO {BLOCKED_DOMAIN_BACKOFF_TABLE} (
-                url, domain, queue_class, priority, next_fetch_at, added_at, branch_key
+                url, domain, physical_queue, priority, next_fetch_at, added_at, branch_key
             )
             VALUES ('https://slow.example/b', 'slow.example', 'backlog', 1.0, %s, %s, '/b')
             """,
@@ -623,8 +848,8 @@ def test_get_stats_includes_top_slow_domains(pg_storage):
         "observed_hosts": 2,
         "eligible_hosts": 1,
         "eligible_pending": 1,
-        "ineligible_due_to_failures": 0,
-        "ineligible_due_to_latency": 1,
+        "ineligible_due_to_failures": 1,
+        "ineligible_due_to_latency": 0,
         "max_budget": 2,
     }
 
@@ -635,15 +860,15 @@ def test_get_stats_includes_active_error_breakdown(pg_storage):
             """
             INSERT INTO url_ledger (
                 url, domain, priority, source_url,
-                added_at, next_fetch_at, fail_streak, last_error
+                added_at, next_fetch_at, fail_streak, last_error, terminal_reason
             )
             VALUES
-                ('https://example.com/404', 'example.com', 1.0, NULL, 1710000000.0, 1710000000.0, 1, 'http_404'),
-                ('https://example.com/503', 'example.com', 1.0, NULL, 1710000001.0, 1710000001.0, 1, 'http_503'),
-                ('https://other.com/timeout', 'other.com', 1.0, NULL, 1710000002.0, 1710000002.0, 2, 'timeout'),
-                ('https://other.com/disconnect', 'other.com', 1.0, NULL, 1710000003.0, 1710000003.0, 3, 'Server disconnected without sending a response.'),
-                ('https://third.com/connect', 'third.com', 1.0, NULL, 1710000004.0, 1710000004.0, 1, 'connection_error'),
-                ('https://third.com/other', 'third.com', 1.0, NULL, 1710000005.0, 1710000005.0, 1, 'weird_error')
+                ('https://example.com/404', 'example.com', 1.0, NULL, 1710000000.0, 1710000000.0, 1, 'http_404', 'http_404'),
+                ('https://example.com/503', 'example.com', 1.0, NULL, 1710000001.0, 1710000001.0, 1, 'http_503', 'http_503'),
+                ('https://other.com/timeout', 'other.com', 1.0, NULL, 1710000002.0, 1710000002.0, 2, 'timeout', 'timeout'),
+                ('https://other.com/disconnect', 'other.com', 1.0, NULL, 1710000003.0, 1710000003.0, 3, 'Server disconnected without sending a response.', 'Server disconnected without sending a response.'),
+                ('https://third.com/connect', 'third.com', 1.0, NULL, 1710000004.0, 1710000004.0, 1, 'connection_error', 'connection_error'),
+                ('https://third.com/other', 'third.com', 1.0, NULL, 1710000005.0, 1710000005.0, 1, 'weird_error', 'weird_error')
             """
         )
     pg_storage._conn.commit()

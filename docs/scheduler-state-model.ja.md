@@ -2,7 +2,7 @@
 
 この文書は、将来のリファクタリングの指針となる practical な状態モデルを定義する。現在の実装をそのまま説明するものではないが、理想化された上位モデルをそのまま再掲するものでもない。クローラーが正しく scheduling 判断するために、どの状態を system 上の正本として持つべきかを示す。
 
-上位原則は [crawler-principles.ja.md](/home/dev/projects/web-crawler/docs/crawler-principles.ja.md) に置く。
+上位の概念整理は [crawler-concepts.ja.md](/home/dev/projects/web-crawler/docs/crawler-concepts.ja.md) に置く。
 
 この文書は、その原則へ近づくための transition/convergence model として読むべきである。
 

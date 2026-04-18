@@ -17,9 +17,9 @@ from .domain_manager import compute_host_budget
 from .url_ledger import (
     BLOCKED_DOMAIN_BACKOFF_TABLE,
     LEASE_TABLE,
-    QUEUE_CLASS_DEFAULT_RUNNABLE_SURFACE,
-    QUEUE_CLASS_ORDER,
-    QUEUE_TABLE_BY_CLASS,
+    PHYSICAL_QUEUE_DEFAULT_RUNNABLE_SURFACE,
+    PHYSICAL_QUEUE_ORDER,
+    PHYSICAL_QUEUE_TABLES,
     URL_LEDGER_TABLE,
 )
 from .scheduler_observability import SchedulerObservability
@@ -42,6 +42,7 @@ PAGES_REQUIRED_COLUMNS = {
 }
 URL_LEDGER_STATS_REQUIRED_COLUMNS = {
     "domain",
+    "current_intent",
     "last_error",
 }
 
@@ -64,31 +65,31 @@ def _sanitize_stored_content(content: object) -> str:
 
 def _pending_queue_sql() -> str:
     queue_union = "\n                        UNION ALL\n                        ".join(
-        f"SELECT '{queue_class}' AS queue_class, url, domain, next_fetch_at FROM public.{QUEUE_TABLE_BY_CLASS[queue_class]}"
-        for queue_class in QUEUE_CLASS_ORDER
+        f"SELECT '{physical_queue}' AS physical_queue, url, domain, next_fetch_at FROM public.{PHYSICAL_QUEUE_TABLES[physical_queue]}"
+        for physical_queue in PHYSICAL_QUEUE_ORDER
     )
-    return f"SELECT queue_class, url, domain, next_fetch_at FROM (\n                        {queue_union}\n                    ) AS pending_queue_rows"
+    return f"SELECT physical_queue, url, domain, next_fetch_at FROM (\n                        {queue_union}\n                    ) AS pending_queue_rows"
 
 
 def _retry_surface_sql() -> str:
     retry_union = "\n                               UNION\n                               ".join(
-        f"SELECT url FROM public.{QUEUE_TABLE_BY_CLASS[queue_class]}"
-        for queue_class in QUEUE_CLASS_ORDER
+        f"SELECT url FROM public.{PHYSICAL_QUEUE_TABLES[physical_queue]}"
+        for physical_queue in PHYSICAL_QUEUE_ORDER
     )
     return f"WITH retry_surface AS (\n                               {retry_union}\n                           )"
 
 
-def _queue_class_count_projection_sql(queue_class_expr: str) -> str:
+def _physical_queue_count_projection_sql(physical_queue_expr: str) -> str:
     return ",\n                                ".join(
-        f"COUNT(*) FILTER (WHERE {queue_class_expr} = '{queue_class}') AS queue_count_{index}"
-        for index, queue_class in enumerate(QUEUE_CLASS_ORDER)
+        f"COUNT(*) FILTER (WHERE {physical_queue_expr} = '{physical_queue}') AS queue_count_{index}"
+        for index, physical_queue in enumerate(PHYSICAL_QUEUE_ORDER)
     )
 
 
-def _surface_counts_from_queue_count_values(queue_count_values: tuple[int, ...]) -> dict[str, int]:
+def _surface_counts_from_physical_queue_count_values(queue_count_values: tuple[int, ...]) -> dict[str, int]:
     surface_counts: dict[str, int] = {}
-    for queue_class, count in zip(QUEUE_CLASS_ORDER, queue_count_values, strict=True):
-        surface = QUEUE_CLASS_DEFAULT_RUNNABLE_SURFACE[queue_class]
+    for physical_queue, count in zip(PHYSICAL_QUEUE_ORDER, queue_count_values, strict=True):
+        surface = PHYSICAL_QUEUE_DEFAULT_RUNNABLE_SURFACE[physical_queue]
         surface_counts[surface] = surface_counts.get(surface, 0) + int(count or 0)
     return surface_counts
 
@@ -96,31 +97,46 @@ def _surface_counts_from_queue_count_values(queue_count_values: tuple[int, ...])
 def _build_operator_summary(
     scheduler_status: Mapping[str, object],
     readiness: Mapping[str, object],
+    effective_state_counts: Mapping[str, int],
     runtime: Mapping[str, object],
     active_error_breakdown: Mapping[str, int],
     host_budget_summary: Mapping[str, object],
 ) -> dict[str, object]:
     """Build a compact operator-facing metrics surface from detailed stats."""
     runtime_payload = runtime.get("payload") if isinstance(runtime.get("payload"), Mapping) else {}
-    state_counts = readiness.get("state_counts") if isinstance(readiness.get("state_counts"), Mapping) else {}
+    scheduler_state_views = _scheduler_state_views(
+        scheduler_status=scheduler_status,
+        readiness=readiness,
+        effective_state_counts=effective_state_counts,
+    )
+    scheduler_state_snapshot = scheduler_state_views["scheduler_state_snapshot"]
+    state_counts = scheduler_state_views["readiness_state_counts"]
     cycle_errors = runtime_payload.get("errors")
     if not isinstance(cycle_errors, Mapping):
         cycle_errors = runtime_payload.get("failure_breakdown")
     if not isinstance(cycle_errors, Mapping):
         cycle_errors = active_error_breakdown
 
+    scheduler_readiness_states = {
+        "pending": int(readiness.get("pending", 0) or 0),
+        "runnable": int(state_counts.get("runnable", 0) or 0),
+        "scheduled": int(state_counts.get("scheduled", 0) or 0),
+        "blocked_domain_next_request": int(
+            state_counts.get("blocked_domain_next_request", 0) or 0
+        ),
+        "blocked_host_backoff": int(state_counts.get("blocked_host_backoff", 0) or 0),
+        "retry_quarantine": int(state_counts.get("retry_quarantine", 0) or 0),
+        "leased": int(scheduler_status.get("leased", 0) or 0),
+    }
+
     return {
-        "scheduler_state": {
-            "pending": int(readiness.get("pending", 0) or 0),
-            "runnable": int(state_counts.get("runnable", 0) or 0),
-            "scheduled": int(state_counts.get("scheduled", 0) or 0),
-            "blocked_domain_next_request": int(
-                state_counts.get("blocked_domain_next_request", 0) or 0
-            ),
-            "blocked_host_backoff": int(state_counts.get("blocked_host_backoff", 0) or 0),
-            "retry_quarantine": int(state_counts.get("retry_quarantine", 0) or 0),
-            "leased": int(scheduler_status.get("leased", 0) or 0),
-        },
+        "scheduler_state": dict(scheduler_readiness_states),
+        "scheduler_readiness_states": dict(scheduler_readiness_states),
+        "scheduler_state_snapshot": dict(scheduler_state_snapshot),
+        "scheduler_durable_states": dict(scheduler_state_views["durable_state_counts"]),
+        "scheduler_effective_states": dict(scheduler_state_views["effective_state_counts"]),
+        "scheduler_intents": dict(scheduler_status.get("intent_counts", {})),
+        "scheduler_blocked_reasons": dict(scheduler_state_views["blocked_reason_counts"]),
         "throughput": {
             "pages_per_second": runtime_payload.get("pages_per_second"),
             "cycle_pages": runtime_payload.get("pages"),
@@ -147,6 +163,55 @@ def _build_operator_summary(
             ),
             "max_budget": int(host_budget_summary.get("max_budget", 0) or 0),
         },
+    }
+
+
+def _scheduler_state_views(
+    *,
+    scheduler_status: Mapping[str, object],
+    readiness: Mapping[str, object],
+    effective_state_counts: Mapping[str, int],
+) -> dict[str, dict[str, int]]:
+    """Resolve scheduler-facing state aliases from the canonical state snapshot first."""
+    scheduler_state_snapshot = (
+        scheduler_status.get("scheduler_state_snapshot")
+        if isinstance(scheduler_status.get("scheduler_state_snapshot"), Mapping)
+        else {}
+    )
+    durable_state_counts = (
+        scheduler_state_snapshot.get("durable_state_counts")
+        if isinstance(scheduler_state_snapshot.get("durable_state_counts"), Mapping)
+        else scheduler_status.get("durable_state_counts")
+        if isinstance(scheduler_status.get("durable_state_counts"), Mapping)
+        else {}
+    )
+    readiness_state_counts = (
+        scheduler_state_snapshot.get("readiness_state_counts")
+        if isinstance(scheduler_state_snapshot.get("readiness_state_counts"), Mapping)
+        else scheduler_status.get("readiness_state_counts")
+        if isinstance(scheduler_status.get("readiness_state_counts"), Mapping)
+        else readiness.get("state_counts")
+        if isinstance(readiness.get("state_counts"), Mapping)
+        else {}
+    )
+    effective_state_counts_view = (
+        scheduler_state_snapshot.get("effective_state_counts")
+        if isinstance(scheduler_state_snapshot.get("effective_state_counts"), Mapping)
+        else effective_state_counts
+    )
+    blocked_reason_counts = (
+        scheduler_state_snapshot.get("blocked_reason_counts")
+        if isinstance(scheduler_state_snapshot.get("blocked_reason_counts"), Mapping)
+        else scheduler_status.get("blocked_reason_counts")
+        if isinstance(scheduler_status.get("blocked_reason_counts"), Mapping)
+        else {}
+    )
+    return {
+        "scheduler_state_snapshot": dict(scheduler_state_snapshot),
+        "durable_state_counts": dict(durable_state_counts),
+        "readiness_state_counts": dict(readiness_state_counts),
+        "effective_state_counts": dict(effective_state_counts_view),
+        "blocked_reason_counts": dict(blocked_reason_counts),
     }
 
 
@@ -363,9 +428,10 @@ class PgStorage:
                 top_error_domains: list[dict[str, object]] = []
                 runtime: dict[str, object] = {}
                 operator_summary: dict[str, object] = {}
+                effective_state_counts: dict[str, int] = {}
                 host_budget_summary: dict[str, object] = {}
                 pending_queue_sql = _pending_queue_sql()
-                blocked_queue_sql = f"""SELECT queue_class, url, domain, next_fetch_at
+                blocked_queue_sql = f"""SELECT physical_queue, url, domain, next_fetch_at
                     FROM public.{BLOCKED_DOMAIN_BACKOFF_TABLE}"""
                 cur.execute("SELECT to_regclass('public.crawler_runtime_stats')")
                 runtime_exists = cur.fetchone()[0] is not None
@@ -389,9 +455,9 @@ class PgStorage:
 
                     observability = SchedulerObservability(
                         self._conn,
-                        queue_table_by_class=QUEUE_TABLE_BY_CLASS,
-                        queue_class_order=QUEUE_CLASS_ORDER,
-                        queue_class_default_runnable_surface=QUEUE_CLASS_DEFAULT_RUNNABLE_SURFACE,
+                        physical_queue_tables=PHYSICAL_QUEUE_TABLES,
+                        physical_queue_order=PHYSICAL_QUEUE_ORDER,
+                        physical_queue_default_runnable_surface=PHYSICAL_QUEUE_DEFAULT_RUNNABLE_SURFACE,
                         blocked_queue_table=BLOCKED_DOMAIN_BACKOFF_TABLE,
                         lease_table=LEASE_TABLE,
                     )
@@ -419,15 +485,18 @@ class PgStorage:
                         "runnable_domains": readiness_snapshot.runnable_domains,
                         "next_runnable_delay": readiness_snapshot.next_runnable_delay,
                         "blocked": dict(readiness_snapshot.blocked),
-                        "state_counts": dict(readiness_snapshot.state_counts),
+                        "state_counts": dict(
+                            scheduler_status.get("readiness_state_counts", readiness_snapshot.state_counts)
+                        ),
                     }
+                    effective_state_counts = dict(scheduler_status.get("effective_state_counts", {}))
 
                     cur.execute(
                         f"""WITH pending_entries AS (
-                                SELECT queue_class, url, domain, next_fetch_at, FALSE AS forced_retry_quarantine
+                                SELECT physical_queue, url, domain, next_fetch_at, FALSE AS forced_retry_quarantine
                                 FROM ({pending_queue_sql}) AS pending_queue_rows
                                 UNION ALL
-                                SELECT queue_class, url, domain, next_fetch_at, TRUE AS forced_retry_quarantine
+                                SELECT physical_queue, url, domain, next_fetch_at, TRUE AS forced_retry_quarantine
                                 FROM ({blocked_queue_sql}) AS blocked_queue_rows
                             )
                             SELECT
@@ -517,10 +586,10 @@ class PgStorage:
 
                     cur.execute(
                         f"""WITH pending_entries AS (
-                                SELECT queue_class, url, domain
+                                SELECT physical_queue, url, domain
                                 FROM ({pending_queue_sql}) AS pending_queue_rows
                                 UNION ALL
-                                SELECT queue_class, url, domain
+                                SELECT physical_queue, url, domain
                                 FROM ({blocked_queue_sql}) AS blocked_queue_rows
                             )
                             SELECT
@@ -528,7 +597,7 @@ class PgStorage:
                                 COUNT(*) AS pending_count,
                                 MAX(COALESCE(domain_state.latency_ewma_ms, 0)) AS latency_ewma_ms,
                                 COALESCE(MAX(domain_state.consecutive_failures), 0) AS consecutive_failures,
-                                {_queue_class_count_projection_sql("pending_entries.queue_class")}
+                                {_physical_queue_count_projection_sql("pending_entries.physical_queue")}
                             FROM pending_entries
                             JOIN public.domain_state ON domain_state.host_key = pending_entries.domain
                             WHERE COALESCE(domain_state.latency_ewma_ms, 0) > 0
@@ -548,7 +617,7 @@ class PgStorage:
                                 "pending_count": pending_count,
                                 "latency_ewma_ms": round(latency_ewma_ms, 1),
                                 "consecutive_failures": consecutive_failures,
-                                "surface_counts": _surface_counts_from_queue_count_values(tuple(queue_count_values)),
+                                "surface_counts": _surface_counts_from_physical_queue_count_values(tuple(queue_count_values)),
                             }
                         )
                     elevated_budget_domains = []
@@ -650,11 +719,17 @@ class PgStorage:
         operator_summary = _build_operator_summary(
             scheduler_status=scheduler_status,
             readiness=readiness,
+            effective_state_counts=effective_state_counts,
             runtime=runtime,
             active_error_breakdown=active_error_breakdown,
             host_budget_summary=host_budget_summary,
         )
 
+        scheduler_state_views = _scheduler_state_views(
+            scheduler_status=scheduler_status,
+            readiness=readiness,
+            effective_state_counts=effective_state_counts,
+        )
         return {
             "total_pages": row[0],
             "domains": row[1],
@@ -662,6 +737,12 @@ class PgStorage:
             "newest_crawl": row[3],
             "total_bytes": row[4],
             "scheduler_status": scheduler_status,
+            "scheduler_state_snapshot": dict(scheduler_state_views["scheduler_state_snapshot"]),
+            "intent_counts": dict(scheduler_status.get("intent_counts", {})),
+            "durable_state_counts": dict(scheduler_state_views["durable_state_counts"]),
+            "readiness_state_counts": dict(scheduler_state_views["readiness_state_counts"]),
+            "effective_state_counts": dict(scheduler_state_views["effective_state_counts"]),
+            "blocked_reason_counts": dict(scheduler_state_views["blocked_reason_counts"]),
             "pending_surfaces": pending_surfaces,
             "blocked_surfaces": blocked_surfaces,
             "readiness": readiness,

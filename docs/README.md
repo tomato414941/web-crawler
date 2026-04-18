@@ -5,8 +5,8 @@ runtime overview.
 
 - [README.md](/home/dev/projects/web-crawler/README.md) — current project overview, runtime model, current queue stages, CLI/API usage, and deployment notes
 - [plan.md](/home/dev/projects/web-crawler/plan.md) — target architecture, migration phases, and the current gap between runtime and target design
-- [crawler-principles.md](/home/dev/projects/web-crawler/docs/crawler-principles.md) — abstract WWW crawler principles, state-vs-intent separation, and naming guidance
-- [crawler-principles.ja.md](/home/dev/projects/web-crawler/docs/crawler-principles.ja.md) — 抽象的な WWW crawler の原則、state と intent の分離、命名指針
+- [crawler-concepts.md](/home/dev/projects/web-crawler/docs/crawler-concepts.md) — abstract WWW crawler concepts, state-vs-intent separation, and naming guidance
+- [crawler-concepts.ja.md](/home/dev/projects/web-crawler/docs/crawler-concepts.ja.md) — 抽象的な WWW crawler の概念整理、state と intent の分離、命名指針
 - [system-architecture.md](/home/dev/projects/web-crawler/docs/system-architecture.md) — project-wide system decomposition between ideal principles and runtime implementation
 - [system-architecture.ja.md](/home/dev/projects/web-crawler/docs/system-architecture.ja.md) — ideal principles と runtime 実装の間で project 全体をどう分解して捉えるか
 - [discovered-representation.md](/home/dev/projects/web-crawler/docs/discovered-representation.md) — representation of `discovered` between durable ledger, scheduler membership, and operational admission surfaces

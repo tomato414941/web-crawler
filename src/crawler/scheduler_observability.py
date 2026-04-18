@@ -30,67 +30,234 @@ class SchedulerObservability:
         self,
         conn,
         *,
-        queue_table_by_class: dict[str, str],
-        queue_class_order: tuple[str, ...],
-        queue_class_default_runnable_surface: dict[str, str],
+        physical_queue_tables: dict[str, str],
+        physical_queue_order: tuple[str, ...],
+        physical_queue_default_runnable_surface: dict[str, str],
         blocked_queue_table: str,
         lease_table: str,
     ):
         self._conn = conn
-        self._queue_table_by_class = queue_table_by_class
-        self._queue_class_order = queue_class_order
-        self._queue_class_default_runnable_surface = queue_class_default_runnable_surface
+        self._physical_queue_tables = physical_queue_tables
+        self._physical_queue_order = physical_queue_order
+        self._physical_queue_default_runnable_surface = physical_queue_default_runnable_surface
         self._blocked_queue_table = blocked_queue_table
         self._lease_table = lease_table
 
-    def _normalized_queue_classes(self, queue_classes: list[str] | None) -> list[str]:
-        if queue_classes:
-            selected = set(queue_classes)
-            return [queue_class for queue_class in self._queue_class_order if queue_class in selected]
-        return list(self._queue_class_order)
+    def _normalized_physical_queues(self, runnable_surface: str | None = None) -> list[str]:
+        if runnable_surface is not None:
+            return [
+                physical_queue
+                for physical_queue in self._physical_queue_order
+                if self._physical_queue_default_runnable_surface[physical_queue] == runnable_surface
+            ]
+        return list(self._physical_queue_order)
 
-    def _pending_queue_union_sql(self, queue_classes: list[str] | None = None) -> str:
-        normalized_queue_classes = self._normalized_queue_classes(queue_classes)
+    def _pending_queue_union_sql(self, runnable_surface: str | None = None) -> str:
+        normalized_physical_queues = self._normalized_physical_queues(runnable_surface)
         selects = [
-            f"SELECT url, domain, branch_key, next_fetch_at FROM {self._queue_table_by_class[queue_class]}"
-            for queue_class in normalized_queue_classes
+            f"SELECT url, domain, branch_key, next_fetch_at FROM {self._physical_queue_tables[physical_queue]}"
+            for physical_queue in normalized_physical_queues
         ]
         return "\nUNION ALL\n".join(selects)
 
-    def _blocked_queue_sql(self, queue_classes: list[str] | None = None) -> tuple[str, tuple[object, ...]]:
+    def _blocked_queue_sql(self, runnable_surface: str | None = None) -> tuple[str, tuple[object, ...]]:
         sql = f"SELECT url, domain, branch_key, next_fetch_at FROM {self._blocked_queue_table}"
-        if queue_classes:
-            sql += " WHERE queue_class = ANY(%s)"
-            return sql, (self._normalized_queue_classes(queue_classes),)
+        physical_queues = self._normalized_physical_queues(runnable_surface)
+        if runnable_surface is not None:
+            sql += " WHERE physical_queue = ANY(%s)"
+            return sql, (physical_queues,)
         return sql, ()
 
     def pending_queue_counts(self) -> dict[str, int]:
         union_sql = "\n                       UNION ALL\n                       ".join(
-            f"SELECT %s AS queue_class, url FROM {self._queue_table_by_class[queue_class]}"
-            for queue_class in self._queue_class_order
+            f"SELECT %s AS physical_queue, url FROM {self._physical_queue_tables[physical_queue]}"
+            for physical_queue in self._physical_queue_order
         )
         with self._conn.cursor() as cur:
             cur.execute(
-                f"""SELECT queue_class, count(*)
+                f"""SELECT physical_queue, count(*)
                    FROM (
                        {union_sql}
                    ) AS pending_queues
-                   GROUP BY queue_class""",
-                self._queue_class_order,
+                   GROUP BY physical_queue""",
+                self._physical_queue_order,
             )
             return dict(cur.fetchall())
 
     def blocked_queue_counts(self) -> dict[str, int]:
         with self._conn.cursor() as cur:
             cur.execute(
-                f"SELECT queue_class, COUNT(*) FROM {self._blocked_queue_table} GROUP BY queue_class"
+                f"SELECT physical_queue, COUNT(*) FROM {self._blocked_queue_table} GROUP BY physical_queue"
             )
             return dict(cur.fetchall())
 
+    def intent_counts(self) -> dict[str, int]:
+        counts = {"explore": 0, "refresh": 0, "retry": 0}
+        with self._conn.cursor() as cur:
+            cur.execute(
+                f"""WITH active_urls AS (
+                        SELECT url FROM {self._lease_table}
+                        UNION
+                        SELECT url FROM {self._blocked_queue_table}
+                        UNION
+                        SELECT url FROM ({self._pending_queue_union_sql()}) AS pending_entries
+                    )
+                    SELECT ledger.current_intent, COUNT(*)
+                    FROM active_urls
+                    JOIN url_ledger AS ledger ON ledger.url = active_urls.url
+                    WHERE ledger.current_intent IS NOT NULL
+                    GROUP BY ledger.current_intent"""
+            )
+            for current_intent, count in cur.fetchall():
+                if current_intent in counts:
+                    counts[current_intent] = int(count)
+        return counts
+
+    def durable_state_counts(self) -> dict[str, int]:
+        counts = {
+            "discovered": 0,
+            "scheduled": 0,
+            "leased": 0,
+            "blocked": 0,
+            "terminal": 0,
+        }
+        with self._conn.cursor() as cur:
+            cur.execute(
+                f"""WITH pending_urls AS (
+                        SELECT url FROM ({self._pending_queue_union_sql()}) AS pending_entries
+                    ), blocked_urls AS (
+                        SELECT url FROM {self._blocked_queue_table}
+                    ), leased_urls AS (
+                        SELECT url FROM {self._lease_table}
+                    )
+                    SELECT
+                        COUNT(*) FILTER (
+                            WHERE ledger.last_success_at IS NULL
+                              AND ledger.terminal_reason IS NULL
+                              AND pending_urls.url IS NULL
+                              AND blocked_urls.url IS NULL
+                              AND leased_urls.url IS NULL
+                        ) AS discovered_count,
+                        COUNT(*) FILTER (WHERE pending_urls.url IS NOT NULL) AS scheduled_count,
+                        COUNT(*) FILTER (WHERE blocked_urls.url IS NOT NULL) AS blocked_count,
+                        COUNT(*) FILTER (WHERE leased_urls.url IS NOT NULL) AS leased_count,
+                        COUNT(*) FILTER (
+                            WHERE ledger.last_success_at IS NOT NULL
+                               OR ledger.terminal_reason IS NOT NULL
+                        ) AS terminal_count
+                    FROM url_ledger AS ledger
+                    LEFT JOIN pending_urls ON pending_urls.url = ledger.url
+                    LEFT JOIN blocked_urls ON blocked_urls.url = ledger.url
+                    LEFT JOIN leased_urls ON leased_urls.url = ledger.url"""
+            )
+            row = cur.fetchone()
+        if row is None:
+            return counts
+        (
+            counts["discovered"],
+            counts["scheduled"],
+            counts["blocked"],
+            counts["leased"],
+            counts["terminal"],
+        ) = (int(value or 0) for value in row)
+        return counts
+
+    def _effective_state_counts_from(
+        self,
+        *,
+        durable_state_counts: dict[str, int],
+        readiness: SchedulerReadiness,
+    ) -> dict[str, int]:
+        state_counts = readiness.state_counts
+        return {
+            "discovered": int(durable_state_counts.get("discovered", 0) or 0),
+            "scheduled": int(state_counts.get("scheduled", 0) or 0),
+            "runnable": int(state_counts.get("runnable", 0) or 0),
+            "blocked": int(state_counts.get("blocked_domain_next_request", 0) or 0)
+            + int(state_counts.get("blocked_host_backoff", 0) or 0)
+            + int(state_counts.get("retry_quarantine", 0) or 0),
+            "leased": int(durable_state_counts.get("leased", 0) or 0),
+            "terminal": int(durable_state_counts.get("terminal", 0) or 0),
+        }
+
+    def _scheduler_state_snapshot_from(
+        self,
+        *,
+        durable_state_counts: dict[str, int],
+        readiness: SchedulerReadiness,
+    ) -> dict[str, dict[str, int]]:
+        readiness_state_counts = dict(readiness.state_counts)
+        blocked_reason_counts = dict(readiness.blocked)
+        return {
+            "durable_state_counts": dict(durable_state_counts),
+            "readiness_state_counts": readiness_state_counts,
+            "effective_state_counts": self._effective_state_counts_from(
+                durable_state_counts=durable_state_counts,
+                readiness=readiness,
+            ),
+            "blocked_reason_counts": blocked_reason_counts,
+        }
+
+    def scheduler_state_snapshot(
+        self,
+        *,
+        now: float | None = None,
+        runnable_surface: str | None = None,
+    ) -> dict[str, dict[str, int]]:
+        """Return a bundled runtime-facing scheduler state snapshot."""
+        readiness = self.readiness(now=now, runnable_surface=runnable_surface)
+        durable_state_counts = self.durable_state_counts()
+        return self._scheduler_state_snapshot_from(
+            durable_state_counts=durable_state_counts,
+            readiness=readiness,
+        )
+
+    def effective_state_counts(
+        self,
+        *,
+        now: float | None = None,
+        runnable_surface: str | None = None,
+    ) -> dict[str, int]:
+        """Return a single effective scheduler-state view for runtime-facing APIs."""
+        return dict(
+            self.scheduler_state_snapshot(
+                now=now,
+                runnable_surface=runnable_surface,
+            )["effective_state_counts"]
+        )
+
+    def blocked_reason_counts(
+        self,
+        *,
+        now: float | None = None,
+        runnable_surface: str | None = None,
+    ) -> dict[str, int]:
+        """Return the current blocked breakdown by scheduler reason."""
+        return dict(
+            self.scheduler_state_snapshot(
+                now=now,
+                runnable_surface=runnable_surface,
+            )["blocked_reason_counts"]
+        )
+
+    def readiness_state_counts(
+        self,
+        *,
+        now: float | None = None,
+        runnable_surface: str | None = None,
+    ) -> dict[str, int]:
+        """Return the current readiness-derived scheduler state breakdown."""
+        return dict(
+            self.scheduler_state_snapshot(
+                now=now,
+                runnable_surface=runnable_surface,
+            )["readiness_state_counts"]
+        )
+
     def _surface_counts(self, queue_counts: dict[str, int]) -> dict[str, int]:
         surface_counts: dict[str, int] = {}
-        for queue_class, count in queue_counts.items():
-            surface = self._queue_class_default_runnable_surface[queue_class]
+        for physical_queue, count in queue_counts.items():
+            surface = self._physical_queue_default_runnable_surface[physical_queue]
             surface_counts[surface] = surface_counts.get(surface, 0) + count
         return surface_counts
 
@@ -99,6 +266,8 @@ class SchedulerObservability:
         blocked_queue_counts = self.blocked_queue_counts()
         pending_surfaces = self._surface_counts(pending_queue_counts)
         blocked_surfaces = self._surface_counts(blocked_queue_counts)
+        intent_counts = self.intent_counts()
+        state_snapshot = self.scheduler_state_snapshot()
 
         with self._conn.cursor() as cur:
             cur.execute(f"SELECT COUNT(*) FROM {self._lease_table}")
@@ -113,22 +282,25 @@ class SchedulerObservability:
             "leased": leased,
             "done": done,
             "failed": failed,
+            "intent_counts": intent_counts,
+            "scheduler_state_snapshot": {key: dict(value) for key, value in state_snapshot.items()},
+            **state_snapshot,
             "pending_surfaces": pending_surfaces,
             "blocked_surfaces": blocked_surfaces,
             "pending": pending,
             "total": done + failed + pending + leased,
         }
 
-    def pending_count(self, queue_classes: list[str] | None = None) -> int:
+    def pending_count(self, *, runnable_surface: str | None = None) -> int:
         total = 0
         with self._conn.cursor() as cur:
-            for queue_class in self._normalized_queue_classes(queue_classes):
-                cur.execute(f"SELECT COUNT(*) FROM {self._queue_table_by_class[queue_class]}")
+            for physical_queue in self._normalized_physical_queues(runnable_surface):
+                cur.execute(f"SELECT COUNT(*) FROM {self._physical_queue_tables[physical_queue]}")
                 total += cur.fetchone()[0]
         return total
 
-    def pending_domain_count(self, queue_classes: list[str] | None = None) -> int:
-        pending_queue_sql = self._pending_queue_union_sql(queue_classes)
+    def pending_domain_count(self, *, runnable_surface: str | None = None) -> int:
+        pending_queue_sql = self._pending_queue_union_sql(runnable_surface)
         with self._conn.cursor() as cur:
             cur.execute(
                 f"SELECT COUNT(DISTINCT domain) FROM ({pending_queue_sql}) AS pending_entries"
@@ -140,25 +312,25 @@ class SchedulerObservability:
         self,
         *,
         now: float | None = None,
-        queue_classes: list[str] | None = None,
+        runnable_surface: str | None = None,
     ) -> int:
-        return self.readiness(now=now, queue_classes=queue_classes).runnable
+        return self.readiness(now=now, runnable_surface=runnable_surface).runnable
 
     def scheduled_count(
         self,
         *,
         now: float | None = None,
-        queue_classes: list[str] | None = None,
+        runnable_surface: str | None = None,
     ) -> int:
-        return self.readiness(now=now, queue_classes=queue_classes).scheduled
+        return self.readiness(now=now, runnable_surface=runnable_surface).scheduled
 
     def runnable_domain_count(
         self,
         *,
         now: float | None = None,
-        queue_classes: list[str] | None = None,
+        runnable_surface: str | None = None,
     ) -> int:
-        return self.readiness(now=now, queue_classes=queue_classes).runnable_domains
+        return self.readiness(now=now, runnable_surface=runnable_surface).runnable_domains
 
     def blocked_count(self) -> int:
         with self._conn.cursor() as cur:
@@ -169,11 +341,11 @@ class SchedulerObservability:
         self,
         *,
         now: float | None = None,
-        queue_classes: list[str] | None = None,
+        runnable_surface: str | None = None,
     ) -> SchedulerReadiness:
         now = time.time() if now is None else now
-        pending_queue_sql = self._pending_queue_union_sql(queue_classes)
-        blocked_queue_sql, blocked_queue_params = self._blocked_queue_sql(queue_classes)
+        pending_queue_sql = self._pending_queue_union_sql(runnable_surface)
+        blocked_queue_sql, blocked_queue_params = self._blocked_queue_sql(runnable_surface)
         with self._conn.cursor() as cur:
             cur.execute(
                 f"""WITH pending_entries AS (

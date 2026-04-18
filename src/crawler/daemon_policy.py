@@ -125,8 +125,15 @@ class DaemonSchedulerPolicy:
         host_deficit = max(0, self._min_frontline_hosts - frontline_hosts)
         if runnable_deficit <= 0 and host_deficit <= 0:
             return 0
+
+        retry_quarantine = self._retry_quarantine_count(scheduler)
+        if retry_quarantine is not None and retry_quarantine <= 0:
+            return 0
+
         deficit = max(1, runnable_deficit, host_deficit)
         limit = max(self._blocked_retry_budget, deficit)
+        if retry_quarantine is not None:
+            limit = min(limit, retry_quarantine)
         per_domain = self._blocked_retry_per_domain if runnable_count > 0 else limit
         return scheduler.promote_blocked_domain_backoff(
             limit,
@@ -138,6 +145,9 @@ class DaemonSchedulerPolicy:
         """Retire long-stuck blocked retry URLs out of pending scheduler state."""
         if not hasattr(scheduler, "retire_blocked_domain_backoff"):
             return 0
+        retry_quarantine = self._retry_quarantine_count(scheduler)
+        if retry_quarantine is not None and retry_quarantine <= 0:
+            return 0
         return scheduler.retire_blocked_domain_backoff(
             min_consecutive_failures=self._quarantine_retire_min_consecutive_failures,
             min_quarantine_seconds=self._quarantine_retire_after_seconds,
@@ -147,10 +157,19 @@ class DaemonSchedulerPolicy:
         """Restore healthy blocked retry domains before using bounded retry promotion."""
         if not hasattr(scheduler, "restore_recovered_blocked_domain_backoff"):
             return 0
+        retry_quarantine = self._retry_quarantine_count(scheduler)
+        if retry_quarantine is not None and retry_quarantine <= 0:
+            return 0
         return scheduler.restore_recovered_blocked_domain_backoff(
             limit=max(self._cycle_pages, self._min_frontline_runnable),
             per_domain=max(self._blocked_retry_budget, self._min_frontline_runnable),
         )
+
+    def _retry_quarantine_count(self, scheduler) -> int | None:
+        if not hasattr(scheduler, "blocked_reason_counts"):
+            return None
+        blocked_reason_counts = scheduler.blocked_reason_counts()
+        return int(blocked_reason_counts.get("retry_quarantine", 0) or 0)
 
     def _rebalance_blocked(self, scheduler) -> int:
         if not hasattr(scheduler, "rebalance_blocked_domain_backoff"):
@@ -162,7 +181,10 @@ class DaemonSchedulerPolicy:
         if hasattr(scheduler, "runnable_domain_count"):
             return scheduler.runnable_domain_count(runnable_surface=RUNNABLE_SURFACE_FRONTLINE)
         if hasattr(scheduler, "ready_domain_count"):
-            return scheduler.runnable_domain_count(runnable_surface=RUNNABLE_SURFACE_FRONTLINE)
+            return scheduler.ready_domain_count(runnable_surface=RUNNABLE_SURFACE_FRONTLINE)
         if hasattr(scheduler, "pending_domain_count"):
             return scheduler.pending_domain_count(runnable_surface=RUNNABLE_SURFACE_FRONTLINE)
-        return scheduler.runnable_count(runnable_surface=RUNNABLE_SURFACE_FRONTLINE)
+        if hasattr(scheduler, "runnable_count"):
+            return scheduler.runnable_count(runnable_surface=RUNNABLE_SURFACE_FRONTLINE)
+        readiness = scheduler.readiness() if hasattr(scheduler, "readiness") else None
+        return int(getattr(readiness, "runnable_domains", 0) or 0)
