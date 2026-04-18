@@ -541,7 +541,7 @@ class UrlLedger:
                 CrawlTask(
                     url=task.url,
                     priority=task.priority,
-                    queue_class=self._classify_queue(task),
+                    queue_class=None,
                     runnable_surface=task.runnable_surface,
                     intent=task.intent,
                     source_url=task.source_url,
@@ -881,13 +881,32 @@ class UrlLedger:
         tasks: list[CrawlTask],
     ) -> list[tuple[str, str, float, float, float, str]]:
         """Load queue-table rows for known ledger URLs using admission tasks."""
+        merged_tasks: dict[str, CrawlTask] = {}
+        for task in tasks:
+            normalized_url = normalize_url(task.url)
+            normalized = CrawlTask(
+                url=normalized_url,
+                priority=task.priority,
+                queue_class=task.queue_class,
+                runnable_surface=task.runnable_surface,
+                intent=task.intent,
+                source_url=task.source_url,
+                added_at=task.added_at,
+                next_fetch_at=task.next_fetch_at,
+            )
+            existing = merged_tasks.get(normalized.url)
+            if existing is None:
+                merged_tasks[normalized.url] = normalized
+            else:
+                merged_tasks[normalized.url] = self._merge_task(existing, normalized)
+
         prepared_tasks = self._prepare_tasks(tasks)
         normalized_urls = sorted({task.url for task in prepared_tasks if task.url})
         if not normalized_urls:
             return []
         queue_class_by_url = {
-            task.url: self._classify_queue(task)
-            for task in prepared_tasks
+            url: self._classify_queue(task)
+            for url, task in merged_tasks.items()
         }
         cur.execute(
             f"""SELECT url, domain, priority, next_fetch_at, added_at
@@ -1170,14 +1189,6 @@ class UrlLedger:
         if admitted == 0 and changed > 0:
             return 0
         return changed
-
-    def add(self, task: CrawlTask) -> bool:
-        """Backward-compatible alias for place()."""
-        return self.place(task)
-
-    def add_many(self, tasks: list[CrawlTask]) -> int:
-        """Backward-compatible alias for place_many()."""
-        return self.place_many(tasks)
 
     def lease_next(
         self,

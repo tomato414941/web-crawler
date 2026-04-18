@@ -313,11 +313,6 @@ class CrawlerEngine:
             "failure_breakdown": dict(self._failure_counts),
         }
 
-    @property
-    def frontier(self) -> UrlLedger:
-        """Compatibility alias for older callers that still expect ``frontier``."""
-        return self.scheduler
-
     async def __aenter__(self) -> "CrawlerEngine":
         return self
 
