@@ -411,7 +411,7 @@ class PgStorage:
                          sum(content_length) as total_bytes
                        FROM pages"""
                 )
-                row = cur.fetchone()
+                page_stats_row = cur.fetchone()
 
                 cur.execute(f"SELECT to_regclass('public.{URL_LEDGER_TABLE}')")
                 url_ledger_exists = cur.fetchone()[0] is not None
@@ -731,11 +731,11 @@ class PgStorage:
             effective_state_counts=effective_state_counts,
         )
         return {
-            "total_pages": row[0],
-            "domains": row[1],
-            "oldest_crawl": row[2],
-            "newest_crawl": row[3],
-            "total_bytes": row[4],
+            "total_pages": page_stats_row[0],
+            "domains": page_stats_row[1],
+            "oldest_crawl": page_stats_row[2],
+            "newest_crawl": page_stats_row[3],
+            "total_bytes": page_stats_row[4],
             "scheduler_status": scheduler_status,
             "scheduler_state_snapshot": dict(scheduler_state_views["scheduler_state_snapshot"]),
             "intent_counts": dict(scheduler_status.get("intent_counts", {})),
