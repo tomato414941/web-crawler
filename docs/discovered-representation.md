@@ -3,7 +3,7 @@
 This document defines how `discovered` should be represented between the idealized crawler model
 and the eventual runtime implementation.
 
-It is narrower than [crawler-principles.md](/home/dev/projects/web-crawler/docs/crawler-principles.md) and
+It is narrower than [crawler-concepts.md](/home/dev/projects/web-crawler/docs/crawler-concepts.md) and
 more conceptual than [scheduler-state-model.md](/home/dev/projects/web-crawler/docs/scheduler-state-model.md).
 
 ## Purpose

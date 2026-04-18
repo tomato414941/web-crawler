@@ -5,6 +5,7 @@ CREATE TABLE public.url_ledger (
     source_url text,
     added_at double precision NOT NULL,
     next_fetch_at double precision DEFAULT 0 NOT NULL,
+    current_intent text,
     last_success_at double precision,
     fail_streak integer DEFAULT 0 NOT NULL,
     last_error text,
@@ -15,6 +16,9 @@ CREATE TABLE public.url_ledger (
 
 CREATE INDEX idx_url_ledger_domain
     ON public.url_ledger(domain);
+
+CREATE INDEX idx_url_ledger_current_intent
+    ON public.url_ledger(current_intent);
 
 CREATE TABLE public.domain_state (
     host_key text NOT NULL,
@@ -128,7 +132,7 @@ CREATE INDEX idx_scheduler_queue_refresh_branch
 CREATE TABLE public.scheduler_queue_retry_quarantine (
     url text NOT NULL,
     domain text NOT NULL,
-    queue_class text NOT NULL,
+    physical_queue text NOT NULL,
     priority real DEFAULT 1.0 NOT NULL,
     next_fetch_at double precision DEFAULT 0 NOT NULL,
     added_at double precision DEFAULT 0 NOT NULL,
@@ -142,8 +146,8 @@ CREATE TABLE public.scheduler_queue_retry_quarantine (
 CREATE INDEX idx_scheduler_queue_retry_quarantine_domain
     ON public.scheduler_queue_retry_quarantine(domain);
 
-CREATE INDEX idx_scheduler_queue_retry_quarantine_queue_class
-    ON public.scheduler_queue_retry_quarantine(queue_class);
+CREATE INDEX idx_scheduler_queue_retry_quarantine_physical_queue
+    ON public.scheduler_queue_retry_quarantine(physical_queue);
 
 CREATE INDEX idx_scheduler_queue_retry_quarantine_branch
     ON public.scheduler_queue_retry_quarantine(domain, branch_key);
@@ -154,7 +158,7 @@ CREATE INDEX idx_scheduler_queue_retry_quarantine_quarantined_at
 CREATE TABLE public.active_leases (
     url text NOT NULL,
     domain text NOT NULL,
-    queue_class text NOT NULL,
+    physical_queue text NOT NULL,
     lease_token text NOT NULL,
     lease_expires_at double precision NOT NULL,
     CONSTRAINT active_leases_pkey PRIMARY KEY (url),
@@ -165,8 +169,8 @@ CREATE TABLE public.active_leases (
 CREATE INDEX idx_active_leases_domain
     ON public.active_leases(domain);
 
-CREATE INDEX idx_active_leases_queue_class
-    ON public.active_leases(queue_class);
+CREATE INDEX idx_active_leases_physical_queue
+    ON public.active_leases(physical_queue);
 
 CREATE INDEX idx_active_leases_expiry
     ON public.active_leases(lease_expires_at);

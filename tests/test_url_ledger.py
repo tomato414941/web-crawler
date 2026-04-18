@@ -14,10 +14,10 @@ from crawler.url_ledger import (
     INTENT_REFRESH,
     LEASE_TABLE,
     LEASE_STRATEGY_HOST_FIRST,
+    PHYSICAL_QUEUE_TABLES,
     QUEUE_BACKLOG,
     QUEUE_EXPLORATION,
     QUEUE_RECRAWL,
-    QUEUE_TABLE_BY_CLASS,
     RUNNABLE_SURFACE_FRONTLINE,
     RUNNABLE_SURFACE_DEFERRED,
     RUNNABLE_SURFACE_REFRESH,
@@ -110,15 +110,15 @@ class TestUrlLedger:
             cur.execute("DROP TABLE IF EXISTS schema_migrations")
             cur.execute(f"DROP TABLE IF EXISTS {LEASE_TABLE}")
             cur.execute("DROP TABLE IF EXISTS frontier_lease_active")
-            cur.execute(f"DROP TABLE IF EXISTS {QUEUE_TABLE_BY_CLASS[QUEUE_EXPLORATION]}")
-            cur.execute(f"DROP TABLE IF EXISTS {QUEUE_TABLE_BY_CLASS[QUEUE_BACKLOG]}")
-            cur.execute(f"DROP TABLE IF EXISTS {QUEUE_TABLE_BY_CLASS[QUEUE_RECRAWL]}")
+            cur.execute(f"DROP TABLE IF EXISTS {PHYSICAL_QUEUE_TABLES[QUEUE_EXPLORATION]}")
+            cur.execute(f"DROP TABLE IF EXISTS {PHYSICAL_QUEUE_TABLES[QUEUE_BACKLOG]}")
+            cur.execute(f"DROP TABLE IF EXISTS {PHYSICAL_QUEUE_TABLES[QUEUE_RECRAWL]}")
             cur.execute(f"DROP TABLE IF EXISTS {BLOCKED_DOMAIN_BACKOFF_TABLE}")
             cur.execute("DROP TABLE IF EXISTS frontier_queue_exploration")
             cur.execute("DROP TABLE IF EXISTS frontier_queue_backlog")
             cur.execute("DROP TABLE IF EXISTS frontier_queue_recrawl")
             cur.execute("DROP TABLE IF EXISTS frontier_queue_blocked_domain_backoff")
-            cur.execute(f"DROP TABLE IF EXISTS {URL_LEDGER_TABLE}")
+            cur.execute(f"DROP TABLE IF EXISTS {URL_LEDGER_TABLE} CASCADE")
             cur.execute("DROP TABLE IF EXISTS domain_state")
             cur.execute("DROP TABLE IF EXISTS crawler_runtime_stats")
             cur.execute("DROP TABLE IF EXISTS pages")
@@ -135,11 +135,11 @@ class TestUrlLedger:
 
     def _queue_counts(self, ledger, url: str) -> tuple[int, int, int]:
         with ledger._conn.cursor() as cur:
-            cur.execute(f"SELECT COUNT(*) FROM {QUEUE_TABLE_BY_CLASS[QUEUE_EXPLORATION]} WHERE url = %s", (url,))
+            cur.execute(f"SELECT COUNT(*) FROM {PHYSICAL_QUEUE_TABLES[QUEUE_EXPLORATION]} WHERE url = %s", (url,))
             (exploration_count,) = cur.fetchone()
-            cur.execute(f"SELECT COUNT(*) FROM {QUEUE_TABLE_BY_CLASS[QUEUE_BACKLOG]} WHERE url = %s", (url,))
+            cur.execute(f"SELECT COUNT(*) FROM {PHYSICAL_QUEUE_TABLES[QUEUE_BACKLOG]} WHERE url = %s", (url,))
             (backlog_count,) = cur.fetchone()
-            cur.execute(f"SELECT COUNT(*) FROM {QUEUE_TABLE_BY_CLASS[QUEUE_RECRAWL]} WHERE url = %s", (url,))
+            cur.execute(f"SELECT COUNT(*) FROM {PHYSICAL_QUEUE_TABLES[QUEUE_RECRAWL]} WHERE url = %s", (url,))
             (recrawl_count,) = cur.fetchone()
         return exploration_count, backlog_count, recrawl_count
 
@@ -191,7 +191,8 @@ class TestUrlLedger:
 
         scheduled = ledger.admit_urls(
             ["http://example.com/discovered"],
-            queue_class=QUEUE_EXPLORATION,
+            runnable_surface=RUNNABLE_SURFACE_FRONTLINE,
+            intent=INTENT_EXPLORE,
         )
 
         exploration_count, backlog_count, recrawl_count = self._queue_counts(
@@ -233,27 +234,6 @@ class TestUrlLedger:
         assert backlog_count == 0
         assert recrawl_count == 1
 
-    def test_admit_discovered_tasks_uses_task_queue_classes(self, ledger):
-        ledger.discover_many(
-            [
-                CrawlTask(url="http://example.com/explore", queue_class=QUEUE_EXPLORATION),
-                CrawlTask(url="http://example.com/again", queue_class=QUEUE_RECRAWL),
-            ]
-        )
-
-        admitted = ledger.admit_discovered_tasks(
-            [
-                CrawlTask(url="http://example.com/explore", queue_class=QUEUE_EXPLORATION),
-                CrawlTask(url="http://example.com/again", queue_class=QUEUE_RECRAWL),
-            ]
-        )
-
-        explore_counts = self._queue_counts(ledger, "http://example.com/explore")
-        recrawl_counts = self._queue_counts(ledger, "http://example.com/again")
-        assert admitted == 2
-        assert explore_counts == (1, 0, 0)
-        assert recrawl_counts == (0, 0, 1)
-
     def test_admit_discovered_tasks_can_use_intent_and_surface(self, ledger):
         ledger.discover_many(
             [
@@ -291,25 +271,7 @@ class TestUrlLedger:
         assert explore_counts == (0, 1, 0)
         assert recrawl_counts == (0, 0, 1)
 
-    def test_prepare_tasks_restores_surface_and_intent_from_queue_class(self, ledger):
-        prepared = ledger._prepare_tasks(
-            [
-                CrawlTask(url="http://example.com/seed", queue_class=QUEUE_EXPLORATION),
-                CrawlTask(url="http://example.com/seed", queue_class=QUEUE_BACKLOG),
-                CrawlTask(url="http://example.com/refresh", queue_class=QUEUE_RECRAWL),
-                CrawlTask(url="http://example.com/refresh", queue_class=QUEUE_RECRAWL),
-            ]
-        )
-
-        by_url = {task.url: task for task in prepared}
-        assert by_url["http://example.com/seed"].queue_class is None
-        assert by_url["http://example.com/seed"].runnable_surface == RUNNABLE_SURFACE_FRONTLINE
-        assert by_url["http://example.com/seed"].intent == INTENT_EXPLORE
-        assert by_url["http://example.com/refresh"].queue_class is None
-        assert by_url["http://example.com/refresh"].runnable_surface == RUNNABLE_SURFACE_REFRESH
-        assert by_url["http://example.com/refresh"].intent == INTENT_REFRESH
-
-    def test_prepare_tasks_prefers_more_urgent_surface_over_queue_class(self, ledger):
+    def test_prepare_tasks_prefers_more_urgent_surface(self, ledger):
         prepared = ledger._prepare_tasks(
             [
                 CrawlTask(
@@ -327,7 +289,6 @@ class TestUrlLedger:
 
         assert len(prepared) == 1
         task = prepared[0]
-        assert task.queue_class is None
         assert task.runnable_surface == RUNNABLE_SURFACE_FRONTLINE
         assert task.intent == INTENT_EXPLORE
 
@@ -445,7 +406,7 @@ class TestUrlLedger:
             cur.execute(f"SELECT COUNT(*) FROM {URL_LEDGER_TABLE} WHERE url = %s", ("http://example.com/seed",))
             (ledger_count,) = cur.fetchone()
             cur.execute(
-                f"SELECT COUNT(*) FROM {QUEUE_TABLE_BY_CLASS[QUEUE_EXPLORATION]} WHERE url = %s",
+                f"SELECT COUNT(*) FROM {PHYSICAL_QUEUE_TABLES[QUEUE_EXPLORATION]} WHERE url = %s",
                 ("http://example.com/seed",),
             )
             (queue_count,) = cur.fetchone()
@@ -510,12 +471,12 @@ class TestUrlLedger:
         assert "first" in result.url
 
     def test_lease_next_prefers_less_congested_host_when_priority_matches(self, ledger):
-        ledger.place(CrawlTask(url="http://a.com/1", priority=1.0, added_at=1000))
-        ledger.place(CrawlTask(url="http://a.com/2", priority=1.0, added_at=1001))
-        ledger.place(CrawlTask(url="http://a.com/3", priority=1.0, added_at=1002))
-        ledger.place(CrawlTask(url="http://b.com/1", priority=1.0, added_at=2000))
+        ledger.place(CrawlTask(url="http://a.com/1", priority=1.0, added_at=1000, runnable_surface=RUNNABLE_SURFACE_FRONTLINE, intent=INTENT_EXPLORE))
+        ledger.place(CrawlTask(url="http://a.com/2", priority=1.0, added_at=1001, runnable_surface=RUNNABLE_SURFACE_FRONTLINE, intent=INTENT_EXPLORE))
+        ledger.place(CrawlTask(url="http://a.com/3", priority=1.0, added_at=1002, runnable_surface=RUNNABLE_SURFACE_FRONTLINE, intent=INTENT_EXPLORE))
+        ledger.place(CrawlTask(url="http://b.com/1", priority=1.0, added_at=2000, runnable_surface=RUNNABLE_SURFACE_FRONTLINE, intent=INTENT_EXPLORE))
 
-        result = ledger.lease_next()
+        result = ledger.lease_next(lease_strategy=LEASE_STRATEGY_HOST_FIRST)
 
         assert result is not None
         assert result.url == "http://b.com/1"
@@ -534,8 +495,8 @@ class TestUrlLedger:
 
     def test_lease_next_can_prefer_breadth_over_depth(self, ledger):
         for i in range(5):
-            ledger.place(CrawlTask(url=f"http://a.com/{i}", priority=1.0, added_at=1000 + i))
-        ledger.place(CrawlTask(url="http://b.com/1", priority=0.8, added_at=2000))
+            ledger.place(CrawlTask(url=f"http://a.com/{i}", priority=1.0, added_at=1000 + i, runnable_surface=RUNNABLE_SURFACE_FRONTLINE, intent=INTENT_EXPLORE))
+        ledger.place(CrawlTask(url="http://b.com/1", priority=0.8, added_at=2000, runnable_surface=RUNNABLE_SURFACE_FRONTLINE, intent=INTENT_EXPLORE))
 
         result = ledger.lease_next(lease_strategy=LEASE_STRATEGY_HOST_FIRST)
 
@@ -543,20 +504,36 @@ class TestUrlLedger:
         assert result.url == "http://b.com/1"
 
     def test_runnable_host_heads_returns_one_head_per_host(self, ledger):
-        ledger.place(CrawlTask(url="http://a.com/1", priority=1.0, added_at=1000))
-        ledger.place(CrawlTask(url="http://a.com/2", priority=1.0, added_at=1001))
-        ledger.place(CrawlTask(url="http://b.com/1", priority=0.8, added_at=2000))
+        ledger.place(CrawlTask(url="http://a.com/1", priority=1.0, added_at=1000, runnable_surface=RUNNABLE_SURFACE_FRONTLINE, intent=INTENT_EXPLORE))
+        ledger.place(CrawlTask(url="http://a.com/2", priority=1.0, added_at=1001, runnable_surface=RUNNABLE_SURFACE_FRONTLINE, intent=INTENT_EXPLORE))
+        ledger.place(CrawlTask(url="http://b.com/1", priority=0.8, added_at=2000, runnable_surface=RUNNABLE_SURFACE_FRONTLINE, intent=INTENT_EXPLORE))
 
         heads = ledger.runnable_host_heads(runnable_surface=RUNNABLE_SURFACE_FRONTLINE)
 
         assert [(head.host_key, head.url) for head in heads] == [
-            ("a.com", "http://a.com/1"),
             ("b.com", "http://b.com/1"),
+            ("a.com", "http://a.com/1"),
         ]
 
     def test_runnable_host_heads_can_read_normal_runnable_surface(self, ledger):
-        ledger.place(CrawlTask(url="http://a.com/1", priority=1.0, added_at=1000, queue_class=QUEUE_EXPLORATION))
-        ledger.place(CrawlTask(url="http://b.com/1", priority=0.8, added_at=2000, queue_class=QUEUE_BACKLOG))
+        ledger.place(
+            CrawlTask(
+                url="http://a.com/1",
+                priority=1.0,
+                added_at=1000,
+                runnable_surface=RUNNABLE_SURFACE_FRONTLINE,
+                intent=INTENT_EXPLORE,
+            )
+        )
+        ledger.place(
+            CrawlTask(
+                url="http://b.com/1",
+                priority=0.8,
+                added_at=2000,
+                runnable_surface=RUNNABLE_SURFACE_DEFERRED,
+                intent=INTENT_EXPLORE,
+            )
+        )
 
         heads = ledger.runnable_host_heads(runnable_surface=RUNNABLE_SURFACE_NORMAL)
 
@@ -577,8 +554,8 @@ class TestUrlLedger:
         assert [head.host_key for head in heads] == ["fast.com", "slow.com"]
 
     def test_select_runnable_host_head_uses_same_host_first_order(self, ledger):
-        ledger.place(CrawlTask(url="http://slow.com/1", priority=1.0, added_at=1000))
-        ledger.place(CrawlTask(url="http://fast.com/1", priority=1.0, added_at=1200))
+        ledger.place(CrawlTask(url="http://slow.com/1", priority=1.0, added_at=1000, runnable_surface=RUNNABLE_SURFACE_FRONTLINE, intent=INTENT_EXPLORE))
+        ledger.place(CrawlTask(url="http://fast.com/1", priority=1.0, added_at=1200, runnable_surface=RUNNABLE_SURFACE_FRONTLINE, intent=INTENT_EXPLORE))
 
         self.domain_store.record_success("slow.com", now=time.time(), request_latency_ms=900.0)
         self.domain_store.record_success("fast.com", now=time.time(), request_latency_ms=80.0)
@@ -590,8 +567,24 @@ class TestUrlLedger:
         assert head.url == "http://fast.com/1"
 
     def test_select_runnable_host_head_can_use_normal_runnable_surface(self, ledger):
-        ledger.place(CrawlTask(url="http://a.com/1", priority=1.0, added_at=1000, queue_class=QUEUE_EXPLORATION))
-        ledger.place(CrawlTask(url="http://b.com/1", priority=0.8, added_at=2000, queue_class=QUEUE_BACKLOG))
+        ledger.place(
+            CrawlTask(
+                url="http://a.com/1",
+                priority=1.0,
+                added_at=1000,
+                runnable_surface=RUNNABLE_SURFACE_FRONTLINE,
+                intent=INTENT_EXPLORE,
+            )
+        )
+        ledger.place(
+            CrawlTask(
+                url="http://b.com/1",
+                priority=0.8,
+                added_at=2000,
+                runnable_surface=RUNNABLE_SURFACE_DEFERRED,
+                intent=INTENT_EXPLORE,
+            )
+        )
 
         head = ledger.select_runnable_host_head(runnable_surface=RUNNABLE_SURFACE_NORMAL)
 
@@ -617,9 +610,33 @@ class TestUrlLedger:
         assert len(batch) == 3
 
     def test_lease_batch_uses_host_first_breadth_order_for_queue_tables(self, ledger):
-        ledger.place(CrawlTask(url="http://a.com/docs/python/1", priority=1.0, added_at=1000))
-        ledger.place(CrawlTask(url="http://a.com/docs/python/2", priority=1.0, added_at=1001))
-        ledger.place(CrawlTask(url="http://a.com/docs/rust/1", priority=1.0, added_at=2000))
+        ledger.place(
+            CrawlTask(
+                url="http://a.com/docs/python/1",
+                priority=1.0,
+                added_at=1000,
+                runnable_surface=RUNNABLE_SURFACE_FRONTLINE,
+                intent=INTENT_EXPLORE,
+            )
+        )
+        ledger.place(
+            CrawlTask(
+                url="http://a.com/docs/python/2",
+                priority=1.0,
+                added_at=1001,
+                runnable_surface=RUNNABLE_SURFACE_FRONTLINE,
+                intent=INTENT_EXPLORE,
+            )
+        )
+        ledger.place(
+            CrawlTask(
+                url="http://a.com/docs/rust/1",
+                priority=1.0,
+                added_at=2000,
+                runnable_surface=RUNNABLE_SURFACE_FRONTLINE,
+                intent=INTENT_EXPLORE,
+            )
+        )
 
         batch = ledger.lease_batch(
             count=2,
@@ -735,11 +752,12 @@ class TestUrlLedger:
 
         with ledger._conn.cursor() as cur:
             cur.execute(
-                f"SELECT terminal_reason, terminalized_at FROM {URL_LEDGER_TABLE} WHERE url = %s",
+                f"SELECT current_intent, terminal_reason, terminalized_at FROM {URL_LEDGER_TABLE} WHERE url = %s",
                 (result.url,),
             )
-            terminal_reason, terminalized_at = cur.fetchone()
+            current_intent, terminal_reason, terminalized_at = cur.fetchone()
 
+        assert current_intent is None
         assert terminal_reason == "failed"
         assert terminalized_at is not None
 
@@ -752,11 +770,12 @@ class TestUrlLedger:
 
         with ledger._conn.cursor() as cur:
             cur.execute(
-                f"SELECT terminal_reason, terminalized_at FROM {URL_LEDGER_TABLE} WHERE url = %s",
+                f"SELECT current_intent, terminal_reason, terminalized_at FROM {URL_LEDGER_TABLE} WHERE url = %s",
                 (result.url,),
             )
-            terminal_reason, terminalized_at = cur.fetchone()
+            current_intent, terminal_reason, terminalized_at = cur.fetchone()
 
+        assert current_intent == "retry"
         assert terminal_reason is None
         assert terminalized_at is None
 
@@ -777,7 +796,7 @@ class TestUrlLedger:
 
         with ledger._conn.cursor() as cur:
             cur.execute(
-                f"SELECT COUNT(*) FROM {QUEUE_TABLE_BY_CLASS[QUEUE_EXPLORATION]} WHERE url = %s",
+                f"SELECT COUNT(*) FROM {PHYSICAL_QUEUE_TABLES[QUEUE_EXPLORATION]} WHERE url = %s",
                 ("http://example.com/",),
             )
             (queue_count,) = cur.fetchone()
@@ -790,6 +809,158 @@ class TestUrlLedger:
         stats = ledger.stats()
         assert stats["total"] == 2
         assert stats.get("pending", 0) == 2
+        assert stats["intent_counts"] == {"explore": 2, "refresh": 0, "retry": 0}
+        assert stats["durable_state_counts"] == {
+            "discovered": 0,
+            "scheduled": 2,
+            "leased": 0,
+            "blocked": 0,
+            "terminal": 0,
+        }
+        assert stats["readiness_state_counts"] == {
+            "runnable": 2,
+            "scheduled": 0,
+            "blocked_domain_next_request": 0,
+            "blocked_host_backoff": 0,
+            "retry_quarantine": 0,
+        }
+        assert stats["effective_state_counts"] == {
+            "discovered": 0,
+            "scheduled": 0,
+            "runnable": 2,
+            "blocked": 0,
+            "leased": 0,
+            "terminal": 0,
+        }
+        assert stats["blocked_reason_counts"] == {
+            "next_fetch_at": 0,
+            "domain_next_request": 0,
+            "host_backoff": 0,
+            "retry_quarantine": 0,
+        }
+        assert stats["scheduler_state_snapshot"] == {
+            "durable_state_counts": {
+                "discovered": 0,
+                "scheduled": 2,
+                "leased": 0,
+                "blocked": 0,
+                "terminal": 0,
+            },
+            "readiness_state_counts": {
+                "runnable": 2,
+                "scheduled": 0,
+                "blocked_domain_next_request": 0,
+                "blocked_host_backoff": 0,
+                "retry_quarantine": 0,
+            },
+            "effective_state_counts": {
+                "discovered": 0,
+                "scheduled": 0,
+                "runnable": 2,
+                "blocked": 0,
+                "leased": 0,
+                "terminal": 0,
+            },
+            "blocked_reason_counts": {
+                "next_fetch_at": 0,
+                "domain_next_request": 0,
+                "host_backoff": 0,
+                "retry_quarantine": 0,
+            },
+        }
+
+    def test_effective_state_counts(self, ledger):
+        now = time.time()
+        ledger.place(CrawlTask(url="http://example.com/scheduled", next_fetch_at=now + 20.0))
+        ledger.place(CrawlTask(url="http://example.com/runnable", next_fetch_at=now - 1.0))
+
+        assert ledger.effective_state_counts(now=now) == {
+            "discovered": 0,
+            "scheduled": 1,
+            "runnable": 1,
+            "blocked": 0,
+            "leased": 0,
+            "terminal": 0,
+        }
+
+    def test_readiness_state_counts(self, ledger):
+        now = time.time()
+        ledger.place(CrawlTask(url="http://example.com/scheduled", next_fetch_at=now + 20.0))
+        ledger.place(CrawlTask(url="http://example.com/runnable", next_fetch_at=now - 1.0))
+
+        assert ledger.readiness_state_counts(now=now) == {
+            "runnable": 1,
+            "scheduled": 1,
+            "blocked_domain_next_request": 0,
+            "blocked_host_backoff": 0,
+            "retry_quarantine": 0,
+        }
+
+    def test_scheduler_state_snapshot(self, ledger):
+        now = time.time()
+        ledger.place(CrawlTask(url="http://example.com/scheduled", next_fetch_at=now + 20.0))
+        ledger.place(CrawlTask(url="http://example.com/runnable", next_fetch_at=now - 1.0))
+
+        assert ledger.scheduler_state_snapshot(now=now) == {
+            "durable_state_counts": {
+                "discovered": 0,
+                "scheduled": 2,
+                "leased": 0,
+                "blocked": 0,
+                "terminal": 0,
+            },
+            "readiness_state_counts": {
+                "runnable": 1,
+                "scheduled": 1,
+                "blocked_domain_next_request": 0,
+                "blocked_host_backoff": 0,
+                "retry_quarantine": 0,
+            },
+            "effective_state_counts": {
+                "discovered": 0,
+                "scheduled": 1,
+                "runnable": 1,
+                "blocked": 0,
+                "leased": 0,
+                "terminal": 0,
+            },
+            "blocked_reason_counts": {
+                "next_fetch_at": 1,
+                "domain_next_request": 0,
+                "host_backoff": 0,
+                "retry_quarantine": 0,
+            },
+        }
+
+    def test_blocked_reason_counts(self, ledger):
+        now = time.time()
+        ledger.place(CrawlTask(url="http://example.com/scheduled", next_fetch_at=now + 20.0))
+        ledger.place(CrawlTask(url="http://blocked.example/retry", next_fetch_at=now))
+
+        with ledger._conn.cursor() as cur:
+            ledger._delete_queue_entries(cur, ["http://blocked.example/retry/"])
+            ledger._insert_blocked_domain_backoff_rows(
+                cur,
+                [
+                    (
+                        "http://blocked.example/retry/",
+                        "blocked.example",
+                        1.0,
+                        now,
+                        now,
+                        QUEUE_EXPLORATION,
+                    )
+                ],
+                quarantined_at=now,
+            )
+        ledger._conn.commit()
+
+        assert ledger.blocked_reason_counts(now=now) == {
+            "next_fetch_at": 1,
+            "domain_next_request": 0,
+            "host_backoff": 0,
+            "retry_quarantine": 1,
+        }
 
     def test_is_seen(self, ledger):
         ledger.place(CrawlTask(url="http://example.com"))
@@ -868,12 +1039,33 @@ class TestUrlLedger:
         assert ledger.scheduled_count(now=now) == 0
         assert ledger.next_runnable_delay(now=now) == pytest.approx(30.0, abs=1e-3)
 
-    def test_ready_count_can_filter_queue_classes(self, ledger):
+    def test_ready_count_can_filter_surfaces(self, ledger):
         now = time.time()
-        ledger.place(CrawlTask(url="http://a.com/explore", next_fetch_at=now))
-        ledger.place(CrawlTask(url="http://a.com/backlog", next_fetch_at=now))
+        ledger.place(
+            CrawlTask(
+                url="http://a.com/explore",
+                next_fetch_at=now,
+                runnable_surface=RUNNABLE_SURFACE_FRONTLINE,
+                intent=INTENT_EXPLORE,
+            )
+        )
+        ledger.place(
+            CrawlTask(
+                url="http://a.com/backlog",
+                next_fetch_at=now,
+                runnable_surface=RUNNABLE_SURFACE_DEFERRED,
+                intent=INTENT_EXPLORE,
+            )
+        )
         self.domain_store.record_failure("a.com", backoff_seconds=20.0, now=now)
-        ledger.place(CrawlTask(url="http://b.com/explore", next_fetch_at=now))
+        ledger.place(
+            CrawlTask(
+                url="http://b.com/explore",
+                next_fetch_at=now,
+                runnable_surface=RUNNABLE_SURFACE_FRONTLINE,
+                intent=INTENT_EXPLORE,
+            )
+        )
 
         assert ledger.runnable_count(now=now, runnable_surface=RUNNABLE_SURFACE_FRONTLINE) == 1
         assert ledger.runnable_count(now=now, runnable_surface=RUNNABLE_SURFACE_DEFERRED) == 0
@@ -1071,11 +1263,22 @@ class TestUrlLedger:
         leased = ledger.lease_batch(count=2, runnable_surface=RUNNABLE_SURFACE_DEFERRED, now=now + 31.0)
         assert {task.url for task in leased} == {"http://a.com/blocked-1", "http://a.com/blocked-2"}
 
-    def test_readiness_filters_blocked_queue_by_queue_class(self, ledger):
+    def test_readiness_filters_blocked_queue_by_surface(self, ledger):
         now = time.time()
-        ledger.place(CrawlTask(url="http://a.com/explore", next_fetch_at=now))
-        ledger.place(CrawlTask(url="http://a.com/backlog", next_fetch_at=now))
+        ledger.discover(CrawlTask(url="http://a.com/explore", next_fetch_at=now))
+        ledger.discover(CrawlTask(url="http://b.com/backlog", next_fetch_at=now))
+        ledger.admit_urls(
+            ["http://a.com/explore"],
+            runnable_surface=RUNNABLE_SURFACE_FRONTLINE,
+            intent=INTENT_EXPLORE,
+        )
+        ledger.admit_urls(
+            ["http://b.com/backlog"],
+            runnable_surface=RUNNABLE_SURFACE_DEFERRED,
+            intent=INTENT_EXPLORE,
+        )
         self.domain_store.record_failure("a.com", backoff_seconds=30.0, now=now)
+        self.domain_store.record_failure("b.com", backoff_seconds=30.0, now=now)
         ledger.rebalance_blocked_domain_backoff(now=now)
 
         exploration = ledger.readiness(now=now, runnable_surface=RUNNABLE_SURFACE_FRONTLINE)
@@ -1103,9 +1306,21 @@ class TestUrlLedger:
         assert result is not None
         assert "b.com" in result.url
 
-    def test_lease_next_filters_queue_classes(self, ledger):
-        ledger.place(CrawlTask(url="http://a.com/explore"))
-        ledger.place(CrawlTask(url="http://a.com/backlog"))
+    def test_lease_next_filters_surface(self, ledger):
+        ledger.place(
+            CrawlTask(
+                url="http://a.com/explore",
+                runnable_surface=RUNNABLE_SURFACE_FRONTLINE,
+                intent=INTENT_EXPLORE,
+            )
+        )
+        ledger.place(
+            CrawlTask(
+                url="http://a.com/backlog",
+                runnable_surface=RUNNABLE_SURFACE_DEFERRED,
+                intent=INTENT_EXPLORE,
+            )
+        )
 
         result = ledger.lease_next(runnable_surface=RUNNABLE_SURFACE_DEFERRED)
 
@@ -1151,14 +1366,17 @@ class TestUrlLedger:
 
         with ledger._conn.cursor() as cur:
             cur.execute(
-                f"SELECT fail_streak, last_error, next_fetch_at, terminal_reason, terminalized_at FROM {URL_LEDGER_TABLE} WHERE url = %s",
+                f"""SELECT fail_streak, last_error, next_fetch_at, current_intent, terminal_reason, terminalized_at
+                    FROM {URL_LEDGER_TABLE}
+                    WHERE url = %s""",
                 (result.url,),
             )
-            fail_streak, last_error, next_fetch_at, terminal_reason, terminalized_at = cur.fetchone()
+            fail_streak, last_error, next_fetch_at, current_intent, terminal_reason, terminalized_at = cur.fetchone()
 
         assert fail_streak == 1
         assert last_error == "timeout"
         assert next_fetch_at > time.time()
+        assert current_intent == "retry"
         assert terminal_reason is None
         assert terminalized_at is None
 
@@ -1217,7 +1435,7 @@ class TestUrlLedger:
 
         with ledger._conn.cursor() as cur:
             cur.execute(
-                f"SELECT COUNT(*) FROM {QUEUE_TABLE_BY_CLASS[QUEUE_EXPLORATION]} WHERE url = %s",
+                f"SELECT COUNT(*) FROM {PHYSICAL_QUEUE_TABLES[QUEUE_EXPLORATION]} WHERE url = %s",
                 ("http://example.com/",),
             )
             (queue_count,) = cur.fetchone()
@@ -1225,16 +1443,40 @@ class TestUrlLedger:
         assert queue_count == 1
 
     def test_promote_deferred_host_heads_promotes_distinct_backlog_domains(self, ledger):
-        ledger.place(CrawlTask(url="http://example.com/docs/a", queue_class=QUEUE_BACKLOG))
-        ledger.place(CrawlTask(url="http://example.com/docs/b", queue_class=QUEUE_BACKLOG))
-        ledger.place(CrawlTask(url="http://other.com/news/a", queue_class=QUEUE_BACKLOG))
-        ledger.place(CrawlTask(url="http://third.com/start", queue_class=QUEUE_BACKLOG))
+        ledger.place(
+            CrawlTask(
+                url="http://example.com/docs/a",
+                runnable_surface=RUNNABLE_SURFACE_DEFERRED,
+                intent=INTENT_EXPLORE,
+            )
+        )
+        ledger.place(
+            CrawlTask(
+                url="http://example.com/docs/b",
+                runnable_surface=RUNNABLE_SURFACE_DEFERRED,
+                intent=INTENT_EXPLORE,
+            )
+        )
+        ledger.place(
+            CrawlTask(
+                url="http://other.com/news/a",
+                runnable_surface=RUNNABLE_SURFACE_DEFERRED,
+                intent=INTENT_EXPLORE,
+            )
+        )
+        ledger.place(
+            CrawlTask(
+                url="http://third.com/start",
+                runnable_surface=RUNNABLE_SURFACE_DEFERRED,
+                intent=INTENT_EXPLORE,
+            )
+        )
 
         promoted = ledger.promote_deferred_host_heads(target_pending=2, per_domain=1, candidate_limit=10)
 
         assert promoted == 2
         with ledger._conn.cursor() as cur:
-            cur.execute(f"SELECT url FROM {QUEUE_TABLE_BY_CLASS[QUEUE_EXPLORATION]} ORDER BY url")
+            cur.execute(f"SELECT url FROM {PHYSICAL_QUEUE_TABLES[QUEUE_EXPLORATION]} ORDER BY url")
             promoted_urls = [url for (url,) in cur.fetchall()]
 
         assert promoted_urls == [
@@ -1242,9 +1484,21 @@ class TestUrlLedger:
             "http://other.com/news/a",
         ]
 
-    def test_promote_deferred_host_heads_uses_queue_membership_not_task_queue_class(self, ledger):
-        ledger.place(CrawlTask(url="http://example.com/docs/a", queue_class=QUEUE_BACKLOG))
-        ledger.place(CrawlTask(url="http://other.com/news/a", queue_class=QUEUE_BACKLOG))
+    def test_promote_deferred_host_heads_uses_queue_membership_not_task_metadata(self, ledger):
+        ledger.place(
+            CrawlTask(
+                url="http://example.com/docs/a",
+                runnable_surface=RUNNABLE_SURFACE_DEFERRED,
+                intent=INTENT_EXPLORE,
+            )
+        )
+        ledger.place(
+            CrawlTask(
+                url="http://other.com/news/a",
+                runnable_surface=RUNNABLE_SURFACE_DEFERRED,
+                intent=INTENT_EXPLORE,
+            )
+        )
 
         with ledger._conn.cursor() as cur:
             cur.execute(
@@ -1260,7 +1514,7 @@ class TestUrlLedger:
 
         assert promoted == 2
         with ledger._conn.cursor() as cur:
-            cur.execute(f"SELECT url FROM {QUEUE_TABLE_BY_CLASS[QUEUE_EXPLORATION]} ORDER BY url")
+            cur.execute(f"SELECT url FROM {PHYSICAL_QUEUE_TABLES[QUEUE_EXPLORATION]} ORDER BY url")
             promoted_urls = [url for (url,) in cur.fetchall()]
 
         assert promoted_urls == [
@@ -1268,7 +1522,7 @@ class TestUrlLedger:
             "http://other.com/news/a",
         ]
 
-    def test_recrawl_queue_class_can_be_leased_separately(self, ledger):
+    def test_refresh_surface_can_be_leased_separately(self, ledger):
         ledger.place(CrawlTask(url="http://example.com"))
         leased = ledger.lease_next()
         assert leased is not None
@@ -1281,7 +1535,7 @@ class TestUrlLedger:
         assert recrawl is not None
         assert recrawl.url == leased.url
 
-    def test_lease_next_uses_queue_membership_not_task_queue_class(self, ledger):
+    def test_lease_next_uses_queue_membership_not_task_metadata(self, ledger):
         ledger.place(CrawlTask(url="http://example.com"))
         leased = ledger.lease_next()
         assert leased is not None
