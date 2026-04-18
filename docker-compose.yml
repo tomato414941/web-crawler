@@ -41,7 +41,7 @@ services:
       crawler daemon
         ${CRAWL_SEED_URLS:-https://example.com}
         --cycle-pages ${CRAWL_CYCLE_PAGES:-500}
-        --recrawl-ttl ${CRAWL_RECRAWL_TTL:-86400}
+        --refresh-ttl ${CRAWL_RECRAWL_TTL:-86400}
         --concurrency ${CRAWL_CONCURRENCY:-5}
         --delay ${CRAWL_DELAY:-1.0}
         --postgres postgresql://crawler:crawler@postgres/crawldb
