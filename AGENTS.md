@@ -11,7 +11,7 @@ Single Python package with CLI entry point:
   - `cli.py` — Typer CLI (fetch, crawl, serve, agent, extract, check-links)
   - `api.py` — FastAPI REST server
   - `crawl.py` — crawler engine (worker pool, link extraction)
-  - `frontier.py` — URL scheduler with Postgres leasing and retry timing
+  - `url_ledger.py` — scheduler facade and durable URL state
   - `domain_manager.py` — robots.txt and runtime host scheduling state
   - `domain_store.py` — durable host scheduling state in Postgres
   - `domain_state.py` — runtime / persisted host state models

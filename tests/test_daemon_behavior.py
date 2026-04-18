@@ -11,6 +11,8 @@ from crawler.daemon import CrawlDaemon, _format_error_breakdown
 from crawler.url_ledger import (
     BLOCKED_DOMAIN_BACKOFF_TABLE,
     CrawlTask,
+    LEASE_TABLE,
+    QUEUE_BACKLOG,
     QUEUE_EXPLORATION,
     QUEUE_RECRAWL,
     QUEUE_TABLE_BY_CLASS,
@@ -34,10 +36,13 @@ def _reset_schema(dsn: str) -> None:
             cur.execute("DROP TABLE IF EXISTS public.schema_migrations")
             cur.execute("DROP TABLE IF EXISTS public.domain_state")
             cur.execute(f"DROP TABLE IF EXISTS public.{QUEUE_TABLE_BY_CLASS[QUEUE_EXPLORATION]}")
+            cur.execute(f"DROP TABLE IF EXISTS public.{QUEUE_TABLE_BY_CLASS[QUEUE_BACKLOG]}")
             cur.execute(f"DROP TABLE IF EXISTS public.{QUEUE_TABLE_BY_CLASS[QUEUE_RECRAWL]}")
             cur.execute(f"DROP TABLE IF EXISTS public.{BLOCKED_DOMAIN_BACKOFF_TABLE}")
+            cur.execute(f"DROP TABLE IF EXISTS public.{LEASE_TABLE}")
             cur.execute("DROP TABLE IF EXISTS public.frontier_queue_recrawl")
             cur.execute("DROP TABLE IF EXISTS public.frontier_queue_blocked_domain_backoff")
+            cur.execute("DROP TABLE IF EXISTS public.frontier_lease_active")
             cur.execute(f"DROP TABLE IF EXISTS public.{URL_LEDGER_TABLE}")
             cur.execute("DROP TABLE IF EXISTS public.crawler_runtime_stats")
             cur.execute("DROP TABLE IF EXISTS public.pages")
@@ -80,12 +85,12 @@ def test_refresh_stale_skips_when_pending_queue_is_full(pg_resources):
     now = time.time()
 
     for idx in range(3):
-        frontier.add(
+        frontier.place(
             CrawlTask(url=f"https://example.com/pending-{idx}", added_at=now + idx)
         )
 
     stale_url = "https://example.com/stale"
-    frontier.add(CrawlTask(url=stale_url, added_at=now - 100))
+    frontier.place(CrawlTask(url=stale_url, added_at=now - 100))
     frontier.mark_done(stale_url)
     _save_page(storage, stale_url, now - 86400)
 
@@ -113,7 +118,7 @@ def test_refresh_stale_requeues_only_oldest_rows_needed(pg_resources):
     _dsn, storage, frontier = pg_resources
     now = time.time()
 
-    frontier.add(CrawlTask(url="https://example.com/pending", added_at=now))
+    frontier.place(CrawlTask(url="https://example.com/pending", added_at=now))
 
     stale_urls = [
         ("https://example.com/stale-1", now - 300),
@@ -121,7 +126,7 @@ def test_refresh_stale_requeues_only_oldest_rows_needed(pg_resources):
         ("https://example.com/stale-3", now - 100),
     ]
     for url, added_at in stale_urls:
-        frontier.add(CrawlTask(url=url, added_at=added_at))
+        frontier.place(CrawlTask(url=url, added_at=added_at))
         frontier.mark_done(url)
         _save_page(storage, url, added_at)
 
