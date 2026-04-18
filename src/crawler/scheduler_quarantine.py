@@ -40,19 +40,19 @@ class SchedulerQuarantine:
         with self._conn.cursor() as cur:
             cur.execute(
                 f"""SELECT queue.url, queue.domain, queue.priority, queue.next_fetch_at, queue.added_at,
-                           %s AS queue_class
+                           %s AS physical_queue
                     FROM {self._queue_table_sql(self._queue_frontline)} AS queue
                     JOIN domain_state ON domain_state.host_key = queue.domain
                     WHERE domain_state.backoff_until > %s
                     UNION ALL
                     SELECT queue.url, queue.domain, queue.priority, queue.next_fetch_at, queue.added_at,
-                           %s AS queue_class
+                           %s AS physical_queue
                     FROM {self._queue_table_sql(self._queue_deferred)} AS queue
                     JOIN domain_state ON domain_state.host_key = queue.domain
                     WHERE domain_state.backoff_until > %s
                     UNION ALL
                     SELECT queue.url, queue.domain, queue.priority, queue.next_fetch_at, queue.added_at,
-                           %s AS queue_class
+                           %s AS physical_queue
                     FROM {self._queue_table_sql(self._queue_refresh)} AS queue
                     JOIN domain_state ON domain_state.host_key = queue.domain
                     WHERE domain_state.backoff_until > %s""",
@@ -148,7 +148,7 @@ class SchedulerQuarantine:
                             blocked.priority,
                             blocked.next_fetch_at,
                             blocked.added_at,
-                            %s AS queue_class,
+                            %s AS physical_queue,
                             ROW_NUMBER() OVER (
                                 PARTITION BY blocked.domain
                                 ORDER BY blocked.next_fetch_at ASC, blocked.added_at ASC, blocked.url ASC
@@ -173,7 +173,7 @@ class SchedulerQuarantine:
                         blocked.priority,
                         blocked.next_fetch_at,
                         blocked.added_at,
-                        %s AS queue_class""",
+                        %s AS physical_queue""",
                 (self._queue_deferred, now, per_domain, limit, self._queue_deferred),
             )
             rows = cur.fetchall()
@@ -209,7 +209,7 @@ class SchedulerQuarantine:
                             blocked.priority,
                             blocked.next_fetch_at,
                             blocked.added_at,
-                            %s AS queue_class,
+                            %s AS physical_queue,
                             COALESCE(domain_state.consecutive_failures, 0) AS failure_count,
                             ROW_NUMBER() OVER (
                                 PARTITION BY blocked.domain
@@ -246,7 +246,7 @@ class SchedulerQuarantine:
                         blocked.priority,
                         blocked.next_fetch_at,
                         blocked.added_at,
-                        %s AS queue_class""",
+                        %s AS physical_queue""",
                 (
                     self._queue_deferred,
                     now,

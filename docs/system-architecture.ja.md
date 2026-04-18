@@ -2,7 +2,7 @@
 
 この文書は、理想化された crawler model と、最終的な runtime 実装の間に置く中間文書である。
 
-これは [crawler-principles.ja.md](/home/dev/projects/web-crawler/docs/crawler-principles.ja.md) より広く、
+これは [crawler-concepts.ja.md](/home/dev/projects/web-crawler/docs/crawler-concepts.ja.md) より広く、
 [scheduler-state-model.ja.md](/home/dev/projects/web-crawler/docs/scheduler-state-model.ja.md) よりも project 全体の
 責務分解を扱う。
 

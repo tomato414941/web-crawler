@@ -1,4 +1,4 @@
-# WWW Crawler Principles
+# WWW Crawler Concepts
 
 This document captures an abstract model for an idealized WWW crawler. It is not a description of the current `web-crawler` implementation. Its role is to provide design principles for naming and responsibility boundaries.
 

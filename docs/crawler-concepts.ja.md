@@ -1,4 +1,4 @@
-# WWW Crawler Principles
+# WWW Crawler Concepts
 
 この文書は、理想化された WWW crawler の抽象モデルを整理する。現在の `web-crawler` 実装の説明ではなく、命名や責務分離を判断するための設計原則を置く。
 

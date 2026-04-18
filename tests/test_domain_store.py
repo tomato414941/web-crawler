@@ -34,7 +34,7 @@ class TestDomainStore:
         with conn.cursor() as cur:
             cur.execute("DROP TABLE IF EXISTS schema_migrations")
             cur.execute("DROP TABLE IF EXISTS domain_state")
-            cur.execute(f"DROP TABLE IF EXISTS {URL_LEDGER_TABLE}")
+            cur.execute(f"DROP TABLE IF EXISTS {URL_LEDGER_TABLE} CASCADE")
             cur.execute("DROP TABLE IF EXISTS pages")
         conn.commit()
         conn.close()
