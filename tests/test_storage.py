@@ -806,6 +806,8 @@ def test_get_stats_includes_top_slow_domains(pg_storage):
 
     stats = pg_storage.get_stats()
 
+    assert stats["total_pages"] == 0
+    assert stats["domains"] == 0
     assert stats["top_slow_domains"] == [
         {
             "domain": "slow.example",
