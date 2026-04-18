@@ -5,7 +5,9 @@ import os
 import psycopg2
 import pytest
 
-from crawler.migrate import apply_migrations
+from importlib import resources
+
+from crawler.migrate import BASELINE_VERSION, MIGRATIONS_PACKAGE, SCHEMA_MIGRATIONS_SQL, apply_migrations
 from crawler.url_ledger import (
     BLOCKED_DOMAIN_BACKOFF_TABLE,
     LEASE_TABLE,
@@ -62,29 +64,8 @@ def test_apply_migrations_creates_expected_tables(migrated_dsn):
     applied = apply_migrations(migrated_dsn)
 
     assert applied == [
-        "001_initial_schema.sql",
-        "002_runtime_stats.sql",
-        "003_frontier_queue_classes.sql",
-        "004_reclassify_frontier_queue_classes.sql",
-        "005_rebalance_exploration_queue_classes.sql",
-        "006_reclassify_queue_by_domain_novelty.sql",
-        "007_frontier_pending_queue_tables.sql",
-        "008_expand_frontier_pending_queue_tables.sql",
-        "009_frontier_active_lease_table.sql",
-        "010_frontier_queue_branch_keys.sql",
-        "011_frontier_blocked_domain_backoff_queue.sql",
-        "012_blocked_domain_backoff_quarantined_at.sql",
-        "013_domain_state_latency_ewma.sql",
-        "014_rename_frontier_lease_active.sql",
-        "015_frontier_terminal_decision.sql",
-        "016_drop_frontier_queue_class.sql",
-        "017_drop_frontier_status.sql",
-        "018_drop_frontier_discovery_kind.sql",
-        "019_drop_frontier_archetype.sql",
-        "020_rename_frontier_to_url_ledger.sql",
-        "021_drop_depth_columns.sql",
-        "022_drop_url_ledger_lease_columns.sql",
-        "023_rename_frontier_queue_tables.sql",
+        "001_current_schema.sql",
+        "024_normalize_constraint_names.sql",
     ]
 
     conn = psycopg2.connect(migrated_dsn)
@@ -168,3 +149,38 @@ def test_apply_migrations_is_idempotent(migrated_dsn):
     applied = apply_migrations(migrated_dsn)
 
     assert applied == []
+
+
+def test_apply_migrations_skips_baseline_when_legacy_history_exists(migrated_dsn):
+    root = resources.files(MIGRATIONS_PACKAGE)
+    baseline_sql = root.joinpath(BASELINE_VERSION).read_text(encoding="utf-8")
+
+    conn = psycopg2.connect(migrated_dsn)
+    conn.autocommit = False
+    try:
+        with conn.cursor() as cur:
+            cur.execute(SCHEMA_MIGRATIONS_SQL)
+            cur.execute(baseline_sql)
+            cur.execute(
+                "INSERT INTO schema_migrations (version, applied_at) VALUES (%s, EXTRACT(epoch FROM now()))",
+                ("023_rename_frontier_queue_tables.sql",),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+    applied = apply_migrations(migrated_dsn)
+
+    assert applied == ["024_normalize_constraint_names.sql"]
+
+    conn = psycopg2.connect(migrated_dsn)
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT version FROM schema_migrations ORDER BY version")
+            versions = [version for (version,) in cur.fetchall()]
+    finally:
+        conn.close()
+
+    assert "023_rename_frontier_queue_tables.sql" in versions
+    assert "024_normalize_constraint_names.sql" in versions
+    assert BASELINE_VERSION not in versions

@@ -8,6 +8,7 @@ from time import time
 import psycopg2
 
 MIGRATIONS_PACKAGE = "crawler.sql_migrations"
+BASELINE_VERSION = "001_current_schema.sql"
 SCHEMA_MIGRATIONS_SQL = """
 CREATE TABLE IF NOT EXISTS schema_migrations (
     version TEXT PRIMARY KEY,
@@ -41,6 +42,8 @@ def apply_migrations(dsn: str) -> list[str]:
         applied_now: list[str] = []
         root = resources.files(MIGRATIONS_PACKAGE)
         for version in _migration_names():
+            if version == BASELINE_VERSION and applied:
+                continue
             if version in applied:
                 continue
 
