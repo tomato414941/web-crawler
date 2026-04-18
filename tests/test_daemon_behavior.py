@@ -58,9 +58,9 @@ def pg_resources():
     apply_migrations(dsn)
 
     storage = PgStorage(dsn)
-    frontier = UrlLedger(storage.conn)
+    ledger = UrlLedger(storage.conn)
 
-    yield dsn, storage, frontier
+    yield dsn, storage, ledger
 
     storage._conn.rollback()
     storage.close()
@@ -81,17 +81,17 @@ def _save_page(storage: PgStorage, url: str, timestamp: float) -> None:
 
 
 def test_refresh_stale_skips_when_pending_queue_is_full(pg_resources):
-    _dsn, storage, frontier = pg_resources
+    _dsn, storage, ledger = pg_resources
     now = time.time()
 
     for idx in range(3):
-        frontier.place(
+        ledger.place(
             CrawlTask(url=f"https://example.com/pending-{idx}", added_at=now + idx)
         )
 
     stale_url = "https://example.com/stale"
-    frontier.place(CrawlTask(url=stale_url, added_at=now - 100))
-    frontier.mark_done(stale_url)
+    ledger.place(CrawlTask(url=stale_url, added_at=now - 100))
+    ledger.mark_done(stale_url)
     _save_page(storage, stale_url, now - 86400)
 
     daemon = CrawlDaemon(
@@ -101,7 +101,7 @@ def test_refresh_stale_skips_when_pending_queue_is_full(pg_resources):
         refresh_ttl=3600,
     )
 
-    daemon._refresh_stale(storage, frontier)
+    daemon._refresh_stale(storage, ledger)
 
     with storage._conn.cursor() as cur:
         cur.execute(
@@ -110,15 +110,15 @@ def test_refresh_stale_skips_when_pending_queue_is_full(pg_resources):
         )
         (refresh_count,) = cur.fetchone()
 
-    assert frontier.pending_count() == 3
+    assert ledger.pending_count() == 3
     assert refresh_count == 0
 
 
 def test_refresh_stale_requeues_only_oldest_rows_needed(pg_resources):
-    _dsn, storage, frontier = pg_resources
+    _dsn, storage, ledger = pg_resources
     now = time.time()
 
-    frontier.place(CrawlTask(url="https://example.com/pending", added_at=now))
+    ledger.place(CrawlTask(url="https://example.com/pending", added_at=now))
 
     stale_urls = [
         ("https://example.com/stale-1", now - 300),
@@ -126,8 +126,8 @@ def test_refresh_stale_requeues_only_oldest_rows_needed(pg_resources):
         ("https://example.com/stale-3", now - 100),
     ]
     for url, added_at in stale_urls:
-        frontier.place(CrawlTask(url=url, added_at=added_at))
-        frontier.mark_done(url)
+        ledger.place(CrawlTask(url=url, added_at=added_at))
+        ledger.mark_done(url)
         _save_page(storage, url, added_at)
 
     daemon = CrawlDaemon(
@@ -137,7 +137,7 @@ def test_refresh_stale_requeues_only_oldest_rows_needed(pg_resources):
         refresh_ttl=60,
     )
 
-    daemon._refresh_stale(storage, frontier)
+    daemon._refresh_stale(storage, ledger)
 
     with storage._conn.cursor() as cur:
         cur.execute(
@@ -150,7 +150,7 @@ def test_refresh_stale_requeues_only_oldest_rows_needed(pg_resources):
         )
         refresh_urls = [url for (url,) in cur.fetchall()]
 
-    assert frontier.pending_count() == 3
+    assert ledger.pending_count() == 3
     assert refresh_urls == [
         "https://example.com/stale-1",
         "https://example.com/stale-2",
@@ -163,7 +163,7 @@ async def test_daemon_does_not_auto_requeue_failed_urls():
         def close(self):
             return None
 
-    class FakeFrontier:
+    class FakeLedger:
         def __init__(self):
             self.requeue_failed_calls = 0
 
@@ -195,16 +195,16 @@ async def test_daemon_does_not_auto_requeue_failed_urls():
         cycle_pages=10,
         refresh_ttl=3600,
     )
-    frontier = FakeFrontier()
+    ledger = FakeLedger()
     storage = FakeStorage()
 
     daemon._install_signals = lambda: None
-    daemon._refresh_stale = lambda _storage, _frontier: None
+    daemon._refresh_stale = lambda _storage, _ledger: None
 
     async def fake_connect():
-        return storage, frontier
+        return storage, ledger
 
-    async def fake_run_cycle(_storage, _frontier):
+    async def fake_run_cycle(_storage, _ledger):
         daemon._shutdown = True
         return 0, {}
 
@@ -213,11 +213,11 @@ async def test_daemon_does_not_auto_requeue_failed_urls():
 
     await daemon.run()
 
-    assert frontier.requeue_failed_calls == 0
+    assert ledger.requeue_failed_calls == 0
 
 
 def test_bootstrap_scheduler_inserts_seeds_only_when_empty():
-    class FakeFrontier:
+    class FakeLedger:
         def __init__(self, pending):
             self._pending = pending
             self.upsert_calls = []
@@ -238,18 +238,18 @@ def test_bootstrap_scheduler_inserts_seeds_only_when_empty():
         refresh_ttl=3600,
     )
 
-    empty_frontier = FakeFrontier(pending=0)
-    populated_frontier = FakeFrontier(pending=3)
+    empty_ledger = FakeLedger(pending=0)
+    populated_ledger = FakeLedger(pending=3)
 
-    inserted = daemon._bootstrap_scheduler(empty_frontier)
-    skipped = daemon._bootstrap_scheduler(populated_frontier)
+    inserted = daemon._bootstrap_scheduler(empty_ledger)
+    skipped = daemon._bootstrap_scheduler(populated_ledger)
 
     assert inserted == 2
-    assert empty_frontier.upsert_calls == [
+    assert empty_ledger.upsert_calls == [
         (["https://example.com/", "https://example.org/"], 2.0)
     ]
     assert skipped == 0
-    assert populated_frontier.upsert_calls == []
+    assert populated_ledger.upsert_calls == []
 
 
 def test_format_error_breakdown_orders_known_categories():
@@ -270,7 +270,7 @@ async def test_daemon_logs_cycle_error_breakdown(caplog):
         def close(self):
             return None
 
-    class FakeFrontier:
+    class FakeLedger:
         def pending_count(self, queue_classes=None, runnable_surface=None):
             return 1
 
@@ -295,16 +295,16 @@ async def test_daemon_logs_cycle_error_breakdown(caplog):
         cycle_pages=10,
         refresh_ttl=3600,
     )
-    frontier = FakeFrontier()
+    ledger = FakeLedger()
     storage = FakeStorage()
 
     daemon._install_signals = lambda: None
-    daemon._refresh_stale = lambda _storage, _frontier: None
+    daemon._refresh_stale = lambda _storage, _ledger: None
 
     async def fake_connect():
-        return storage, frontier
+        return storage, ledger
 
-    async def fake_run_cycle(_storage, _frontier):
+    async def fake_run_cycle(_storage, _ledger):
         daemon._shutdown = True
         return 2, {"http_4xx": 3, "timeout": 1}
 
@@ -323,7 +323,7 @@ async def test_daemon_uses_configured_backlog_controls():
         def close(self):
             return None
 
-    class FakeFrontier:
+    class FakeLedger:
         def __init__(self):
             self.defer_args = None
 
@@ -355,16 +355,16 @@ async def test_daemon_uses_configured_backlog_controls():
         deferred_runnable_per_branch=2,
         deferred_surface_defer_seconds=12.0,
     )
-    frontier = FakeFrontier()
+    ledger = FakeLedger()
     storage = FakeStorage()
 
     daemon._install_signals = lambda: None
-    daemon._refresh_stale = lambda _storage, _frontier: None
+    daemon._refresh_stale = lambda _storage, _ledger: None
 
     async def fake_connect():
-        return storage, frontier
+        return storage, ledger
 
-    async def fake_run_cycle(_storage, _frontier):
+    async def fake_run_cycle(_storage, _ledger):
         daemon._shutdown = True
         return 0, {}
 
@@ -373,7 +373,7 @@ async def test_daemon_uses_configured_backlog_controls():
 
     await daemon.run()
 
-    assert frontier.defer_args == {
+    assert ledger.defer_args == {
         "keep_runnable_per_domain": 7,
         "keep_runnable_per_branch": 2,
         "defer_seconds": 12.0,
@@ -392,7 +392,7 @@ async def test_daemon_persists_readiness_breakdown_while_waiting_for_ready():
         def upsert_runtime_stats(self, component, payload):
             self.payloads.append((component, dict(payload)))
 
-    class FakeFrontier:
+    class FakeLedger:
         def pending_count(self, queue_classes=None, runnable_surface=None):
             return 1
 
@@ -436,14 +436,14 @@ async def test_daemon_persists_readiness_breakdown_while_waiting_for_ready():
         idle_sleep=30.0,
         min_runnable_sleep=1.0,
     )
-    frontier = FakeFrontier()
+    ledger = FakeLedger()
     storage = FakeStorage()
 
     daemon._install_signals = lambda: None
-    daemon._refresh_stale = lambda _storage, _frontier: None
+    daemon._refresh_stale = lambda _storage, _ledger: None
 
     async def fake_connect():
-        return storage, frontier
+        return storage, ledger
 
     async def fake_sleep(seconds):
         daemon._shutdown = True
@@ -472,7 +472,7 @@ async def test_daemon_persists_readiness_breakdown_while_waiting_for_ready():
 
 
 def test_ensure_frontline_supply_tops_up_when_frontline_surface_is_starved():
-    class FakeFrontier:
+    class FakeLedger:
         def __init__(self):
             self.upsert_calls = []
             self.host_promote_calls = []
@@ -514,16 +514,16 @@ def test_ensure_frontline_supply_tops_up_when_frontline_surface_is_starved():
         cycle_pages=10,
         refresh_ttl=3600,
     )
-    frontier = FakeFrontier()
+    ledger = FakeLedger()
 
-    daemon._ensure_frontline_supply(frontier)
+    daemon._ensure_frontline_supply(ledger)
 
-    assert frontier.host_promote_calls == [(3, 1)]
-    assert frontier.upsert_calls == []
+    assert ledger.host_promote_calls == [(3, 1)]
+    assert ledger.upsert_calls == []
 
 
 def test_admit_discovered_backfills_pending_deficit():
-    class FakeFrontier:
+    class FakeLedger:
         def __init__(self):
             self.admit_calls = []
 
@@ -541,16 +541,16 @@ def test_admit_discovered_backfills_pending_deficit():
         cycle_pages=10,
         refresh_ttl=3600,
     )
-    frontier = FakeFrontier()
+    ledger = FakeLedger()
 
-    admitted = daemon._policy.admit_discovered(frontier)
+    admitted = daemon._policy.admit_discovered(ledger)
 
     assert admitted == 2
-    assert frontier.admit_calls == [(7, None, "deferred", "explore")]
+    assert ledger.admit_calls == [(7, None, "deferred", "explore")]
 
 
 def test_admit_discovered_stays_idle_when_pending_is_healthy():
-    class FakeFrontier:
+    class FakeLedger:
         def __init__(self):
             self.admit_calls = []
 
@@ -568,16 +568,16 @@ def test_admit_discovered_stays_idle_when_pending_is_healthy():
         cycle_pages=10,
         refresh_ttl=3600,
     )
-    frontier = FakeFrontier()
+    ledger = FakeLedger()
 
-    admitted = daemon._policy.admit_discovered(frontier)
+    admitted = daemon._policy.admit_discovered(ledger)
 
     assert admitted == 0
-    assert frontier.admit_calls == []
+    assert ledger.admit_calls == []
 
 
-def test_ensure_frontline_supply_does_not_bootstrap_empty_frontier():
-    class FakeFrontier:
+def test_ensure_frontline_supply_does_not_bootstrap_empty_ledger():
+    class FakeLedger:
         def __init__(self):
             self.upsert_calls = []
             self.host_promote_calls = []
@@ -611,16 +611,16 @@ def test_ensure_frontline_supply_does_not_bootstrap_empty_frontier():
         cycle_pages=10,
         refresh_ttl=3600,
     )
-    frontier = FakeFrontier()
+    ledger = FakeLedger()
 
-    daemon._ensure_frontline_supply(frontier)
+    daemon._ensure_frontline_supply(ledger)
 
-    assert frontier.host_promote_calls == [(3, 1)]
-    assert frontier.upsert_calls == []
+    assert ledger.host_promote_calls == [(3, 1)]
+    assert ledger.upsert_calls == []
 
 
 def test_ensure_frontline_supply_stays_idle_when_host_promotion_is_insufficient():
-    class FakeFrontier:
+    class FakeLedger:
         def __init__(self):
             self.upsert_calls = []
             self.host_promote_calls = []
@@ -662,16 +662,16 @@ def test_ensure_frontline_supply_stays_idle_when_host_promotion_is_insufficient(
         cycle_pages=10,
         refresh_ttl=3600,
     )
-    frontier = FakeFrontier()
+    ledger = FakeLedger()
 
-    daemon._ensure_frontline_supply(frontier)
+    daemon._ensure_frontline_supply(ledger)
 
-    assert frontier.host_promote_calls == [(3, 1)]
-    assert frontier.upsert_calls == []
+    assert ledger.host_promote_calls == [(3, 1)]
+    assert ledger.upsert_calls == []
 
 
 def test_ensure_frontline_supply_does_not_top_up_when_frontline_surface_is_healthy():
-    class FakeFrontier:
+    class FakeLedger:
         def __init__(self):
             self.upsert_calls = []
 
@@ -708,15 +708,15 @@ def test_ensure_frontline_supply_does_not_top_up_when_frontline_surface_is_healt
         cycle_pages=10,
         refresh_ttl=3600,
     )
-    frontier = FakeFrontier()
+    ledger = FakeLedger()
 
-    daemon._ensure_frontline_supply(frontier)
+    daemon._ensure_frontline_supply(ledger)
 
-    assert frontier.upsert_calls == []
+    assert ledger.upsert_calls == []
 
 
 def test_ensure_frontline_supply_does_not_reinsert_when_frontline_pending_is_high_but_runnable_is_zero():
-    class FakeFrontier:
+    class FakeLedger:
         def __init__(self):
             self.upsert_calls = []
             self.host_promote_calls = []
@@ -759,16 +759,16 @@ def test_ensure_frontline_supply_does_not_reinsert_when_frontline_pending_is_hig
         cycle_pages=10,
         refresh_ttl=3600,
     )
-    frontier = FakeFrontier()
+    ledger = FakeLedger()
 
-    daemon._ensure_frontline_supply(frontier)
+    daemon._ensure_frontline_supply(ledger)
 
-    assert frontier.host_promote_calls == [(28, 1)]
-    assert frontier.upsert_calls == []
+    assert ledger.host_promote_calls == [(28, 1)]
+    assert ledger.upsert_calls == []
 
 
 def test_ensure_frontline_supply_tops_up_when_frontline_host_diversity_is_low():
-    class FakeFrontier:
+    class FakeLedger:
         def __init__(self):
             self.upsert_calls = []
             self.host_promote_calls = []
@@ -810,16 +810,16 @@ def test_ensure_frontline_supply_tops_up_when_frontline_host_diversity_is_low():
         cycle_pages=10,
         refresh_ttl=3600,
     )
-    frontier = FakeFrontier()
+    ledger = FakeLedger()
 
-    daemon._ensure_frontline_supply(frontier)
+    daemon._ensure_frontline_supply(ledger)
 
-    assert frontier.host_promote_calls == [(22, 1)]
-    assert frontier.upsert_calls == []
+    assert ledger.host_promote_calls == [(22, 1)]
+    assert ledger.upsert_calls == []
 
 
 def test_ensure_frontline_supply_stays_idle_when_only_runnable_depth_is_low():
-    class FakeFrontier:
+    class FakeLedger:
         def __init__(self):
             self.host_promote_calls = []
 
@@ -851,15 +851,15 @@ def test_ensure_frontline_supply_stays_idle_when_only_runnable_depth_is_low():
         cycle_pages=10,
         refresh_ttl=3600,
     )
-    frontier = FakeFrontier()
+    ledger = FakeLedger()
 
-    daemon._ensure_frontline_supply(frontier)
+    daemon._ensure_frontline_supply(ledger)
 
-    assert frontier.host_promote_calls == []
+    assert ledger.host_promote_calls == []
 
 
 def test_promote_blocked_retry_restores_small_subset_when_ready_is_thin():
-    class FakeFrontier:
+    class FakeLedger:
         def __init__(self):
             self.calls = []
 
@@ -889,16 +889,16 @@ def test_promote_blocked_retry_restores_small_subset_when_ready_is_thin():
         cycle_pages=10,
         refresh_ttl=3600,
     )
-    frontier = FakeFrontier()
+    ledger = FakeLedger()
 
-    promoted = daemon._promote_blocked_retry(frontier)
+    promoted = daemon._promote_blocked_retry(ledger)
 
     assert promoted == 2
-    assert frontier.calls == [(17, 1, 8)]
+    assert ledger.calls == [(17, 1, 8)]
 
 
 def test_promote_blocked_retry_surges_when_runnable_is_zero():
-    class FakeFrontier:
+    class FakeLedger:
         def __init__(self):
             self.calls = []
 
@@ -928,16 +928,16 @@ def test_promote_blocked_retry_surges_when_runnable_is_zero():
         cycle_pages=10,
         refresh_ttl=3600,
     )
-    frontier = FakeFrontier()
+    ledger = FakeLedger()
 
-    promoted = daemon._promote_blocked_retry(frontier)
+    promoted = daemon._promote_blocked_retry(ledger)
 
     assert promoted == 5
-    assert frontier.calls == [(20, 20, 8)]
+    assert ledger.calls == [(20, 20, 8)]
 
 
 def test_promote_blocked_retry_skips_when_runnable_is_healthy():
-    class FakeFrontier:
+    class FakeLedger:
         def __init__(self):
             self.calls = []
 
@@ -967,16 +967,16 @@ def test_promote_blocked_retry_skips_when_runnable_is_healthy():
         cycle_pages=10,
         refresh_ttl=3600,
     )
-    frontier = FakeFrontier()
+    ledger = FakeLedger()
 
-    promoted = daemon._promote_blocked_retry(frontier)
+    promoted = daemon._promote_blocked_retry(ledger)
 
     assert promoted == 0
-    assert frontier.calls == []
+    assert ledger.calls == []
 
 
 def test_promote_blocked_retry_runs_when_runnable_is_healthy_but_host_diversity_is_low():
-    class FakeFrontier:
+    class FakeLedger:
         def __init__(self):
             self.calls = []
 
@@ -1006,16 +1006,16 @@ def test_promote_blocked_retry_runs_when_runnable_is_healthy_but_host_diversity_
         cycle_pages=10,
         refresh_ttl=3600,
     )
-    frontier = FakeFrontier()
+    ledger = FakeLedger()
 
-    promoted = daemon._promote_blocked_retry(frontier)
+    promoted = daemon._promote_blocked_retry(ledger)
 
     assert promoted == 3
-    assert frontier.calls == [(8, 1, 8)]
+    assert ledger.calls == [(8, 1, 8)]
 
 
 def test_retire_blocked_retry_uses_configured_thresholds():
-    class FakeFrontier:
+    class FakeLedger:
         def __init__(self):
             self.calls = []
 
@@ -1033,16 +1033,16 @@ def test_retire_blocked_retry_uses_configured_thresholds():
         cycle_pages=10,
         refresh_ttl=3600,
     )
-    frontier = FakeFrontier()
+    ledger = FakeLedger()
 
-    retired = daemon._retire_blocked_retry(frontier)
+    retired = daemon._retire_blocked_retry(ledger)
 
     assert retired == 3
-    assert frontier.calls == [(64, 86400.0)]
+    assert ledger.calls == [(64, 86400.0)]
 
 
 def test_restore_recovered_blocked_retry_uses_cycle_sized_budget():
-    class FakeFrontier:
+    class FakeLedger:
         def __init__(self):
             self.calls = []
 
@@ -1060,9 +1060,9 @@ def test_restore_recovered_blocked_retry_uses_cycle_sized_budget():
         cycle_pages=300,
         refresh_ttl=3600,
     )
-    frontier = FakeFrontier()
+    ledger = FakeLedger()
 
-    restored = daemon._restore_recovered_blocked_retry(frontier)
+    restored = daemon._restore_recovered_blocked_retry(ledger)
 
     assert restored == 7
-    assert frontier.calls == [(300, 20)]
+    assert ledger.calls == [(300, 20)]

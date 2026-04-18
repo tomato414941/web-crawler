@@ -132,7 +132,7 @@ def test_save_drops_nul_content_to_metadata_only(pg_storage):
     assert content == ""
 
 
-def test_get_stats_includes_frontier_breakdown(pg_storage):
+def test_get_stats_includes_scheduler_breakdown(pg_storage):
     page_results = [
         {
             "url": "https://example.com/page1",
@@ -178,7 +178,15 @@ def test_get_stats_includes_frontier_breakdown(pg_storage):
 
     assert stats["total_pages"] == 2
     assert stats["domains"] == 2
-    assert stats["scheduler_status"] == {"done": 1, "pending": 2}
+    assert stats["scheduler_status"] == {
+        "leased": 0,
+        "done": 0,
+        "failed": 0,
+        "pending_surfaces": {"frontline": 2},
+        "blocked_surfaces": {},
+        "pending": 2,
+        "total": 2,
+    }
     assert stats["pending_surfaces"] == {"frontline": 2}
     assert stats["blocked_surfaces"] == {}
     assert stats["readiness"] == {
@@ -656,7 +664,7 @@ def test_get_stats_includes_active_error_breakdown(pg_storage):
     ]
 
 
-def test_get_stats_rejects_legacy_frontier_schema(pg_storage):
+def test_get_stats_rejects_legacy_queue_schema(pg_storage):
     result = {
         "url": "https://example.com/page1",
         "status": 200,
