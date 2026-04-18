@@ -9,7 +9,7 @@ from crawler.crawl import CrawlerEngine
 from crawler.url_ledger import CrawlTask
 
 
-class _FakeFrontier:
+class _FakeLedger:
     def __init__(self, task):
         self._task = task
         self.done = []
@@ -37,12 +37,6 @@ class _FakeFrontier:
     def admit_discovered_tasks(self, tasks):
         self.place_many(tasks)
         return len(tasks)
-
-    def add(self, task):
-        self.place(task)
-
-    def add_many(self, tasks):
-        self.place_many(tasks)
 
     def pending_count(self):
         return 0
@@ -91,11 +85,11 @@ class _FakeStorage:
 
 @pytest.mark.asyncio
 async def test_crawler_engine_records_stage_timings():
-    frontier = _FakeFrontier(CrawlTask(url="https://example.com/", lease_token="lease-1"))
+    ledger = _FakeLedger(CrawlTask(url="https://example.com/", lease_token="lease-1"))
     engine = CrawlerEngine(
         start_url="https://example.com/",
         max_pages=1,
-        url_ledger=frontier,
+        url_ledger=ledger,
         domain_manager=_FakeDomainManager(),
     )
     engine.fetcher = _FakeFetcher()
@@ -123,23 +117,23 @@ async def test_crawler_engine_records_stage_timings():
     assert result.timings.publish_queue_depth >= 0
     assert result.timings.process_ms >= result.timings.fetch_ms
     assert result.timings.process_ms >= result.timings.slot_ms
-    assert frontier.done == [("https://example.com/", "lease-1")]
-    assert frontier.added
+    assert ledger.done == [("https://example.com/", "lease-1")]
+    assert ledger.added
 
 
-class _SlowFrontier(_FakeFrontier):
+class _SlowLedger(_FakeLedger):
     def place_many(self, tasks):
         time.sleep(0.25)
         super().place_many(tasks)
 
 
 @pytest.mark.asyncio
-async def test_parse_frontier_delay_does_not_extend_fetch_slot():
-    frontier = _SlowFrontier(CrawlTask(url="https://example.com/", lease_token="lease-1"))
+async def test_parse_scheduler_delay_does_not_extend_fetch_slot():
+    ledger = _SlowLedger(CrawlTask(url="https://example.com/", lease_token="lease-1"))
     engine = CrawlerEngine(
         start_url="https://example.com/",
         max_pages=1,
-        url_ledger=frontier,
+        url_ledger=ledger,
         domain_manager=_FakeDomainManager(),
     )
     engine.fetcher = _FakeFetcher()
@@ -161,11 +155,11 @@ class _SlowStorage(_FakeStorage):
 
 @pytest.mark.asyncio
 async def test_queue_wait_metrics_record_backpressure():
-    frontier = _FakeFrontier(CrawlTask(url="https://example.com/", lease_token="lease-1"))
+    ledger = _FakeLedger(CrawlTask(url="https://example.com/", lease_token="lease-1"))
     engine = CrawlerEngine(
         start_url="https://example.com/",
         max_pages=1,
-        url_ledger=frontier,
+        url_ledger=ledger,
         domain_manager=_FakeDomainManager(),
     )
     engine.fetcher = _FakeFetcher()

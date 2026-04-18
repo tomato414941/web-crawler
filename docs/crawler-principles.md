@@ -51,12 +51,10 @@ Reasons:
 
 In the ideal model, `explore` remains an intent, while surface names converge toward state terms such as `scheduled` and `runnable`.
 
-## Frontier Principle
+## Runnable Capability Principle
 
-Here, `frontier` is a conceptual term for the scheduler's runnable frontier, not a specific
-module or table name.
-
-An ideal frontier is not just a set of URLs. It is better understood as a set of `runnable capability`.
+The scheduler should not be modeled as a raw set of URLs. It is better understood as a set of
+`runnable capability`.
 
 The scheduler primarily wants to know:
 
@@ -64,7 +62,7 @@ The scheduler primarily wants to know:
 - how much runnable work each host has
 - which intents that work belongs to
 
-In this sense, the frontier's first-class unit leans more toward host/site than raw URL.
+In this sense, the scheduler's first-class unit leans more toward host/site than raw URL.
 
 ## Naming Guidance
 
