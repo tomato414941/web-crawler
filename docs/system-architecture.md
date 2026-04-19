@@ -24,13 +24,14 @@ ultimately expose, and what should each subsystem own?
 At the project level, the crawler should converge toward these layers:
 
 1. URL ledger
-2. Discovery and admission
-3. Scheduler membership
-4. Execution and lease ownership
-5. Host state
-6. Fetch / parse / finalize / persist pipeline
-7. Read models and operator surfaces
-8. Bootstrap and seed management
+2. Host ledger
+3. Discovery and admission
+4. Scheduler membership
+5. Execution and lease ownership
+6. Host state
+7. Fetch / parse / finalize / persist pipeline
+8. Read models and operator surfaces
+9. Bootstrap and seed management
 
 These layers should be separable even if the runtime still shares tables or code paths today.
 
@@ -54,7 +55,30 @@ It should not own:
 
 The ledger is durable fact, not live scheduling truth.
 
-## 2. Discovery And Admission
+## 2. Host Ledger
+
+The host ledger owns durable host identity and durable host history.
+
+It should answer:
+
+- do we know this host?
+- what registrable domain does this host belong to?
+- when did we first and last see it?
+- when did it last succeed or fail?
+- how many known URLs and crawl outcomes are associated with it?
+- what was the latest robots check summary?
+
+It should not own:
+
+- host pacing
+- backoff
+- active in-flight budget
+- runnable host eligibility
+
+The host ledger is durable fact. It is not the runtime host scheduler and not the worker-facing
+host-ready index.
+
+## 3. Discovery And Admission
 
 Discovery and admission own the transition from "a URL was found" to "the scheduler may consider
 this URL."
@@ -75,7 +99,7 @@ This is where `discovered` belongs conceptually.
 
 It should not automatically collapse into `backlog`.
 
-## 3. Scheduler Membership
+## 4. Scheduler Membership
 
 Scheduler membership owns the current live treatment of a URL.
 
@@ -97,7 +121,7 @@ Operational lanes are optional implementation surfaces, not first-class model co
 If the runtime keeps multiple worker lanes, they should be understood as temporary or operational
 groupings layered on top of scheduler membership, not as the primary definition of URL state.
 
-## 4. Execution And Lease Ownership
+## 5. Execution And Lease Ownership
 
 Execution owns active work ownership.
 
@@ -114,7 +138,7 @@ The execution strategy for choosing the next URL should remain subordinate to sc
 and host state. Details such as host-first lease queries, runtime-facing runnable views, and worker
 lane counts belong in the scheduler execution layer.
 
-## 5. Host State
+## 6. Host State
 
 Host state owns politeness, backoff, and capacity at the host/site level.
 
@@ -127,7 +151,7 @@ This layer should answer:
 
 Host state is not URL state. It is scheduler input.
 
-## 6. Crawl Pipeline
+## 7. Crawl Pipeline
 
 The crawl pipeline owns how work moves through execution.
 
@@ -143,7 +167,7 @@ synchronously.
 
 Pipeline stages are operational boundaries, not durable URL identity boundaries.
 
-## 7. Read Models And Operator Surfaces
+## 8. Read Models And Operator Surfaces
 
 Operator views should be derived from primary state, not treated as scheduler truth.
 
@@ -160,7 +184,7 @@ These are useful, but they are not primary state.
 Worker-facing runtime views can also be derived read models. They may exist for performance, but
 they should not redefine scheduler membership.
 
-## 8. Bootstrap And Seed Management
+## 9. Bootstrap And Seed Management
 
 Seeds are bootstrap input, not a permanent scheduler category.
 
@@ -177,6 +201,7 @@ It should not leak into normal scheduler treatment once URLs are inside the craw
 Current implementation concepts should converge toward the following meaning:
 
 - `url_ledger` => URL ledger
+- `host_ledger` => host ledger
 - `discover` / admission logic => discovery and admission
 - `scheduler_queue_*` => scheduler membership surfaces
 - worker lanes / queue-specific worker pools => operational execution surfaces, not model truth

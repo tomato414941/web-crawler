@@ -4,9 +4,10 @@ This document captures an abstract model for an idealized WWW crawler. It is not
 
 ## Core Separation
 
-An ideal crawler should separate at least these five concerns:
+An ideal crawler should separate at least these six concerns:
 
 - `ledger`: durable URL identity and history
+- `host ledger`: durable host identity and history
 - `scheduler membership`: which live surface a URL currently belongs to
 - `execution`: active leases and worker ownership
 - `host state`: host/site-level politeness and backoff
@@ -76,6 +77,7 @@ For the runtime execution design, see
 Naming guidance from the abstract model:
 
 - use `ledger` names for durable facts
+- use `host_ledger` for durable host identity and history, not runtime pacing
 - use `scheduled` / `runnable` / `leased` / `blocked` names for live state
 - use `explore` / `refresh` / `retry` for policy intent
 

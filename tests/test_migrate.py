@@ -38,6 +38,7 @@ def _reset_schema(dsn: str) -> None:
     try:
         with conn.cursor() as cur:
             cur.execute("DROP TABLE IF EXISTS public.schema_migrations")
+            cur.execute("DROP TABLE IF EXISTS public.host_ledger")
             cur.execute("DROP TABLE IF EXISTS public.host_state")
             cur.execute(f"DROP TABLE IF EXISTS public.{frontline_table}")
             cur.execute(f"DROP TABLE IF EXISTS public.{deferred_table}")
@@ -75,6 +76,7 @@ def test_apply_migrations_creates_expected_tables(migrated_dsn):
         "025_rename_physical_queue_columns.sql",
         "026_add_current_intent.sql",
         "027_rename_domain_to_host.sql",
+        "028_add_host_ledger.sql",
     ]
 
     conn = psycopg2.connect(migrated_dsn)
@@ -84,6 +86,7 @@ def test_apply_migrations_creates_expected_tables(migrated_dsn):
                 f"""
                 SELECT to_regclass('public.pages'),
                        to_regclass('public.url_ledger'),
+                       to_regclass('public.host_ledger'),
                        to_regclass('public.host_state'),
                        to_regclass('public.schema_migrations'),
                        to_regclass('public.crawler_runtime_stats'),
@@ -97,6 +100,7 @@ def test_apply_migrations_creates_expected_tables(migrated_dsn):
             assert cur.fetchone() == (
                 "pages",
                 "url_ledger",
+                "host_ledger",
                 "host_state",
                 "schema_migrations",
                 "crawler_runtime_stats",
@@ -186,6 +190,7 @@ def test_apply_migrations_skips_baseline_when_legacy_history_exists(migrated_dsn
         "025_rename_physical_queue_columns.sql",
         "026_add_current_intent.sql",
         "027_rename_domain_to_host.sql",
+        "028_add_host_ledger.sql",
     ]
 
     conn = psycopg2.connect(migrated_dsn)
@@ -201,4 +206,5 @@ def test_apply_migrations_skips_baseline_when_legacy_history_exists(migrated_dsn
     assert "025_rename_physical_queue_columns.sql" in versions
     assert "026_add_current_intent.sql" in versions
     assert "027_rename_domain_to_host.sql" in versions
+    assert "028_add_host_ledger.sql" in versions
     assert BASELINE_VERSION not in versions

@@ -4,9 +4,10 @@
 
 ## Core Separation
 
-理想的な crawler では、少なくとも次の 5 要素を分けて考えるべきである。
+理想的な crawler では、少なくとも次の 6 要素を分けて考えるべきである。
 
 - `ledger`: 発見済み URL の durable identity と履歴
+- `host ledger`: host の durable identity と履歴
 - `scheduler membership`: 現在どの live surface に属しているか
 - `execution`: active lease と worker ownership
 - `host state`: host/site 単位の politeness と backoff
@@ -75,6 +76,7 @@ runtime execution の設計は
 抽象モデルから見た naming の指針:
 
 - `ledger` 系の名前は durable fact に使う
+- `host_ledger` は durable host identity / history に使い、runtime pacing には使わない
 - `scheduled` / `runnable` / `leased` / `blocked` 系の名前は live state に使う
 - `explore` / `refresh` / `retry` は policy intent に使う
 

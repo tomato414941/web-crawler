@@ -13,6 +13,7 @@ from .host_state import PersistedHostState, RuntimeHostState
 from .tls import build_ssl_context
 
 if TYPE_CHECKING:
+    from .host_ledger import HostLedgerStore
     from .host_store import HostStore
 
 # Default TTL for robots.txt cache (1 hour)
@@ -70,6 +71,7 @@ class HostManager:
         max_retries: int = 3,
         robots_cache_ttl: float | None = None,
         host_store: "HostStore | None" = None,
+        host_ledger_store: "HostLedgerStore | None" = None,
         host_backoff_seconds: float | None = None,
         max_host_backoff_seconds: float | None = None,
     ):
@@ -81,6 +83,7 @@ class HostManager:
             settings.robots_cache_ttl if robots_cache_ttl is None else robots_cache_ttl
         )
         self._host_store = host_store
+        self._host_ledger_store = host_ledger_store
         self._host_backoff_seconds = (
             settings.host_backoff_seconds if host_backoff_seconds is None else host_backoff_seconds
         )
@@ -154,6 +157,10 @@ class HostManager:
         """Attach or replace the durable host store."""
         self._host_store = host_store
 
+    def attach_host_ledger_store(self, host_ledger_store: "HostLedgerStore | None") -> None:
+        """Attach or replace the durable host ledger store."""
+        self._host_ledger_store = host_ledger_store
+
     def build_persisted_state(self, host_key: str) -> PersistedHostState:
         """Create the durable state shape that P2 will persist."""
         return PersistedHostState(
@@ -184,10 +191,12 @@ class HostManager:
         parsed = urlparse(url)
         robots_url = f"{parsed.scheme}://{parsed.netloc}/robots.txt"
 
+        robots_status = "unavailable"
         try:
             client = await self._get_client()
             resp = await client.get(robots_url)
             if resp.status_code == 200:
+                robots_status = "ok"
                 parser = RobotExclusionRulesParser()
                 parser.parse(resp.text)
                 state.robots_parser = parser
@@ -196,7 +205,10 @@ class HostManager:
                 delay = parser.get_crawl_delay(self.user_agent)
                 if delay:
                     state.crawl_delay_seconds = max(delay, self.default_delay)
+            else:
+                robots_status = f"http_{resp.status_code}"
         except Exception:
+            robots_status = "error"
             pass  # robots.txt not available or error
 
         checked_at = time.time()
@@ -209,6 +221,12 @@ class HostManager:
                 checked_at=checked_at,
             )
             self._apply_persisted_state(state, persisted_state)
+        if self._host_ledger_store is not None:
+            self._host_ledger_store.record_robots_check(
+                state.host_key,
+                status=robots_status,
+                checked_at=checked_at,
+            )
 
     async def is_allowed(self, url: str) -> bool:
         """Check if URL is allowed by robots.txt (async version)."""

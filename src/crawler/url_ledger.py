@@ -13,6 +13,7 @@ from urllib.parse import urlparse
 import psycopg2.extras
 
 from .config import settings
+from .host_ledger import HostLedgerStore
 from .scheduler_observability import SchedulerObservability, SchedulerReadiness
 from .scheduler_quarantine import SchedulerQuarantine
 from .schema import assert_public_table_columns
@@ -227,6 +228,7 @@ class UrlLedger:
             else max_retry_backoff_seconds
         )
         self._host_store: HostStore | None = None
+        self._host_ledger = HostLedgerStore(conn)
         self._observability = SchedulerObservability(
             conn,
             physical_queue_tables=PHYSICAL_QUEUE_TABLES,
@@ -251,6 +253,11 @@ class UrlLedger:
     def attach_host_store(self, host_store: "HostStore | None") -> None:
         """Attach the persistent host scheduler used for lease selection."""
         self._host_store = host_store
+
+    @property
+    def host_ledger_store(self) -> HostLedgerStore:
+        """Return the durable host identity/history store."""
+        return self._host_ledger
 
     def _compute_retry_backoff(self, fail_streak: int) -> float:
         """Compute exponential retry backoff for a failed URL."""
@@ -1020,6 +1027,20 @@ class UrlLedger:
             )
         return pending_rows
 
+    def _new_host_counts_for_tasks(self, cur, tasks: list[CrawlTask]) -> Counter[str]:
+        """Return per-host counts for task URLs that are not already known."""
+        normalized_urls = sorted({task.url for task in tasks if task.url})
+        if not normalized_urls:
+            return Counter()
+        cur.execute(
+            f"SELECT url FROM {URL_LEDGER_TABLE} WHERE url = ANY(%s)",
+            (normalized_urls,),
+        )
+        existing_urls = {url for (url,) in cur.fetchall()}
+        return Counter(
+            urlparse(task.url).netloc for task in tasks if task.url not in existing_urls
+        )
+
     def requeue_urls(
         self,
         urls: list[str],
@@ -1119,6 +1140,7 @@ class UrlLedger:
 
         try:
             with self._conn.cursor() as cur:
+                new_host_counts = self._new_host_counts_for_tasks(cur, prepared_tasks)
                 psycopg2.extras.execute_values(
                     cur,
                     f"""INSERT INTO {URL_LEDGER_TABLE} (
@@ -1143,6 +1165,10 @@ class UrlLedger:
                 )
                 changed_rows = cur.fetchall()
                 changed = len(changed_rows)
+                seen_hosts = {urlparse(task.url).netloc for task in prepared_tasks if task.url}
+                host_counts = Counter({host: 0 for host in seen_hosts})
+                host_counts.update(new_host_counts)
+                self._host_ledger.record_discovered_urls_in_tx(cur, host_counts)
         except Exception:
             self._conn.rollback()
             logger.exception("Failed to upsert batch of %d URLs", len(tasks))
@@ -1649,12 +1675,14 @@ class UrlLedger:
                         terminal_reason = NULL,
                         terminalized_at = NULL
                     WHERE url = %s{lease_sql}
-                    RETURNING url""",
+                    RETURNING url, host""",
                 (now, now, normalized, *lease_params),
             )
             rows = cur.fetchall()
             self._delete_queue_entries(cur, [row[0] for row in rows])
             self._delete_active_leases(cur, [row[0] for row in rows])
+            for _url, host in rows:
+                self._host_ledger.record_success_in_tx(cur, host, at=now)
             updated = bool(rows)
         self._conn.commit()
         return updated
@@ -1674,7 +1702,7 @@ class UrlLedger:
 
         with self._conn.cursor() as cur:
             cur.execute(
-                f"SELECT fail_streak, priority FROM {URL_LEDGER_TABLE} AS ledger WHERE url = %s{lease_sql} FOR UPDATE",
+                f"SELECT fail_streak, priority, host FROM {URL_LEDGER_TABLE} AS ledger WHERE url = %s{lease_sql} FOR UPDATE",
                 (normalized, *lease_params),
             )
             row = cur.fetchone()
@@ -1712,6 +1740,8 @@ class UrlLedger:
                     ),
                 )
                 rows = cur.fetchall()
+                for _url, host, *_rest in rows:
+                    self._host_ledger.record_failure_in_tx(cur, host, at=now)
                 pending_rows = self._pending_rows_for_physical_queue(
                     rows,
                     self._single_physical_queue_for_surface(RUNNABLE_SURFACE_DEFERRED),
@@ -1730,7 +1760,7 @@ class UrlLedger:
                             terminal_reason = %s,
                             terminalized_at = %s
                         WHERE url = %s{lease_sql}
-                        RETURNING url""",
+                        RETURNING url, host""",
                     (
                         now,
                         next_fail_streak,
@@ -1746,6 +1776,8 @@ class UrlLedger:
                 urls = [row[0] for row in rows]
                 self._delete_queue_entries(cur, urls)
                 self._delete_active_leases(cur, urls)
+                for _url, host in rows:
+                    self._host_ledger.record_failure_in_tx(cur, host, at=now)
                 updated = bool(rows)
         self._conn.commit()
         return updated
@@ -1968,6 +2000,13 @@ class UrlLedger:
             )
 
         with self._conn.cursor() as cur:
+            normalized_urls = [row[0] for row in rows]
+            cur.execute(
+                f"SELECT url FROM {URL_LEDGER_TABLE} WHERE url = ANY(%s)",
+                (normalized_urls,),
+            )
+            existing_urls = {url for (url,) in cur.fetchall()}
+            new_host_counts = Counter(host for url, host, *_ in rows if url not in existing_urls)
             psycopg2.extras.execute_values(
                 cur,
                 f"""INSERT INTO {URL_LEDGER_TABLE} (
@@ -1989,6 +2028,10 @@ class UrlLedger:
                 page_size=200,
             )
             ledger_rows = cur.fetchall()
+            seen_hosts = {host for _url, host, *_ in rows if host}
+            host_counts = Counter({host: 0 for host in seen_hosts})
+            host_counts.update(new_host_counts)
+            self._host_ledger.record_discovered_urls_in_tx(cur, host_counts, seen_at=now)
             pending_rows = self._pending_rows_for_physical_queue(
                 ledger_rows,
                 self._single_physical_queue_for_surface(RUNNABLE_SURFACE_FRONTLINE),

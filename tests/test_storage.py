@@ -8,6 +8,7 @@ import psycopg2
 from psycopg2.extensions import TRANSACTION_STATUS_IDLE
 
 from crawler.migrate import apply_migrations
+from crawler.host_ledger import HOST_LEDGER_TABLE
 from crawler.url_ledger import (
     BLOCKED_HOST_BACKOFF_TABLE,
     LEASE_TABLE,
@@ -34,6 +35,7 @@ def _reset_schema(dsn: str) -> None:
     try:
         with conn.cursor() as cur:
             cur.execute("DROP TABLE IF EXISTS public.schema_migrations")
+            cur.execute(f"DROP TABLE IF EXISTS public.{HOST_LEDGER_TABLE}")
             cur.execute("DROP TABLE IF EXISTS public.host_state")
             cur.execute(f"DROP TABLE IF EXISTS public.{frontline_table}")
             cur.execute(f"DROP TABLE IF EXISTS public.{deferred_table}")

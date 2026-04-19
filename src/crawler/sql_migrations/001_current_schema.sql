@@ -20,6 +20,35 @@ CREATE INDEX idx_url_ledger_host
 CREATE INDEX idx_url_ledger_current_intent
     ON public.url_ledger(current_intent);
 
+CREATE TABLE public.host_ledger (
+    host text NOT NULL,
+    registrable_domain text,
+    first_seen_at double precision NOT NULL,
+    last_seen_at double precision NOT NULL,
+    last_success_at double precision,
+    last_failure_at double precision,
+    known_url_count bigint DEFAULT 0 NOT NULL,
+    success_count bigint DEFAULT 0 NOT NULL,
+    failure_count bigint DEFAULT 0 NOT NULL,
+    robots_last_checked_at double precision,
+    robots_status text,
+    created_at double precision NOT NULL,
+    updated_at double precision NOT NULL,
+    CONSTRAINT host_ledger_pkey PRIMARY KEY (host)
+);
+
+CREATE INDEX idx_host_ledger_registrable_domain
+    ON public.host_ledger(registrable_domain);
+
+CREATE INDEX idx_host_ledger_last_seen_at
+    ON public.host_ledger(last_seen_at);
+
+CREATE INDEX idx_host_ledger_last_success_at
+    ON public.host_ledger(last_success_at);
+
+CREATE INDEX idx_host_ledger_last_failure_at
+    ON public.host_ledger(last_failure_at);
+
 CREATE TABLE public.host_state (
     host_key text NOT NULL,
     crawl_delay_seconds double precision DEFAULT 1.0 NOT NULL,

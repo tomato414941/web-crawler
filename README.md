@@ -172,6 +172,7 @@ crawler/
 ├── scheduler_quarantine.py    # Retry quarantine state transitions
 ├── daemon_policy.py    # Pre-cycle scheduler policy
 ├── host_manager.py   # robots.txt, runtime host state
+├── host_ledger.py    # Durable host identity / history
 ├── host_store.py     # Persistent host scheduling state
 ├── host_state.py     # Runtime / persisted host state models
 ├── storage.py          # PostgreSQL storage
@@ -222,6 +223,7 @@ Two persistent schedulers work together:
 Current scheduler state is split across explicit physical tables:
 
 - `url_ledger` — URL ledger and crawl result metadata
+- `host_ledger` — durable host identity and host-level history
 - `scheduler_queue_frontline` — frontline runnable or scheduled discovery work
 - `scheduler_queue_deferred` — deferred discovery work
 - `scheduler_queue_refresh` — stale-page revisit work

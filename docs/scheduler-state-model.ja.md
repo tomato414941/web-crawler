@@ -47,6 +47,31 @@ URL ledger は「この URL を知っているか」「この URL について�
 
 ledger は履歴と identity を持つ場所であり、live scheduler そのものではない。
 
+### 1.5. Host ledger
+
+Host ledger は「この host を知っているか」「この host についてどの durable history を持つか」に答える。
+
+ここに属するもの:
+
+- host key
+- analysis や将来 policy 用の registrable domain
+- first seen timestamp
+- last seen timestamp
+- last success timestamp
+- last failure timestamp
+- known URL count
+- success / failure counter
+- robots check summary
+
+ここに scheduler truth として置くべきでないもの:
+
+- next request time
+- backoff deadline
+- active in-flight budget
+- runnable host eligibility
+
+host ledger は host identity と history であり、host scheduler ではない。
+
 ### 2. Scheduler membership
 
 scheduler は「この URL を今どう扱うか」に答える。

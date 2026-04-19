@@ -47,6 +47,31 @@ Fields that should not be scheduler truth here:
 
 The ledger is history and identity, not the live scheduler.
 
+### 1.5. Host ledger
+
+The host ledger answers: do we know this host, and what durable history do we have for it?
+
+Fields that belong here:
+
+- host key
+- registrable domain for analysis and future policy
+- first seen timestamp
+- last seen timestamp
+- last success timestamp
+- last failure timestamp
+- known URL count
+- success and failure counters
+- robots check summary
+
+Fields that should not be scheduler truth here:
+
+- next request time
+- backoff deadline
+- active in-flight budget
+- runnable host eligibility
+
+The host ledger is host identity and history. It is not the host scheduler.
+
 ### 2. Scheduler membership
 
 The scheduler answers: how should this URL be treated now?

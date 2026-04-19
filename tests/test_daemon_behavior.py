@@ -21,6 +21,7 @@ from crawler.url_ledger import (
 )
 from crawler.migrate import apply_migrations
 from crawler.storage import PgStorage
+from crawler.host_ledger import HOST_LEDGER_TABLE
 
 pytestmark = pytest.mark.skipif(
     not os.environ.get("TEST_POSTGRES_DSN"),
@@ -34,6 +35,7 @@ def _reset_schema(dsn: str) -> None:
     try:
         with conn.cursor() as cur:
             cur.execute("DROP TABLE IF EXISTS public.schema_migrations")
+            cur.execute(f"DROP TABLE IF EXISTS public.{HOST_LEDGER_TABLE}")
             cur.execute("DROP TABLE IF EXISTS public.host_state")
             cur.execute(f"DROP TABLE IF EXISTS public.{PHYSICAL_QUEUE_TABLES[QUEUE_EXPLORATION]}")
             cur.execute(f"DROP TABLE IF EXISTS public.{PHYSICAL_QUEUE_TABLES[QUEUE_BACKLOG]}")

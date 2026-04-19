@@ -7,6 +7,7 @@ import psycopg2
 import pytest
 
 from crawler.host_store import HostStore
+from crawler.host_ledger import HOST_LEDGER_TABLE
 from crawler.migrate import apply_migrations
 from crawler.url_ledger import URL_LEDGER_TABLE
 
@@ -33,6 +34,7 @@ class TestHostStore:
         conn.autocommit = False
         with conn.cursor() as cur:
             cur.execute("DROP TABLE IF EXISTS schema_migrations")
+            cur.execute(f"DROP TABLE IF EXISTS {HOST_LEDGER_TABLE}")
             cur.execute("DROP TABLE IF EXISTS host_state")
             cur.execute(f"DROP TABLE IF EXISTS {URL_LEDGER_TABLE} CASCADE")
             cur.execute("DROP TABLE IF EXISTS pages")

@@ -424,6 +424,7 @@ class CrawlDaemon:
                 self._host_store = HostStore(storage.conn, default_delay=self._delay)
                 url_ledger.attach_host_store(self._host_store)
                 self._host_manager.attach_store(self._host_store)
+                self._host_manager.attach_host_ledger_store(url_ledger.host_ledger_store)
                 count = url_ledger.recover_leased(expired_only=False)
                 if count:
                     logger.info("Recovered %d leased URLs", count)
