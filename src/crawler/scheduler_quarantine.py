@@ -13,8 +13,8 @@ class SchedulerQuarantine:
         self,
         conn,
         *,
-        queue_frontline: str,
-        queue_deferred: str,
+        queue_runnable: str,
+        queue_scheduled: str,
         queue_refresh: str,
         blocked_queue_table: str,
         queue_table_sql: Callable[[str], str],
@@ -23,8 +23,8 @@ class SchedulerQuarantine:
         insert_pending_rows: Callable,
     ):
         self._conn = conn
-        self._queue_frontline = queue_frontline
-        self._queue_deferred = queue_deferred
+        self._queue_runnable = queue_runnable
+        self._queue_scheduled = queue_scheduled
         self._queue_refresh = queue_refresh
         self._blocked_queue_table = blocked_queue_table
         self._queue_table_sql = queue_table_sql
@@ -41,13 +41,13 @@ class SchedulerQuarantine:
             cur.execute(
                 f"""SELECT queue.url, queue.host, queue.priority, queue.next_fetch_at, queue.added_at,
                            %s AS physical_queue
-                    FROM {self._queue_table_sql(self._queue_frontline)} AS queue
+                    FROM {self._queue_table_sql(self._queue_runnable)} AS queue
                     JOIN host_state ON host_state.host_key = queue.host
                     WHERE host_state.backoff_until > %s
                     UNION ALL
                     SELECT queue.url, queue.host, queue.priority, queue.next_fetch_at, queue.added_at,
                            %s AS physical_queue
-                    FROM {self._queue_table_sql(self._queue_deferred)} AS queue
+                    FROM {self._queue_table_sql(self._queue_scheduled)} AS queue
                     JOIN host_state ON host_state.host_key = queue.host
                     WHERE host_state.backoff_until > %s
                     UNION ALL
@@ -57,9 +57,9 @@ class SchedulerQuarantine:
                     JOIN host_state ON host_state.host_key = queue.host
                     WHERE host_state.backoff_until > %s""",
                 (
-                    self._queue_frontline,
+                    self._queue_runnable,
                     now,
-                    self._queue_deferred,
+                    self._queue_scheduled,
                     now,
                     self._queue_refresh,
                     now,
@@ -134,7 +134,7 @@ class SchedulerQuarantine:
         per_host: int,
         now: float | None = None,
     ) -> int:
-        """Return recovered blocked URLs to the deferred runnable surface."""
+        """Return recovered blocked URLs to the scheduled runnable surface."""
         if limit <= 0 or per_host <= 0:
             return 0
 
@@ -174,7 +174,7 @@ class SchedulerQuarantine:
                         blocked.next_fetch_at,
                         blocked.added_at,
                         %s AS physical_queue""",
-                (self._queue_deferred, now, per_host, limit, self._queue_deferred),
+                (self._queue_scheduled, now, per_host, limit, self._queue_scheduled),
             )
             rows = cur.fetchall()
             if rows:
@@ -190,7 +190,7 @@ class SchedulerQuarantine:
         max_consecutive_failures: int | None = None,
         now: float | None = None,
     ) -> int:
-        """Return a small cooled-down subset from blocked queue back into the deferred runnable surface."""
+        """Return a small cooled-down subset from blocked queue back into the scheduled runnable surface."""
         if limit <= 0 or per_host <= 0:
             return 0
 
@@ -248,13 +248,13 @@ class SchedulerQuarantine:
                         blocked.added_at,
                         %s AS physical_queue""",
                 (
-                    self._queue_deferred,
+                    self._queue_scheduled,
                     now,
                     effective_max_failures,
                     effective_max_failures,
                     per_host,
                     limit,
-                    self._queue_deferred,
+                    self._queue_scheduled,
                 ),
             )
             rows = cur.fetchall()

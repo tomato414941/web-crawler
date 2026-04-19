@@ -21,11 +21,11 @@ class CrawlerSettings(BaseSettings):
     max_host_backoff_seconds: float = 600.0
     daemon_keep_runnable_per_host: int = 128
     daemon_keep_runnable_per_branch: int = 16
-    daemon_deferred_surface_defer_seconds: float = 1800.0
+    daemon_scheduled_surface_delay_seconds: float = 1800.0
     daemon_min_runnable_sleep: float = 0.5
-    daemon_min_frontline_pending: int = 3
-    daemon_min_frontline_runnable: int = 20
-    daemon_min_frontline_hosts: int = 8
+    daemon_min_runnable_supply_pending: int = 3
+    daemon_min_runnable_supply_count: int = 20
+    daemon_min_runnable_supply_hosts: int = 8
     daemon_blocked_retry_budget: int = 8
     daemon_blocked_retry_per_host: int = 1
     daemon_blocked_retry_max_consecutive_failures: int = 8

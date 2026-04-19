@@ -182,19 +182,18 @@ Once admitted into the system, seed-derived URLs should be treated by the same d
 
 Current concepts should converge toward this meaning:
 
-- `exploration` => frontline runnable surface
-- `backlog` => deferred scheduled surface
+- `runnable` => currently admitted and executable scheduler membership
+- `scheduled` => admitted scheduler membership that is not currently executable
 - `active_leases` => lease state
 - blocked-host-backoff queue => quarantine pool
 - host scheduler tables => host state
 
-This is a convergence target, not a claim about current implementation quality.
+This is a convergence target, not a claim that every current module is already clean.
 
-The conceptual split should happen before naming cleanup.
+The conceptual split should continue after naming cleanup.
 
-- state and intent should be modeled separately now
-- existing names may remain temporarily while that split is introduced
-- `backlog` should not be overloaded to mean `discovered`
+- state and intent should be modeled separately
+- queue membership remains the live scheduler source of truth until replaced
 - lanes are optional operational groupings, not primary scheduler concepts
 
 ## Immediate Design Consequences
@@ -202,6 +201,6 @@ The conceptual split should happen before naming cleanup.
 1. The URL ledger should stop being the scheduler's current-state truth.
 2. Queue membership should become the only truth for live scheduler state.
 3. The operator-facing `runnable` view should remain derived.
-4. Bootstrap should be separated from normal exploration supply.
+4. Bootstrap should be separated from normal scheduler supply.
 5. Seed-derived special treatment should disappear from the scheduler.
 6. If worker lanes exist, they should be derived from state and strategy, not the other way around.

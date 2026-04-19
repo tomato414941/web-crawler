@@ -97,7 +97,7 @@ This is where `discovered` belongs conceptually.
 - known by the system
 - not yet given normal scheduler membership
 
-It should not automatically collapse into `backlog`.
+It should not automatically collapse into `scheduled`.
 
 ## 4. Scheduler Membership
 
@@ -107,7 +107,7 @@ This layer should answer:
 
 - is this URL part of normal scheduling right now?
 - if so, on which live surface?
-- is it runnable, deferred, quarantined, or otherwise excluded?
+- is it runnable, scheduled, quarantined, or otherwise excluded?
 
 The scheduler should be the only source of truth for live URL treatment.
 

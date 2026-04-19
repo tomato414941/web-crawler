@@ -13,7 +13,23 @@ from urllib.parse import urlparse
 import psycopg2.extras
 
 from .config import settings
+from .host_runnable_heads import HostRunnableHead, HostRunnableHeadStore
 from .host_ledger import HostLedgerStore
+from .scheduler_membership import (
+    PHYSICAL_QUEUE_DEFAULT_SCHEDULER_SURFACE,
+    PHYSICAL_QUEUE_ORDER,
+    PHYSICAL_QUEUE_TABLES,
+    QUEUE_RECRAWL,
+    QUEUE_RUNNABLE,
+    QUEUE_SCHEDULED,
+    QUEUE_TABLES,
+    SCHEDULER_SURFACE_NORMAL,
+    SCHEDULER_SURFACE_PRIORITY,
+    SCHEDULER_SURFACE_REFRESH,
+    SCHEDULER_SURFACE_RUNNABLE,
+    SCHEDULER_SURFACE_SCHEDULED,
+    SchedulerMembershipStore,
+)
 from .scheduler_observability import SchedulerObservability, SchedulerReadiness
 from .scheduler_quarantine import SchedulerQuarantine
 from .schema import assert_public_table_columns
@@ -25,13 +41,6 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 URL_LEDGER_TABLE = "url_ledger"
-QUEUE_EXPLORATION = "exploration"
-QUEUE_BACKLOG = "backlog"
-QUEUE_RECRAWL = "recrawl"
-RUNNABLE_SURFACE_FRONTLINE = "frontline"
-RUNNABLE_SURFACE_DEFERRED = "deferred"
-RUNNABLE_SURFACE_NORMAL = "normal"
-RUNNABLE_SURFACE_REFRESH = "refresh"
 INTENT_EXPLORE = "explore"
 INTENT_REFRESH = "refresh"
 INTENT_RETRY = "retry"
@@ -60,23 +69,7 @@ URL_LEDGER_REQUIRED_COLUMNS = {
     "terminal_reason",
     "terminalized_at",
 }
-PHYSICAL_QUEUE_NAMES = {
-    QUEUE_EXPLORATION,
-    QUEUE_BACKLOG,
-    QUEUE_RECRAWL,
-}
-PHYSICAL_QUEUE_TABLES = {
-    QUEUE_EXPLORATION: "scheduler_queue_frontline",
-    QUEUE_BACKLOG: "scheduler_queue_deferred",
-    QUEUE_RECRAWL: "scheduler_queue_refresh",
-}
-QUEUE_TABLES = tuple(PHYSICAL_QUEUE_TABLES.values())
 BLOCKED_HOST_BACKOFF_TABLE = "scheduler_queue_retry_quarantine"
-PHYSICAL_QUEUE_ORDER = (
-    QUEUE_EXPLORATION,
-    QUEUE_BACKLOG,
-    QUEUE_RECRAWL,
-)
 QUEUE_REQUIRED_COLUMNS = {
     "url",
     "host",
@@ -120,34 +113,39 @@ LEASE_STRATEGIES = {
     LEASE_STRATEGY_URL_ORDER,
     LEASE_STRATEGY_HOST_FIRST,
 }
-RUNNABLE_SURFACE_PHYSICAL_QUEUES = {
-    RUNNABLE_SURFACE_FRONTLINE: (QUEUE_EXPLORATION,),
-    RUNNABLE_SURFACE_DEFERRED: (QUEUE_BACKLOG,),
-    RUNNABLE_SURFACE_NORMAL: (QUEUE_EXPLORATION, QUEUE_BACKLOG),
-    RUNNABLE_SURFACE_REFRESH: (QUEUE_RECRAWL,),
+SCHEDULER_SURFACE_DEFAULT_INTENT = {
+    SCHEDULER_SURFACE_RUNNABLE: INTENT_EXPLORE,
+    SCHEDULER_SURFACE_SCHEDULED: INTENT_EXPLORE,
+    SCHEDULER_SURFACE_REFRESH: INTENT_REFRESH,
 }
-RUNNABLE_SURFACE_PRIORITY = {
-    RUNNABLE_SURFACE_FRONTLINE: 0,
-    RUNNABLE_SURFACE_DEFERRED: 1,
-    RUNNABLE_SURFACE_REFRESH: 2,
-}
-RUNNABLE_SURFACE_DEFAULT_INTENT = {
-    RUNNABLE_SURFACE_FRONTLINE: INTENT_EXPLORE,
-    RUNNABLE_SURFACE_DEFERRED: INTENT_EXPLORE,
-    RUNNABLE_SURFACE_REFRESH: INTENT_REFRESH,
-}
-PHYSICAL_QUEUE_DEFAULT_RUNNABLE_SURFACE = {
-    QUEUE_EXPLORATION: RUNNABLE_SURFACE_FRONTLINE,
-    QUEUE_BACKLOG: RUNNABLE_SURFACE_DEFERRED,
-    QUEUE_RECRAWL: RUNNABLE_SURFACE_REFRESH,
-}
-INTENT_DEFAULT_RUNNABLE_SURFACE = {
-    INTENT_EXPLORE: RUNNABLE_SURFACE_DEFERRED,
-    INTENT_REFRESH: RUNNABLE_SURFACE_REFRESH,
-    INTENT_RETRY: RUNNABLE_SURFACE_DEFERRED,
+INTENT_DEFAULT_SCHEDULER_SURFACE = {
+    INTENT_EXPLORE: SCHEDULER_SURFACE_SCHEDULED,
+    INTENT_REFRESH: SCHEDULER_SURFACE_REFRESH,
+    INTENT_RETRY: SCHEDULER_SURFACE_SCHEDULED,
 }
 HOST_HEAD_LOOKAHEAD = 32
 HOST_HEAD_READ_MODEL_LOOKAHEAD = HOST_HEAD_LOOKAHEAD * 4
+__all__ = [
+    "BLOCKED_HOST_BACKOFF_TABLE",
+    "CrawlTask",
+    "HOST_RUNNABLE_HEADS_TABLE",
+    "INTENT_EXPLORE",
+    "INTENT_REFRESH",
+    "INTENT_RETRY",
+    "LEASE_TABLE",
+    "PHYSICAL_QUEUE_DEFAULT_SCHEDULER_SURFACE",
+    "PHYSICAL_QUEUE_ORDER",
+    "PHYSICAL_QUEUE_TABLES",
+    "QUEUE_RECRAWL",
+    "QUEUE_RUNNABLE",
+    "QUEUE_SCHEDULED",
+    "SCHEDULER_SURFACE_NORMAL",
+    "SCHEDULER_SURFACE_REFRESH",
+    "SCHEDULER_SURFACE_RUNNABLE",
+    "SCHEDULER_SURFACE_SCHEDULED",
+    "URL_LEDGER_TABLE",
+    "UrlLedger",
+]
 
 
 @dataclass(init=False)
@@ -209,22 +207,6 @@ class RunnableHostHead:
 
 
 @dataclass(frozen=True)
-class HostRunnableHead:
-    """Loose host-head read model row used for host-first performance evaluation."""
-
-    physical_queue: str
-    host_key: str
-    url: str
-    next_fetch_at: float
-    added_at: float
-    priority: float
-    runnable_url_count: int
-    latency_penalty: int
-    runnable_at: float
-    refreshed_at: float
-
-
-@dataclass(frozen=True)
 class _RunnableSql:
     """SQL fragments for pending URL readiness checks."""
 
@@ -261,19 +243,32 @@ class UrlLedger:
         )
         self._host_store: HostStore | None = None
         self._host_ledger = HostLedgerStore(conn)
+        self._membership = SchedulerMembershipStore(
+            conn,
+            blocked_queue_table=BLOCKED_HOST_BACKOFF_TABLE,
+            host_runnable_heads_table=HOST_RUNNABLE_HEADS_TABLE,
+        )
+        self._host_heads = HostRunnableHeadStore(
+            conn,
+            table_name=HOST_RUNNABLE_HEADS_TABLE,
+            queue_table_sql=self._queue_table_sql,
+            normalize_physical_queue=self._normalize_physical_queue,
+            normalized_surface_queues=self._normalized_surface_queues,
+            latency_penalty_sql=self._latency_penalty_sql,
+        )
         self._observability = SchedulerObservability(
             conn,
             physical_queue_tables=PHYSICAL_QUEUE_TABLES,
             physical_queue_order=PHYSICAL_QUEUE_ORDER,
-            physical_queue_default_runnable_surface=PHYSICAL_QUEUE_DEFAULT_RUNNABLE_SURFACE,
+            physical_queue_default_runnable_surface=PHYSICAL_QUEUE_DEFAULT_SCHEDULER_SURFACE,
             blocked_queue_table=BLOCKED_HOST_BACKOFF_TABLE,
             lease_table=LEASE_TABLE,
         )
         self._quarantine = SchedulerQuarantine(
             conn,
-            queue_frontline=self._single_physical_queue_for_surface(RUNNABLE_SURFACE_FRONTLINE),
-            queue_deferred=self._single_physical_queue_for_surface(RUNNABLE_SURFACE_DEFERRED),
-            queue_refresh=self._single_physical_queue_for_surface(RUNNABLE_SURFACE_REFRESH),
+            queue_runnable=self._single_physical_queue_for_surface(SCHEDULER_SURFACE_RUNNABLE),
+            queue_scheduled=self._single_physical_queue_for_surface(SCHEDULER_SURFACE_SCHEDULED),
+            queue_refresh=self._single_physical_queue_for_surface(SCHEDULER_SURFACE_REFRESH),
             blocked_queue_table=BLOCKED_HOST_BACKOFF_TABLE,
             queue_table_sql=self._queue_table_sql,
             delete_queue_entries=self._delete_queue_entries,
@@ -319,7 +314,7 @@ class UrlLedger:
 
     def _physical_queues(self) -> list[str]:
         """Return physical queues in stable scheduler order."""
-        return list(PHYSICAL_QUEUE_ORDER)
+        return self._membership.physical_queues()
 
     def _queue_membership_join_sql(self, *, ledger_alias: str) -> tuple[str, str]:
         """Build LEFT JOIN and absence SQL for physical pending queue membership."""
@@ -335,16 +330,7 @@ class UrlLedger:
 
     def _normalized_physical_queues(self, physical_queues: list[str] | None) -> list[str]:
         """Return physical queues in stable scheduler order."""
-        if physical_queues:
-            allowed = {
-                self._normalize_physical_queue(physical_queue) for physical_queue in physical_queues
-            }
-            return [
-                physical_queue
-                for physical_queue in self._physical_queues()
-                if physical_queue in allowed
-            ]
-        return self._physical_queues()
+        return self._membership.normalized_physical_queues(physical_queues)
 
     def _normalized_surface_queues(
         self,
@@ -353,27 +339,14 @@ class UrlLedger:
         physical_queues: list[str] | None,
     ) -> list[str]:
         """Resolve runnable-surface filters into physical queues."""
-        if runnable_surface is not None and physical_queues is not None:
-            raise ValueError("Specify either runnable_surface or physical_queues, not both")
-        if runnable_surface is None:
-            return self._normalized_physical_queues(physical_queues)
-        normalized_surface = str(runnable_surface).strip().lower()
-        resolved = RUNNABLE_SURFACE_PHYSICAL_QUEUES.get(normalized_surface)
-        if resolved is None:
-            raise ValueError(f"Unknown runnable surface: {runnable_surface}")
-        return list(resolved)
+        return self._membership.normalized_surface_queues(
+            scheduler_surface=runnable_surface,
+            physical_queues=physical_queues,
+        )
 
     def _single_physical_queue_for_surface(self, runnable_surface: str) -> str:
         """Resolve one physical queue for a single runnable surface."""
-        physical_queues = self._normalized_surface_queues(
-            runnable_surface=runnable_surface,
-            physical_queues=None,
-        )
-        if len(physical_queues) != 1:
-            raise ValueError(
-                f"Runnable surface must resolve to one physical queue: {runnable_surface}"
-            )
-        return physical_queues[0]
+        return self._membership.single_physical_queue_for_surface(runnable_surface)
 
     def _pending_rows_for_physical_queue(
         self,
@@ -402,11 +375,11 @@ class UrlLedger:
         if physical_queue is None:
             return None
         normalized = self._normalize_physical_queue(physical_queue)
-        return PHYSICAL_QUEUE_DEFAULT_RUNNABLE_SURFACE[normalized]
+        return PHYSICAL_QUEUE_DEFAULT_SCHEDULER_SURFACE[normalized]
 
-    def _default_deferred_physical_queue(self) -> str:
-        """Return the physical queue behind the deferred runnable surface."""
-        return self._single_physical_queue_for_surface(RUNNABLE_SURFACE_DEFERRED)
+    def _default_scheduled_physical_queue(self) -> str:
+        """Return the physical queue behind the scheduled runnable surface."""
+        return self._single_physical_queue_for_surface(SCHEDULER_SURFACE_SCHEDULED)
 
     def _resolve_admission_physical_queue(
         self,
@@ -422,9 +395,9 @@ class UrlLedger:
 
         resolved_surface = runnable_surface
         if resolved_surface is None and normalized_intent is not None:
-            resolved_surface = INTENT_DEFAULT_RUNNABLE_SURFACE[normalized_intent]
+            resolved_surface = INTENT_DEFAULT_SCHEDULER_SURFACE[normalized_intent]
         if resolved_surface is None:
-            return self._default_deferred_physical_queue()
+            return self._default_scheduled_physical_queue()
 
         physical_queues = self._normalized_surface_queues(
             runnable_surface=resolved_surface,
@@ -548,9 +521,11 @@ class UrlLedger:
 
     def _normalize_physical_queue(self, physical_queue: str | None) -> str:
         """Return a supported scheduler physical queue."""
-        if physical_queue in PHYSICAL_QUEUE_NAMES:
-            return physical_queue
-        return self._default_deferred_physical_queue()
+        if not hasattr(self, "_membership"):
+            if physical_queue in PHYSICAL_QUEUE_TABLES:
+                return physical_queue
+            return QUEUE_SCHEDULED
+        return self._membership.normalize_physical_queue(physical_queue)
 
     def _physical_queue_for_model(self, *, runnable_surface: str | None, intent: str | None) -> str:
         """Resolve surface-and-intent metadata into one physical queue."""
@@ -567,8 +542,8 @@ class UrlLedger:
             return normalized_intent
         resolved_surface = runnable_surface
         if resolved_surface is None:
-            resolved_surface = RUNNABLE_SURFACE_DEFERRED
-        return RUNNABLE_SURFACE_DEFAULT_INTENT.get(str(resolved_surface).strip().lower())
+            resolved_surface = SCHEDULER_SURFACE_SCHEDULED
+        return SCHEDULER_SURFACE_DEFAULT_INTENT.get(str(resolved_surface).strip().lower())
 
     def _task_runnable_surface(self, task: CrawlTask) -> str:
         """Resolve one task into a conceptual runnable surface."""
@@ -576,16 +551,16 @@ class UrlLedger:
             return str(task.runnable_surface).strip().lower()
         normalized_intent = self._normalize_intent(task.intent)
         if normalized_intent is not None:
-            return INTENT_DEFAULT_RUNNABLE_SURFACE[normalized_intent]
-        return RUNNABLE_SURFACE_DEFERRED
+            return INTENT_DEFAULT_SCHEDULER_SURFACE[normalized_intent]
+        return SCHEDULER_SURFACE_SCHEDULED
 
     def _merge_runnable_surface(self, current: CrawlTask, candidate: CrawlTask) -> str:
         """Prefer the more urgent runnable surface when duplicate URLs merge."""
         current_surface = self._task_runnable_surface(current)
         candidate_surface = self._task_runnable_surface(candidate)
         if (
-            RUNNABLE_SURFACE_PRIORITY[current_surface]
-            <= RUNNABLE_SURFACE_PRIORITY[candidate_surface]
+            SCHEDULER_SURFACE_PRIORITY[current_surface]
+            <= SCHEDULER_SURFACE_PRIORITY[candidate_surface]
         ):
             return current_surface
         return candidate_surface
@@ -596,7 +571,7 @@ class UrlLedger:
         merged_intent = (
             current.intent
             or candidate.intent
-            or RUNNABLE_SURFACE_DEFAULT_INTENT.get(merged_surface)
+            or SCHEDULER_SURFACE_DEFAULT_INTENT.get(merged_surface)
         )
         return CrawlTask(
             url=current.url,
@@ -615,7 +590,7 @@ class UrlLedger:
         resolved_surface = self._task_runnable_surface(task)
         resolved_intent = self._normalize_intent(
             task.intent
-        ) or RUNNABLE_SURFACE_DEFAULT_INTENT.get(resolved_surface)
+        ) or SCHEDULER_SURFACE_DEFAULT_INTENT.get(resolved_surface)
         return CrawlTask(
             url=normalized_url or task.url,
             priority=task.priority,
@@ -883,115 +858,11 @@ class UrlLedger:
         now: float | None = None,
     ) -> int:
         """Rebuild the loose host-head read model from scheduler queue membership."""
-        refreshed_at = time.time() if now is None else now
-        normalized_physical_queues = self._normalized_surface_queues(
+        return self._host_heads.rebuild(
             runnable_surface=runnable_surface,
             physical_queues=physical_queues,
+            now=now,
         )
-        rebuilt = 0
-
-        try:
-            with self._conn.cursor() as cur:
-                for physical_queue in normalized_physical_queues:
-                    rebuilt += self._rebuild_host_runnable_heads_for_queue(
-                        cur,
-                        physical_queue=physical_queue,
-                        refreshed_at=refreshed_at,
-                    )
-            self._conn.commit()
-        except Exception:
-            self._conn.rollback()
-            logger.exception("Failed to rebuild host runnable heads")
-            raise
-        return rebuilt
-
-    def _rebuild_host_runnable_heads_for_queue(
-        self,
-        cur,
-        *,
-        physical_queue: str,
-        refreshed_at: float,
-    ) -> int:
-        """Replace read-model rows for one physical queue."""
-        normalized_physical_queue = self._normalize_physical_queue(physical_queue)
-        table_name = self._queue_table_sql(normalized_physical_queue)
-        latency_penalty = self._latency_penalty_sql(
-            "candidate",
-            latency_ms_sql="COALESCE(candidate_host_state.latency_ewma_ms, 0)",
-        )
-        runnable_at = (
-            "GREATEST("
-            "candidate.next_fetch_at, "
-            "COALESCE(candidate_host_state.next_request_at, 0), "
-            "COALESCE(candidate_host_state.backoff_until, 0)"
-            ")"
-        )
-
-        cur.execute(
-            f"DELETE FROM {HOST_RUNNABLE_HEADS_TABLE} WHERE physical_queue = %s",
-            (normalized_physical_queue,),
-        )
-        cur.execute(
-            f"""WITH candidate_rows AS (
-                    SELECT
-                        candidate.host,
-                        candidate.url,
-                        candidate.next_fetch_at,
-                        candidate.added_at,
-                        candidate.priority,
-                        COUNT(*) OVER (PARTITION BY candidate.host) AS runnable_url_count,
-                        {latency_penalty} AS latency_penalty,
-                        {runnable_at} AS runnable_at
-                    FROM {table_name} AS candidate
-                    LEFT JOIN host_state AS candidate_host_state
-                        ON candidate_host_state.host_key = candidate.host
-                ),
-                selected AS (
-                    SELECT DISTINCT ON (host)
-                        host,
-                        url,
-                        next_fetch_at,
-                        added_at,
-                        priority,
-                        runnable_url_count,
-                        latency_penalty,
-                        runnable_at
-                    FROM candidate_rows
-                    ORDER BY
-                        host,
-                        runnable_at ASC,
-                        latency_penalty ASC,
-                        added_at ASC,
-                        priority DESC,
-                        url ASC
-                )
-                INSERT INTO {HOST_RUNNABLE_HEADS_TABLE} (
-                    physical_queue,
-                    host,
-                    head_url,
-                    head_next_fetch_at,
-                    head_added_at,
-                    head_priority,
-                    runnable_url_count,
-                    latency_penalty,
-                    runnable_at,
-                    refreshed_at
-                )
-                SELECT
-                    %s,
-                    host,
-                    url,
-                    next_fetch_at,
-                    added_at,
-                    priority,
-                    runnable_url_count,
-                    latency_penalty,
-                    runnable_at,
-                    %s
-                FROM selected""",
-            (normalized_physical_queue, refreshed_at),
-        )
-        return cur.rowcount
 
     def host_runnable_heads_from_read_model(
         self,
@@ -1004,106 +875,28 @@ class UrlLedger:
         now: float | None = None,
     ) -> list[HostRunnableHead]:
         """Read ready host-head candidates from the loose read model."""
-        if limit <= 0:
-            return []
-
-        runnable_at = time.time() if now is None else now
-        normalized_physical_queues = self._normalized_surface_queues(
+        return self._host_heads.read(
+            limit=limit,
+            host=host,
+            exclude_hosts=exclude_hosts,
             runnable_surface=runnable_surface,
             physical_queues=physical_queues,
+            now=now,
         )
-        conditions = ["physical_queue = ANY(%s)", "runnable_at <= %s"]
-        params: list[object] = [normalized_physical_queues, runnable_at]
-
-        if host:
-            conditions.append("host = %s")
-            params.append(host)
-        if exclude_hosts:
-            conditions.append("NOT (host = ANY(%s))")
-            params.append(exclude_hosts)
-
-        with self._conn.cursor() as cur:
-            cur.execute(
-                f"""SELECT
-                        physical_queue,
-                        host,
-                        head_url,
-                        head_next_fetch_at,
-                        head_added_at,
-                        head_priority,
-                        runnable_url_count,
-                        latency_penalty,
-                        runnable_at,
-                        refreshed_at
-                    FROM {HOST_RUNNABLE_HEADS_TABLE}
-                    WHERE {" AND ".join(conditions)}
-                    ORDER BY
-                        runnable_url_count ASC,
-                        latency_penalty ASC,
-                        head_next_fetch_at ASC,
-                        head_added_at ASC,
-                        head_priority DESC,
-                        physical_queue ASC,
-                        head_url ASC
-                    LIMIT %s""",
-                (*params, limit),
-            )
-            rows = cur.fetchall()
-
-        return [
-            HostRunnableHead(
-                physical_queue=physical_queue,
-                host_key=host_key,
-                url=url,
-                next_fetch_at=next_fetch_at,
-                added_at=added_at,
-                priority=priority,
-                runnable_url_count=runnable_url_count,
-                latency_penalty=latency_penalty,
-                runnable_at=row_runnable_at,
-                refreshed_at=refreshed_at,
-            )
-            for (
-                physical_queue,
-                host_key,
-                url,
-                next_fetch_at,
-                added_at,
-                priority,
-                runnable_url_count,
-                latency_penalty,
-                row_runnable_at,
-                refreshed_at,
-            ) in rows
-        ]
 
     def _queue_table_sql(self, physical_queue: str) -> str:
         """Return the table name for one physical queue."""
-        return PHYSICAL_QUEUE_TABLES[self._normalize_physical_queue(physical_queue)]
+        if not hasattr(self, "_membership"):
+            return PHYSICAL_QUEUE_TABLES[self._normalize_physical_queue(physical_queue)]
+        return self._membership.queue_table_sql(physical_queue)
 
     def _delete_queue_entries(self, cur, urls: list[str]) -> None:
         """Remove URLs from all physical scheduler queue tables."""
-        if not urls:
-            return
-        for table_name in QUEUE_TABLES:
-            cur.execute(f"DELETE FROM {table_name} WHERE url = ANY(%s)", (urls,))
-        cur.execute(f"DELETE FROM {BLOCKED_HOST_BACKOFF_TABLE} WHERE url = ANY(%s)", (urls,))
-        cur.execute(f"DELETE FROM {HOST_RUNNABLE_HEADS_TABLE} WHERE head_url = ANY(%s)", (urls,))
+        self._membership.delete_queue_entries(cur, urls)
 
     def _delete_host_runnable_head_candidate(self, *, physical_queue: str, url: str) -> None:
         """Drop a stale read-model candidate after source-of-truth revalidation misses."""
-        try:
-            with self._conn.cursor() as cur:
-                cur.execute(
-                    f"""DELETE FROM {HOST_RUNNABLE_HEADS_TABLE}
-                        WHERE physical_queue = %s
-                          AND head_url = %s""",
-                    (self._normalize_physical_queue(physical_queue), url),
-                )
-            self._conn.commit()
-        except Exception:
-            self._conn.rollback()
-            logger.debug("Failed to delete stale host runnable-head candidate", exc_info=True)
+        self._host_heads.delete_candidate(physical_queue=physical_queue, url=url)
 
     def _insert_pending_queue_rows(
         self,
@@ -1111,39 +904,7 @@ class UrlLedger:
         rows: list[tuple[str, str, float, float, float, str]],
     ) -> None:
         """Insert scheduler-pending rows into the appropriate physical queue tables."""
-        grouped: dict[str, list[tuple[str, str, float, float, float, str]]] = {
-            physical_queue: [] for physical_queue in PHYSICAL_QUEUE_NAMES
-        }
-        for url, host, priority, next_fetch_at, added_at, physical_queue in rows:
-            normalized_url = normalize_url(url)
-            grouped[self._normalize_physical_queue(physical_queue)].append(
-                (
-                    normalized_url,
-                    host,
-                    priority,
-                    next_fetch_at,
-                    added_at,
-                    url_branch_key(normalized_url),
-                )
-            )
-
-        for physical_queue, pending_rows in grouped.items():
-            if not pending_rows:
-                continue
-            psycopg2.extras.execute_values(
-                cur,
-                f"""INSERT INTO {self._queue_table_sql(physical_queue)}
-                        (url, host, priority, next_fetch_at, added_at, branch_key)
-                    VALUES %s
-                    ON CONFLICT (url) DO UPDATE
-                    SET host = EXCLUDED.host,
-                        priority = EXCLUDED.priority,
-                        next_fetch_at = EXCLUDED.next_fetch_at,
-                        added_at = EXCLUDED.added_at,
-                        branch_key = EXCLUDED.branch_key""",
-                pending_rows,
-                page_size=200,
-            )
+        self._membership.insert_pending_rows(cur, rows)
 
     def _insert_blocked_host_backoff_rows(
         self,
@@ -1231,11 +992,7 @@ class UrlLedger:
         rows: list[tuple[str, str, float, float, float, str]],
     ) -> None:
         """Replace physical pending queue rows using returned scheduler state."""
-        normalized_urls = sorted({normalize_url(url) for url, *_ in rows if url})
-        if not normalized_urls:
-            return
-        self._delete_queue_entries(cur, normalized_urls)
-        self._insert_pending_queue_rows(cur, rows)
+        self._membership.replace_pending_rows(cur, rows)
 
     def _project_pending_queue_rows(
         self,
@@ -1278,7 +1035,7 @@ class UrlLedger:
         )
         pending_rows: list[tuple[str, str, float, float, float, str]] = []
         for url, host, priority, next_fetch_at, added_at in cur.fetchall():
-            physical_queue = physical_queue_by_url.get(url, self._default_deferred_physical_queue())
+            physical_queue = physical_queue_by_url.get(url, self._default_scheduled_physical_queue())
             pending_rows.append(
                 (
                     url,
@@ -1374,7 +1131,7 @@ class UrlLedger:
         """Requeue known URLs for refresh intent on the refresh runnable surface."""
         return self.requeue_urls(
             urls,
-            runnable_surface=RUNNABLE_SURFACE_REFRESH,
+            runnable_surface=SCHEDULER_SURFACE_REFRESH,
             intent=INTENT_REFRESH,
             next_fetch_at=next_fetch_at,
             current_statuses=current_statuses,
@@ -2100,7 +1857,7 @@ class UrlLedger:
                     self._host_ledger.record_failure_in_tx(cur, host, at=now)
                 pending_rows = self._pending_rows_for_physical_queue(
                     rows,
-                    self._single_physical_queue_for_surface(RUNNABLE_SURFACE_DEFERRED),
+                    self._single_physical_queue_for_surface(SCHEDULER_SURFACE_SCHEDULED),
                 )
                 self._replace_pending_queue_rows(cur, pending_rows)
                 self._delete_active_leases(cur, [row[0] for row in pending_rows])
@@ -2155,7 +1912,7 @@ class UrlLedger:
             rows = cur.fetchall()
             pending_rows = self._pending_rows_for_physical_queue(
                 rows,
-                self._single_physical_queue_for_surface(RUNNABLE_SURFACE_DEFERRED),
+                self._single_physical_queue_for_surface(SCHEDULER_SURFACE_SCHEDULED),
             )
             self._replace_pending_queue_rows(cur, pending_rows)
             self._delete_active_leases(cur, [row[0] for row in pending_rows])
@@ -2215,19 +1972,19 @@ class UrlLedger:
         self._conn.commit()
         return count
 
-    def defer_overcrowded_deferred_surface(
+    def delay_overcrowded_scheduled_surface(
         self,
         *,
         keep_runnable_per_host: int = 128,
         keep_runnable_per_branch: int = 16,
-        defer_seconds: float = 1800.0,
+        delay_seconds: float = 1800.0,
     ) -> int:
-        """Delay excess runnable work on the deferred surface so one host or branch cannot dominate."""
+        """Delay excess runnable work on the scheduled surface so one host or branch cannot dominate."""
         if keep_runnable_per_host <= 0 or keep_runnable_per_branch <= 0:
             return 0
 
         now = time.time()
-        deferred_until = now + defer_seconds
+        delayed_until = now + delay_seconds
         with self._conn.cursor() as cur:
             cur.execute(
                 f"""WITH ranked AS (
@@ -2241,9 +1998,9 @@ class UrlLedger:
                                 PARTITION BY queue.host, queue.branch_key
                                 ORDER BY queue.priority DESC, queue.next_fetch_at ASC, queue.added_at ASC, queue.url ASC
                             ) AS branch_rownum
-                        FROM {self._queue_table_sql(self._single_physical_queue_for_surface(RUNNABLE_SURFACE_DEFERRED))} AS queue
+                        FROM {self._queue_table_sql(self._single_physical_queue_for_surface(SCHEDULER_SURFACE_SCHEDULED))} AS queue
                         WHERE queue.next_fetch_at <= %s
-                    ), deferred AS (
+                    ), scheduled AS (
                         SELECT ranked.url
                         FROM ranked
                         WHERE ranked.host_rownum > %s
@@ -2251,51 +2008,51 @@ class UrlLedger:
                     )
                     UPDATE {URL_LEDGER_TABLE}
                     SET next_fetch_at = GREATEST(next_fetch_at, %s)
-                    WHERE url IN (SELECT url FROM deferred)
+                    WHERE url IN (SELECT url FROM scheduled)
                     RETURNING url, host, priority, next_fetch_at, added_at""",
                 (
                     now,
                     keep_runnable_per_host,
                     keep_runnable_per_branch,
-                    deferred_until,
+                    delayed_until,
                 ),
             )
             rows = cur.fetchall()
             pending_rows = self._pending_rows_for_physical_queue(
                 rows,
-                self._single_physical_queue_for_surface(RUNNABLE_SURFACE_DEFERRED),
+                self._single_physical_queue_for_surface(SCHEDULER_SURFACE_SCHEDULED),
             )
             self._replace_pending_queue_rows(cur, pending_rows)
             count = len(rows)
         self._conn.commit()
         return count
 
-    def promote_deferred_host_heads(
+    def promote_scheduled_host_heads(
         self,
         target_pending: int,
         *,
         per_host: int = 1,
         candidate_limit: int = 200,
     ) -> int:
-        """Promote one deferred-surface head per host into the frontline surface."""
+        """Promote one scheduled-surface head per host into the runnable surface."""
         if target_pending <= 0 or per_host <= 0 or candidate_limit <= 0:
             return 0
 
-        current_frontline = self.pending_count(runnable_surface=RUNNABLE_SURFACE_FRONTLINE)
-        needed = target_pending - current_frontline
+        current_runnable = self.pending_count(runnable_surface=SCHEDULER_SURFACE_RUNNABLE)
+        needed = target_pending - current_runnable
         if needed <= 0:
             return 0
 
         with self._conn.cursor() as cur:
             cur.execute(
                 f"""SELECT DISTINCT host
-                    FROM {self._queue_table_sql(self._single_physical_queue_for_surface(RUNNABLE_SURFACE_FRONTLINE))}"""
+                    FROM {self._queue_table_sql(self._single_physical_queue_for_surface(SCHEDULER_SURFACE_RUNNABLE))}"""
             )
             existing_hosts = {host for (host,) in cur.fetchall()}
 
             cur.execute(
                 f"""SELECT url, host
-                    FROM {self._queue_table_sql(self._single_physical_queue_for_surface(RUNNABLE_SURFACE_DEFERRED))}
+                    FROM {self._queue_table_sql(self._single_physical_queue_for_surface(SCHEDULER_SURFACE_SCHEDULED))}
                     ORDER BY priority DESC, added_at ASC, url ASC
                     LIMIT %s""",
                 (max(candidate_limit, needed * 20),),
@@ -2320,13 +2077,13 @@ class UrlLedger:
 
             cur.execute(
                 f"""SELECT url, host, priority, next_fetch_at, added_at
-                    FROM {self._queue_table_sql(self._single_physical_queue_for_surface(RUNNABLE_SURFACE_DEFERRED))}
+                    FROM {self._queue_table_sql(self._single_physical_queue_for_surface(SCHEDULER_SURFACE_SCHEDULED))}
                     WHERE url = ANY(%s)""",
                 (promoted_urls,),
             )
             rows = self._pending_rows_for_physical_queue(
                 cur.fetchall(),
-                self._single_physical_queue_for_surface(RUNNABLE_SURFACE_FRONTLINE),
+                self._single_physical_queue_for_surface(SCHEDULER_SURFACE_RUNNABLE),
             )
             self._delete_queue_entries(cur, [row[0] for row in rows])
             self._insert_pending_queue_rows(cur, rows)
@@ -2390,7 +2147,7 @@ class UrlLedger:
             self._host_ledger.record_discovered_urls_in_tx(cur, host_counts, seen_at=now)
             pending_rows = self._pending_rows_for_physical_queue(
                 ledger_rows,
-                self._single_physical_queue_for_surface(RUNNABLE_SURFACE_FRONTLINE),
+                self._single_physical_queue_for_surface(SCHEDULER_SURFACE_RUNNABLE),
             )
             self._replace_pending_queue_rows(cur, pending_rows)
             self._delete_active_leases(cur, [row[0] for row in pending_rows])

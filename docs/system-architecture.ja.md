@@ -96,7 +96,7 @@ Discovery and admission は、「URL を見つけた」から「scheduler が考
 - system はその URL を知っている
 - まだ通常の scheduler membership は与えられていない
 
-であり、自動的に `backlog` と同一視するべきではない。
+であり、自動的に `scheduled` と同一視するべきではない。
 
 ## 4. Scheduler Membership
 
@@ -106,7 +106,7 @@ Scheduler membership は、URL を今 live にどう扱うかを持つ。
 
 - この URL は今 normal scheduling に参加しているか
 - 参加しているなら、どの live surface に属するか
-- runnable か deferred か quarantined か、あるいは通常面から外れているか
+- runnable か scheduled か quarantined か、あるいは通常面から外れているか
 
 live URL treatment の唯一の正本は scheduler であるべきである。
 

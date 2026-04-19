@@ -10,10 +10,10 @@ from crawler.url_ledger import (
     CrawlTask,
     INTENT_EXPLORE,
     INTENT_REFRESH,
-    RUNNABLE_SURFACE_DEFERRED,
-    RUNNABLE_SURFACE_FRONTLINE,
-    RUNNABLE_SURFACE_NORMAL,
-    RUNNABLE_SURFACE_REFRESH,
+    SCHEDULER_SURFACE_SCHEDULED,
+    SCHEDULER_SURFACE_RUNNABLE,
+    SCHEDULER_SURFACE_NORMAL,
+    SCHEDULER_SURFACE_REFRESH,
 )
 
 
@@ -45,19 +45,19 @@ class FakeLedger:
             host = task.url.split("/")[2]
             if host in exclude_hosts:
                 continue
-            effective_surface = task.runnable_surface or RUNNABLE_SURFACE_FRONTLINE
+            effective_surface = task.runnable_surface or SCHEDULER_SURFACE_RUNNABLE
             if (
-                runnable_surface == RUNNABLE_SURFACE_NORMAL
+                runnable_surface == SCHEDULER_SURFACE_NORMAL
                 and effective_surface
                 not in {
-                    RUNNABLE_SURFACE_FRONTLINE,
-                    RUNNABLE_SURFACE_DEFERRED,
+                    SCHEDULER_SURFACE_RUNNABLE,
+                    SCHEDULER_SURFACE_SCHEDULED,
                 }
             ):
                 continue
             if (
                 runnable_surface is not None
-                and runnable_surface != RUNNABLE_SURFACE_NORMAL
+                and runnable_surface != SCHEDULER_SURFACE_NORMAL
                 and effective_surface != runnable_surface
             ):
                 continue
@@ -70,14 +70,14 @@ class FakeLedger:
             runnable_surface = task.runnable_surface
             if runnable_surface is None:
                 if task.intent == INTENT_REFRESH:
-                    runnable_surface = RUNNABLE_SURFACE_REFRESH
+                    runnable_surface = SCHEDULER_SURFACE_REFRESH
                 else:
-                    runnable_surface = RUNNABLE_SURFACE_DEFERRED
+                    runnable_surface = SCHEDULER_SURFACE_SCHEDULED
             intent = task.intent
             if intent is None:
                 intent = (
                     INTENT_REFRESH
-                    if runnable_surface == RUNNABLE_SURFACE_REFRESH
+                    if runnable_surface == SCHEDULER_SURFACE_REFRESH
                     else INTENT_EXPLORE
                 )
             prepared.append(
@@ -461,17 +461,17 @@ async def test_crawler_assigns_discovery_metadata_to_outlinks():
         by_url["https://docs.example.com/guide"].priority
         > by_url["https://external.example.net/project"].priority
     )
-    assert by_url["https://docs.example.com/guide"].runnable_surface == RUNNABLE_SURFACE_DEFERRED
+    assert by_url["https://docs.example.com/guide"].runnable_surface == SCHEDULER_SURFACE_SCHEDULED
     assert by_url["https://docs.example.com/guide"].intent == INTENT_EXPLORE
     assert (
-        by_url["https://external.example.net/project"].runnable_surface == RUNNABLE_SURFACE_DEFERRED
+        by_url["https://external.example.net/project"].runnable_surface == SCHEDULER_SURFACE_SCHEDULED
     )
     assert by_url["https://external.example.net/project"].intent == INTENT_EXPLORE
 
 
 @pytest.mark.asyncio
 @pytest.mark.asyncio
-async def test_crawler_assigns_known_hosts_to_deferred_surface():
+async def test_crawler_assigns_known_hosts_to_scheduled_surface():
     ledger = FakeLedger(
         [CrawlTask(url="https://example.com/")],
         known_counts={"example.com": 8},
@@ -499,7 +499,7 @@ async def test_crawler_assigns_known_hosts_to_deferred_surface():
         await engine.crawl()
 
     added = ledger.added_batches[0]
-    assert added[0].runnable_surface == RUNNABLE_SURFACE_DEFERRED
+    assert added[0].runnable_surface == SCHEDULER_SURFACE_SCHEDULED
     assert added[0].intent == INTENT_EXPLORE
 
 
@@ -669,12 +669,12 @@ async def test_crawler_allows_second_inflight_for_fast_host_budget():
 
 
 @pytest.mark.asyncio
-async def test_crawler_uses_normal_workers_for_deferred_work():
+async def test_crawler_uses_normal_workers_for_scheduled_work():
     ledger = FakeLedger(
         [
             CrawlTask(
                 url="https://example.com/page",
-                runnable_surface=RUNNABLE_SURFACE_DEFERRED,
+                runnable_surface=SCHEDULER_SURFACE_SCHEDULED,
                 intent=INTENT_EXPLORE,
             )
         ]
@@ -697,8 +697,8 @@ async def test_crawler_uses_normal_workers_for_deferred_work():
         engine.fetcher = fetcher
         runtime = engine.snapshot_runtime_stats()
         assert runtime["normal_workers"] == 5
-        assert runtime["frontline_workers"] == 5
-        assert runtime["deferred_workers"] == 0
+        assert runtime["runnable_workers"] == 5
+        assert runtime["scheduled_workers"] == 0
         assert runtime["refresh_workers"] == 1
         await engine.crawl()
 

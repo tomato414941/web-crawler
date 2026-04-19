@@ -13,8 +13,8 @@ from crawler.url_ledger import (
     CrawlTask,
     LEASE_TABLE,
     PHYSICAL_QUEUE_TABLES,
-    QUEUE_BACKLOG,
-    QUEUE_EXPLORATION,
+    QUEUE_SCHEDULED,
+    QUEUE_RUNNABLE,
     QUEUE_RECRAWL,
     URL_LEDGER_TABLE,
     UrlLedger,
@@ -37,8 +37,8 @@ def _reset_schema(dsn: str) -> None:
             cur.execute("DROP TABLE IF EXISTS public.schema_migrations")
             cur.execute(f"DROP TABLE IF EXISTS public.{HOST_LEDGER_TABLE}")
             cur.execute("DROP TABLE IF EXISTS public.host_state")
-            cur.execute(f"DROP TABLE IF EXISTS public.{PHYSICAL_QUEUE_TABLES[QUEUE_EXPLORATION]}")
-            cur.execute(f"DROP TABLE IF EXISTS public.{PHYSICAL_QUEUE_TABLES[QUEUE_BACKLOG]}")
+            cur.execute(f"DROP TABLE IF EXISTS public.{PHYSICAL_QUEUE_TABLES[QUEUE_RUNNABLE]}")
+            cur.execute(f"DROP TABLE IF EXISTS public.{PHYSICAL_QUEUE_TABLES[QUEUE_SCHEDULED]}")
             cur.execute(f"DROP TABLE IF EXISTS public.{PHYSICAL_QUEUE_TABLES[QUEUE_RECRAWL]}")
             cur.execute(f"DROP TABLE IF EXISTS public.{BLOCKED_HOST_BACKOFF_TABLE}")
             cur.execute(f"DROP TABLE IF EXISTS public.{LEASE_TABLE}")
@@ -173,7 +173,7 @@ async def test_daemon_does_not_auto_requeue_failed_urls():
         def readiness(self):
             return SimpleNamespace(pending=1, runnable=1, next_runnable_delay=None)
 
-        def defer_overcrowded_deferred_surface(self, **_kwargs):
+        def delay_overcrowded_scheduled_surface(self, **_kwargs):
             return 0
 
         def recover_leased(self, expired_only=False):
@@ -274,7 +274,7 @@ async def test_daemon_logs_cycle_error_breakdown(caplog):
         def readiness(self):
             return SimpleNamespace(pending=1, runnable=1, next_runnable_delay=None)
 
-        def defer_overcrowded_deferred_surface(self, **_kwargs):
+        def delay_overcrowded_scheduled_surface(self, **_kwargs):
             return 0
 
         def recover_leased(self, expired_only=False):
@@ -315,14 +315,14 @@ async def test_daemon_logs_cycle_error_breakdown(caplog):
 
 
 @pytest.mark.asyncio
-async def test_daemon_uses_configured_backlog_controls():
+async def test_daemon_uses_configured_scheduled_controls():
     class FakeStorage:
         def close(self):
             return None
 
     class FakeLedger:
         def __init__(self):
-            self.defer_args = None
+            self.delay_args = None
 
         def pending_count(self, runnable_surface=None):
             return 1
@@ -330,8 +330,8 @@ async def test_daemon_uses_configured_backlog_controls():
         def readiness(self):
             return SimpleNamespace(pending=1, runnable=1, next_runnable_delay=None)
 
-        def defer_overcrowded_deferred_surface(self, **kwargs):
-            self.defer_args = kwargs
+        def delay_overcrowded_scheduled_surface(self, **kwargs):
+            self.delay_args = kwargs
             return 0
 
         def recover_leased(self, expired_only=False):
@@ -348,9 +348,9 @@ async def test_daemon_uses_configured_backlog_controls():
         postgres_dsn="postgresql://unused",
         cycle_pages=10,
         refresh_ttl=3600,
-        deferred_runnable_per_host=7,
-        deferred_runnable_per_branch=2,
-        deferred_surface_defer_seconds=12.0,
+        scheduled_runnable_per_host=7,
+        scheduled_runnable_per_branch=2,
+        scheduled_surface_delay_seconds=12.0,
     )
     ledger = FakeLedger()
     storage = FakeStorage()
@@ -370,10 +370,10 @@ async def test_daemon_uses_configured_backlog_controls():
 
     await daemon.run()
 
-    assert ledger.defer_args == {
+    assert ledger.delay_args == {
         "keep_runnable_per_host": 7,
         "keep_runnable_per_branch": 2,
-        "defer_seconds": 12.0,
+        "delay_seconds": 12.0,
     }
 
 
@@ -419,7 +419,7 @@ async def test_daemon_persists_readiness_breakdown_while_waiting_for_ready():
                 },
             )
 
-        def defer_overcrowded_deferred_surface(self, **_kwargs):
+        def delay_overcrowded_scheduled_surface(self, **_kwargs):
             return 0
 
         def recover_leased(self, expired_only=False):
@@ -567,7 +567,7 @@ async def test_daemon_persists_scheduler_views_after_cycle():
                 },
             )
 
-        def defer_overcrowded_deferred_surface(self, **_kwargs):
+        def delay_overcrowded_scheduled_surface(self, **_kwargs):
             return 0
 
         def recover_leased(self, expired_only=False):
@@ -661,32 +661,32 @@ async def test_daemon_persists_scheduler_views_after_cycle():
     }
 
 
-def test_ensure_frontline_supply_tops_up_when_frontline_surface_is_starved():
+def test_ensure_runnable_supply_tops_up_when_runnable_surface_is_starved():
     class FakeLedger:
         def __init__(self):
             self.upsert_calls = []
             self.host_promote_calls = []
 
         def pending_count(self, runnable_surface=None):
-            if runnable_surface == "frontline":
+            if runnable_surface == "runnable":
                 return 1
             return 25
 
         def runnable_count(self, runnable_surface=None, now=None):
-            assert runnable_surface == "frontline"
+            assert runnable_surface == "runnable"
             return 1
 
         def pending_host_count(self, runnable_surface=None):
-            if runnable_surface == "frontline":
+            if runnable_surface == "runnable":
                 return 1
             return 10
 
         def runnable_host_count(self, runnable_surface=None, now=None):
-            if runnable_surface == "frontline":
+            if runnable_surface == "runnable":
                 return 1
             return 10
 
-        def promote_deferred_host_heads(self, target_pending, per_host=1):
+        def promote_scheduled_host_heads(self, target_pending, per_host=1):
             self.host_promote_calls.append((target_pending, per_host))
             return 2
 
@@ -706,7 +706,7 @@ def test_ensure_frontline_supply_tops_up_when_frontline_surface_is_starved():
     )
     ledger = FakeLedger()
 
-    daemon._ensure_frontline_supply(ledger)
+    daemon._ensure_runnable_supply(ledger)
 
     assert ledger.host_promote_calls == [(3, 1)]
     assert ledger.upsert_calls == []
@@ -735,7 +735,7 @@ def test_admit_discovered_backfills_pending_deficit():
     admitted = daemon._policy.admit_discovered(ledger)
 
     assert admitted == 2
-    assert ledger.admit_calls == [(7, "deferred", "explore")]
+    assert ledger.admit_calls == [(7, "scheduled", "explore")]
 
 
 def test_admit_discovered_stays_idle_when_pending_is_healthy():
@@ -764,7 +764,7 @@ def test_admit_discovered_stays_idle_when_pending_is_healthy():
     assert ledger.admit_calls == []
 
 
-def test_ensure_frontline_supply_does_not_bootstrap_empty_ledger():
+def test_ensure_runnable_supply_does_not_bootstrap_empty_ledger():
     class FakeLedger:
         def __init__(self):
             self.upsert_calls = []
@@ -774,14 +774,14 @@ def test_ensure_frontline_supply_does_not_bootstrap_empty_ledger():
             return 0
 
         def runnable_count(self, runnable_surface=None, now=None):
-            assert runnable_surface == "frontline"
+            assert runnable_surface == "runnable"
             return 0
 
         def runnable_host_count(self, runnable_surface=None, now=None):
-            assert runnable_surface == "frontline"
+            assert runnable_surface == "runnable"
             return 0
 
-        def promote_deferred_host_heads(self, target_pending, per_host=1):
+        def promote_scheduled_host_heads(self, target_pending, per_host=1):
             self.host_promote_calls.append((target_pending, per_host))
             return 0
 
@@ -801,38 +801,38 @@ def test_ensure_frontline_supply_does_not_bootstrap_empty_ledger():
     )
     ledger = FakeLedger()
 
-    daemon._ensure_frontline_supply(ledger)
+    daemon._ensure_runnable_supply(ledger)
 
     assert ledger.host_promote_calls == [(3, 1)]
     assert ledger.upsert_calls == []
 
 
-def test_ensure_frontline_supply_stays_idle_when_host_promotion_is_insufficient():
+def test_ensure_runnable_supply_stays_idle_when_host_promotion_is_insufficient():
     class FakeLedger:
         def __init__(self):
             self.upsert_calls = []
             self.host_promote_calls = []
 
         def pending_count(self, runnable_surface=None):
-            if runnable_surface == "frontline":
+            if runnable_surface == "runnable":
                 return 1
             return 25
 
         def runnable_count(self, runnable_surface=None, now=None):
-            assert runnable_surface == "frontline"
+            assert runnable_surface == "runnable"
             return 1
 
         def pending_host_count(self, runnable_surface=None):
-            if runnable_surface == "frontline":
+            if runnable_surface == "runnable":
                 return 1
             return 10
 
         def runnable_host_count(self, runnable_surface=None, now=None):
-            if runnable_surface == "frontline":
+            if runnable_surface == "runnable":
                 return 1
             return 10
 
-        def promote_deferred_host_heads(self, target_pending, per_host=1):
+        def promote_scheduled_host_heads(self, target_pending, per_host=1):
             self.host_promote_calls.append((target_pending, per_host))
             return 0
 
@@ -852,33 +852,33 @@ def test_ensure_frontline_supply_stays_idle_when_host_promotion_is_insufficient(
     )
     ledger = FakeLedger()
 
-    daemon._ensure_frontline_supply(ledger)
+    daemon._ensure_runnable_supply(ledger)
 
     assert ledger.host_promote_calls == [(3, 1)]
     assert ledger.upsert_calls == []
 
 
-def test_ensure_frontline_supply_does_not_top_up_when_frontline_surface_is_healthy():
+def test_ensure_runnable_supply_does_not_top_up_when_runnable_surface_is_healthy():
     class FakeLedger:
         def __init__(self):
             self.upsert_calls = []
 
         def pending_count(self, runnable_surface=None):
-            if runnable_surface == "frontline":
+            if runnable_surface == "runnable":
                 return 3
             return 25
 
         def runnable_count(self, runnable_surface=None, now=None):
-            assert runnable_surface == "frontline"
+            assert runnable_surface == "runnable"
             return 3
 
         def pending_host_count(self, runnable_surface=None):
-            if runnable_surface == "frontline":
+            if runnable_surface == "runnable":
                 return 3
             return 10
 
         def runnable_host_count(self, runnable_surface=None, now=None):
-            if runnable_surface == "frontline":
+            if runnable_surface == "runnable":
                 return 3
             return 10
 
@@ -898,37 +898,37 @@ def test_ensure_frontline_supply_does_not_top_up_when_frontline_surface_is_healt
     )
     ledger = FakeLedger()
 
-    daemon._ensure_frontline_supply(ledger)
+    daemon._ensure_runnable_supply(ledger)
 
     assert ledger.upsert_calls == []
 
 
-def test_ensure_frontline_supply_does_not_reinsert_when_frontline_pending_is_high_but_runnable_is_zero():
+def test_ensure_runnable_supply_does_not_reinsert_when_runnable_pending_is_high_but_runnable_is_zero():
     class FakeLedger:
         def __init__(self):
             self.upsert_calls = []
             self.host_promote_calls = []
 
         def pending_count(self, runnable_surface=None):
-            if runnable_surface == "frontline":
+            if runnable_surface == "runnable":
                 return 25
             return 50
 
         def runnable_count(self, runnable_surface=None, now=None):
-            assert runnable_surface == "frontline"
+            assert runnable_surface == "runnable"
             return 0
 
         def pending_host_count(self, runnable_surface=None):
-            if runnable_surface == "frontline":
+            if runnable_surface == "runnable":
                 return 2
             return 12
 
         def runnable_host_count(self, runnable_surface=None, now=None):
-            if runnable_surface == "frontline":
+            if runnable_surface == "runnable":
                 return 0
             return 12
 
-        def promote_deferred_host_heads(self, target_pending, per_host=1):
+        def promote_scheduled_host_heads(self, target_pending, per_host=1):
             self.host_promote_calls.append((target_pending, per_host))
             return 0
 
@@ -949,38 +949,38 @@ def test_ensure_frontline_supply_does_not_reinsert_when_frontline_pending_is_hig
     )
     ledger = FakeLedger()
 
-    daemon._ensure_frontline_supply(ledger)
+    daemon._ensure_runnable_supply(ledger)
 
     assert ledger.host_promote_calls == [(29, 1)]
     assert ledger.upsert_calls == []
 
 
-def test_ensure_frontline_supply_tops_up_when_frontline_host_diversity_is_low():
+def test_ensure_runnable_supply_tops_up_when_runnable_host_diversity_is_low():
     class FakeLedger:
         def __init__(self):
             self.upsert_calls = []
             self.host_promote_calls = []
 
         def pending_count(self, runnable_surface=None):
-            if runnable_surface == "frontline":
+            if runnable_surface == "runnable":
                 return 20
             return 50
 
         def runnable_count(self, runnable_surface=None, now=None):
-            assert runnable_surface == "frontline"
+            assert runnable_surface == "runnable"
             return 3
 
         def pending_host_count(self, runnable_surface=None):
-            if runnable_surface == "frontline":
+            if runnable_surface == "runnable":
                 return 1
             return 10
 
         def runnable_host_count(self, runnable_surface=None, now=None):
-            if runnable_surface == "frontline":
+            if runnable_surface == "runnable":
                 return 1
             return 10
 
-        def promote_deferred_host_heads(self, target_pending, per_host=1):
+        def promote_scheduled_host_heads(self, target_pending, per_host=1):
             self.host_promote_calls.append((target_pending, per_host))
             return 1
 
@@ -1000,32 +1000,32 @@ def test_ensure_frontline_supply_tops_up_when_frontline_host_diversity_is_low():
     )
     ledger = FakeLedger()
 
-    daemon._ensure_frontline_supply(ledger)
+    daemon._ensure_runnable_supply(ledger)
 
     assert ledger.host_promote_calls == [(22, 1)]
     assert ledger.upsert_calls == []
 
 
-def test_ensure_frontline_supply_stays_idle_when_only_runnable_depth_is_low():
+def test_ensure_runnable_supply_stays_idle_when_only_runnable_depth_is_low():
     class FakeLedger:
         def __init__(self):
             self.host_promote_calls = []
 
         def pending_count(self, runnable_surface=None):
-            if runnable_surface == "frontline":
+            if runnable_surface == "runnable":
                 return 6
             return 30
 
         def runnable_count(self, runnable_surface=None, now=None):
-            assert runnable_surface == "frontline"
+            assert runnable_surface == "runnable"
             return 1
 
         def runnable_host_count(self, runnable_surface=None, now=None):
-            if runnable_surface == "frontline":
+            if runnable_surface == "runnable":
                 return 3
             return 10
 
-        def promote_deferred_host_heads(self, target_pending, per_host=1):
+        def promote_scheduled_host_heads(self, target_pending, per_host=1):
             self.host_promote_calls.append((target_pending, per_host))
             return 1
 
@@ -1041,7 +1041,7 @@ def test_ensure_frontline_supply_stays_idle_when_only_runnable_depth_is_low():
     )
     ledger = FakeLedger()
 
-    daemon._ensure_frontline_supply(ledger)
+    daemon._ensure_runnable_supply(ledger)
 
     assert ledger.host_promote_calls == []
 
@@ -1055,11 +1055,11 @@ def test_promote_blocked_retry_restores_small_subset_when_ready_is_thin():
             return 2
 
         def pending_host_count(self, runnable_surface=None):
-            assert runnable_surface == "frontline"
+            assert runnable_surface == "runnable"
             return 3
 
         def runnable_host_count(self, runnable_surface=None, now=None):
-            assert runnable_surface == "frontline"
+            assert runnable_surface == "runnable"
             return 3
 
         def blocked_reason_counts(self):
@@ -1101,11 +1101,11 @@ def test_promote_blocked_retry_surges_when_runnable_is_zero():
             return 0
 
         def pending_host_count(self, runnable_surface=None):
-            assert runnable_surface == "frontline"
+            assert runnable_surface == "runnable"
             return 3
 
         def runnable_host_count(self, runnable_surface=None, now=None):
-            assert runnable_surface == "frontline"
+            assert runnable_surface == "runnable"
             return 3
 
         def blocked_reason_counts(self):
@@ -1147,11 +1147,11 @@ def test_promote_blocked_retry_skips_when_runnable_is_healthy():
             return 20
 
         def pending_host_count(self, runnable_surface=None):
-            assert runnable_surface == "frontline"
+            assert runnable_surface == "runnable"
             return 3
 
         def runnable_host_count(self, runnable_surface=None, now=None):
-            assert runnable_surface == "frontline"
+            assert runnable_surface == "runnable"
             return 3
 
         def blocked_reason_counts(self):
@@ -1193,11 +1193,11 @@ def test_promote_blocked_retry_runs_when_runnable_is_healthy_but_host_diversity_
             return 20
 
         def pending_host_count(self, runnable_surface=None):
-            assert runnable_surface == "frontline"
+            assert runnable_surface == "runnable"
             return 1
 
         def runnable_host_count(self, runnable_surface=None, now=None):
-            assert runnable_surface == "frontline"
+            assert runnable_surface == "runnable"
             return 1
 
         def blocked_reason_counts(self):
@@ -1239,7 +1239,7 @@ def test_promote_blocked_retry_skips_when_no_retry_quarantine_is_present():
             return 0
 
         def runnable_host_count(self, runnable_surface=None, now=None):
-            assert runnable_surface == "frontline"
+            assert runnable_surface == "runnable"
             return 1
 
         def blocked_reason_counts(self):
@@ -1281,7 +1281,7 @@ def test_promote_blocked_retry_caps_budget_to_retry_quarantine_count():
             return 0
 
         def runnable_host_count(self, runnable_surface=None, now=None):
-            assert runnable_surface == "frontline"
+            assert runnable_surface == "runnable"
             return 1
 
         def blocked_reason_counts(self):

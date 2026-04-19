@@ -13,7 +13,7 @@ entry points for discovery, not an allowlist and not a statement of the crawler'
 - **AI Agent** — Claude-powered autonomous browsing for complex tasks
 - **Web-scale Discovery** — Seed URLs start the crawl, but discovered external hosts are valid crawl targets
 - **Postgres-backed Scheduler** — Persistent crawl scheduler with URL leasing and retry backoff
-- **Physical Scheduler Queues** — Exploration / backlog / recrawl queues plus retry quarantine
+- **Physical Scheduler Queues** — Runnable / scheduled / refresh queues plus retry quarantine
 - **Host Scheduling State** — Durable per-host crawl delay and cooldown tracking in PostgreSQL
 - **REST API** — Serve crawled pages via `/pages`, `/stats` endpoints
 - **JSONL Export** — Optional streaming output alongside Postgres storage
@@ -224,8 +224,8 @@ Current scheduler state is split across explicit physical tables:
 
 - `url_ledger` — URL ledger and crawl result metadata
 - `host_ledger` — durable host identity and host-level history
-- `scheduler_queue_frontline` — frontline runnable or scheduled discovery work
-- `scheduler_queue_deferred` — deferred discovery work
+- `scheduler_queue_runnable` — work that is already executable when host state allows it
+- `scheduler_queue_scheduled` — scheduled discovery work
 - `scheduler_queue_refresh` — stale-page revisit work
 - `scheduler_queue_retry_quarantine` — retry quarantine for host-cooled URLs
 - `active_leases` — active leases only
@@ -280,7 +280,7 @@ special cases.
 
 Content handling policy is documented in [docs/CONTENT_POLICY.md](/home/dev/projects/web-crawler/docs/CONTENT_POLICY.md).
 Use that document as the source of truth for what is stored as page content, what is treated as
-metadata-only, and which content types remain deferred.
+metadata-only, and which content extractors are out of scope for now.
 
 ## Deployment
 
@@ -302,7 +302,7 @@ CRAWL_DELAY=0.5
 ```
 
 These defaults avoid `www.icann.org`, which is currently hostile to the crawler, and reduce
-stale-page churn so the daemon does not spend cycles requeueing dead backlog too aggressively.
+stale-page churn so the daemon does not spend cycles requeueing dead scheduled too aggressively.
 Store them in a local `.env` on the server; do not commit runtime-specific values.
 
 These production seeds are only bootstrap points. They do not define the full crawl scope.
@@ -330,17 +330,18 @@ runtime scheduling policy.
 The application also exposes lower-level `CRAWLER_*` settings for scheduler tuning:
 
 ```bash
-CRAWLER_FRONTIER_LEASE_SECONDS=300
-CRAWLER_FRONTIER_RETRY_BACKOFF_SECONDS=30
-CRAWLER_FRONTIER_MAX_RETRY_BACKOFF_SECONDS=1800
+CRAWLER_SCHEDULER_LEASE_SECONDS=300
+CRAWLER_SCHEDULER_RETRY_BACKOFF_SECONDS=30
+CRAWLER_SCHEDULER_MAX_RETRY_BACKOFF_SECONDS=1800
 CRAWLER_ROBOTS_CACHE_TTL=3600
 CRAWLER_HOST_BACKOFF_SECONDS=30
 CRAWLER_MAX_HOST_BACKOFF_SECONDS=600
-CRAWLER_DAEMON_KEEP_READY_PER_HOST=128
-CRAWLER_DAEMON_BACKLOG_LOW_PRIORITY=0.75
-CRAWLER_DAEMON_BACKLOG_DEFER_SECONDS=1800
-CRAWLER_DAEMON_MIN_READY_SLEEP=0.5
-CRAWLER_DAEMON_MIN_EXPLORATION_READY=20
+CRAWLER_DAEMON_KEEP_RUNNABLE_PER_HOST=128
+CRAWLER_DAEMON_KEEP_RUNNABLE_PER_BRANCH=16
+CRAWLER_DAEMON_SCHEDULED_SURFACE_DELAY_SECONDS=1800
+CRAWLER_DAEMON_MIN_RUNNABLE_SLEEP=0.5
+CRAWLER_DAEMON_MIN_RUNNABLE_SUPPLY_COUNT=20
+CRAWLER_DAEMON_MIN_RUNNABLE_SUPPLY_HOSTS=8
 CRAWLER_DAEMON_BLOCKED_RETRY_BUDGET=8
 CRAWLER_DAEMON_BLOCKED_RETRY_PER_HOST=1
 CRAWLER_DAEMON_BLOCKED_RETRY_MAX_CONSECUTIVE_FAILURES=8

@@ -40,17 +40,18 @@ Examples:
 
 Without this split, queue names end up carrying both "where is this URL now?" and "why do we want it?".
 
-## Why `exploration` Feels Off
+## Why State Names Matter
 
-`exploration` is somewhat awkward as a state name.
+Scheduler surface names should describe where work is now, not why the crawler wants it.
 
 Reasons:
 
-- it reads like an action or purpose term
-- as a live scheduler surface name, it emphasizes intent more than current position
-- against `backlog`, the real contrast often looks more like frontline vs deferred, not explore vs not-explore
+- action or purpose terms belong to intent
+- live scheduler surfaces should emphasize current treatment
+- the contrast should be executable versus not-yet-executable, not one purpose versus another
 
-In the ideal model, `explore` remains an intent, while surface names converge toward state terms such as `scheduled` and `runnable`.
+In the ideal model, `explore` remains an intent, while surface names use state terms such as
+`scheduled` and `runnable`.
 
 ## Runnable Capability Principle
 
@@ -81,4 +82,4 @@ Naming guidance from the abstract model:
 - use `scheduled` / `runnable` / `leased` / `blocked` names for live state
 - use `explore` / `refresh` / `retry` for policy intent
 
-That makes `exploration` better understood as a transitional name from an implementation that has not fully separated state from intent yet, rather than the ideal final name.
+Purpose terms should stay in intent fields rather than becoming scheduler surface names.

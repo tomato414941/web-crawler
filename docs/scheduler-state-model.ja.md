@@ -181,8 +181,8 @@ seed は bootstrap 用の input set にすぎない。
 
 現在の概念は次の意味へ収束させるべきである。
 
-- `exploration` => frontline runnable surface
-- `backlog` => deferred scheduled surface
+- `runnable surface` => runnable runnable surface
+- `scheduled` => scheduled scheduled surface
 - `active_leases` => lease state
 - blocked-host-backoff queue => quarantine pool
 - host scheduler tables => host state
@@ -193,7 +193,7 @@ seed は bootstrap 用の input set にすぎない。
 
 - まず state と intent を設計上で分ける
 - 既存名はその分離を導入する間の過渡名として残ってよい
-- `backlog` を `discovered` の意味に過負荷してはいけない
+- `scheduled` を `discovered` の意味に過負荷してはいけない
 - lane は必要なら置く operational grouping であり、primary scheduler concept ではない
 
 ## Immediate Design Consequences
@@ -201,6 +201,6 @@ seed は bootstrap 用の input set にすぎない。
 1. URL ledger は scheduler の current-state truth であることをやめるべきである
 2. live scheduler state の唯一の正本は queue membership になるべきである
 3. operator-facing な `runnable` view は派生値のままにするべきである
-4. bootstrap は通常の exploration supply から分離するべきである
+4. bootstrap は通常の runnable surface supply から分離するべきである
 5. seed 由来の特別扱いは scheduler から消えるべきである
 6. worker lane を持つとしても、state と strategy から導かれる下位概念に留めるべきである

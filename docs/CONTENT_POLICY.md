@@ -34,6 +34,6 @@ For these resources, the target behavior is:
 
 ## Deferred work
 
-- Dedicated PDF extraction is deferred.
-- Other binary-specific extractors are also deferred.
+- Dedicated PDF extraction is out of scope for now.
+- Other binary-specific extractors are also out of scope for now.
 - If a content type needs first-class support later, add a dedicated extractor instead of forcing the raw body into the text storage path.

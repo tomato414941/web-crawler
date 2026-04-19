@@ -16,7 +16,7 @@ from .host_manager import HostManager
 from .host_store import HostStore
 from .discovery import seed_hosts_from_urls
 from .storage import PgStorage
-from .url_ledger import RUNNABLE_SURFACE_FRONTLINE, UrlLedger
+from .url_ledger import SCHEDULER_SURFACE_RUNNABLE, UrlLedger
 
 logger = logging.getLogger(__name__)
 
@@ -53,9 +53,9 @@ class CrawlDaemon:
         delay: float = 1.0,
         cycle_pause: float = 5.0,
         idle_sleep: float = 60.0,
-        deferred_runnable_per_host: int | None = None,
-        deferred_runnable_per_branch: int | None = None,
-        deferred_surface_defer_seconds: float | None = None,
+        scheduled_runnable_per_host: int | None = None,
+        scheduled_runnable_per_branch: int | None = None,
+        scheduled_surface_delay_seconds: float | None = None,
         min_runnable_sleep: float | None = None,
     ):
         self._seeds = seeds
@@ -67,32 +67,32 @@ class CrawlDaemon:
         self._delay = delay
         self._cycle_pause = cycle_pause
         self._idle_sleep = idle_sleep
-        self._deferred_runnable_per_host = (
+        self._scheduled_runnable_per_host = (
             settings.daemon_keep_runnable_per_host
-            if deferred_runnable_per_host is None
-            else deferred_runnable_per_host
+            if scheduled_runnable_per_host is None
+            else scheduled_runnable_per_host
         )
-        self._deferred_runnable_per_branch = (
+        self._scheduled_runnable_per_branch = (
             settings.daemon_keep_runnable_per_branch
-            if deferred_runnable_per_branch is None
-            else deferred_runnable_per_branch
+            if scheduled_runnable_per_branch is None
+            else scheduled_runnable_per_branch
         )
-        self._deferred_surface_defer_seconds = (
-            settings.daemon_deferred_surface_defer_seconds
-            if deferred_surface_defer_seconds is None
-            else deferred_surface_defer_seconds
+        self._scheduled_surface_delay_seconds = (
+            settings.daemon_scheduled_surface_delay_seconds
+            if scheduled_surface_delay_seconds is None
+            else scheduled_surface_delay_seconds
         )
         self._min_runnable_sleep = (
             settings.daemon_min_runnable_sleep if min_runnable_sleep is None else min_runnable_sleep
         )
-        self._min_frontline_runnable = max(
-            1, min(len(self._seeds), settings.daemon_min_frontline_runnable)
+        self._min_runnable_supply_count = max(
+            1, min(len(self._seeds), settings.daemon_min_runnable_supply_count)
         )
-        self._min_frontline_hosts = max(
+        self._min_runnable_supply_hosts = max(
             1,
             min(
                 len(self._seed_hosts) or len(self._seeds) or 1,
-                settings.daemon_min_frontline_hosts,
+                settings.daemon_min_runnable_supply_hosts,
             ),
         )
         self._blocked_retry_budget = max(0, settings.daemon_blocked_retry_budget)
@@ -116,16 +116,16 @@ class CrawlDaemon:
         )
         self._policy = DaemonSchedulerPolicy(
             cycle_pages=self._cycle_pages,
-            min_frontline_runnable=self._min_frontline_runnable,
-            min_frontline_hosts=self._min_frontline_hosts,
+            min_runnable_supply_count=self._min_runnable_supply_count,
+            min_runnable_supply_hosts=self._min_runnable_supply_hosts,
             blocked_retry_budget=self._blocked_retry_budget,
             blocked_retry_per_host=self._blocked_retry_per_host,
             blocked_retry_max_consecutive_failures=self._blocked_retry_max_consecutive_failures,
             quarantine_retire_min_consecutive_failures=self._quarantine_retire_min_consecutive_failures,
             quarantine_retire_after_seconds=self._quarantine_retire_after_seconds,
-            deferred_runnable_per_host=self._deferred_runnable_per_host,
-            deferred_runnable_per_branch=self._deferred_runnable_per_branch,
-            deferred_surface_defer_seconds=self._deferred_surface_defer_seconds,
+            scheduled_runnable_per_host=self._scheduled_runnable_per_host,
+            scheduled_runnable_per_branch=self._scheduled_runnable_per_branch,
+            scheduled_surface_delay_seconds=self._scheduled_surface_delay_seconds,
         )
 
     async def run(self):
@@ -161,7 +161,7 @@ class CrawlDaemon:
                     )
                     if maintenance["admitted"]:
                         logger.info(
-                            "Admitted %d discovered URLs into the deferred surface",
+                            "Admitted %d discovered URLs into the scheduled surface",
                             maintenance["admitted"],
                         )
                     if maintenance["rebalanced_before"]:
@@ -169,10 +169,10 @@ class CrawlDaemon:
                             "Rebalanced blocked-host-backoff queue: quarantined=%d restored=0",
                             maintenance["rebalanced_before"],
                         )
-                    if maintenance["deferred"]:
+                    if maintenance["scheduled"]:
                         logger.info(
-                            "Deferred %d low-priority deferred-surface URLs",
-                            maintenance["deferred"],
+                            "Delayed %d low-priority scheduled-surface URLs",
+                            maintenance["scheduled"],
                         )
                     if maintenance["rebalanced_after"]:
                         logger.info(
@@ -431,15 +431,17 @@ class CrawlDaemon:
                 prime = self._policy.prime_scheduler(url_ledger)
                 if prime["admitted"]:
                     logger.info(
-                        "Admitted %d discovered URLs into the deferred surface", prime["admitted"]
+                        "Admitted %d discovered URLs into the scheduled surface", prime["admitted"]
                     )
                 if prime["rebalanced"]:
                     logger.info(
                         "Rebalanced blocked-host-backoff queue: quarantined=%d restored=0",
                         prime["rebalanced"],
                     )
-                if prime["deferred"]:
-                    logger.info("Deferred %d low-priority deferred-surface URLs", prime["deferred"])
+                if prime["scheduled"]:
+                    logger.info(
+                        "Delayed %d low-priority scheduled-surface URLs", prime["scheduled"]
+                    )
                 if prime["promoted"]:
                     logger.info(
                         "Promoted %d blocked-host-backoff URLs for retry", prime["promoted"]
@@ -500,30 +502,30 @@ class CrawlDaemon:
         finally:
             runtime_storage.close()
 
-    def _ensure_frontline_supply(self, url_ledger: UrlLedger):
-        """Keep the frontline runnable surface supplied from existing scheduler state."""
+    def _ensure_runnable_supply(self, url_ledger: UrlLedger):
+        """Keep the runnable scheduler surface supplied from existing scheduler state."""
         before_pending = url_ledger.pending_count()
-        before_runnable = url_ledger.runnable_count(runnable_surface=RUNNABLE_SURFACE_FRONTLINE)
-        before_frontline_pending = url_ledger.pending_count(
-            runnable_surface=RUNNABLE_SURFACE_FRONTLINE
+        before_runnable = url_ledger.runnable_count(runnable_surface=SCHEDULER_SURFACE_RUNNABLE)
+        before_runnable_pending = url_ledger.pending_count(
+            runnable_surface=SCHEDULER_SURFACE_RUNNABLE
         )
-        self._policy.ensure_frontline_supply(url_ledger)
+        self._policy.ensure_runnable_supply(url_ledger)
         after_pending = url_ledger.pending_count()
-        after_runnable = url_ledger.runnable_count(runnable_surface=RUNNABLE_SURFACE_FRONTLINE)
-        after_frontline_pending = url_ledger.pending_count(
-            runnable_surface=RUNNABLE_SURFACE_FRONTLINE
+        after_runnable = url_ledger.runnable_count(runnable_surface=SCHEDULER_SURFACE_RUNNABLE)
+        after_runnable_pending = url_ledger.pending_count(
+            runnable_surface=SCHEDULER_SURFACE_RUNNABLE
         )
         if after_pending == before_pending and after_runnable == before_runnable:
             return
         logger.info(
-            "Ensured frontline supply: pending_total=%d->%d runnable_frontline=%d->%d pending_frontline=%d->%d target_runnable=%d",
+            "Ensured runnable supply: pending_total=%d->%d runnable=%d->%d pending_runnable=%d->%d target_runnable=%d",
             before_pending,
             after_pending,
             before_runnable,
             after_runnable,
-            before_frontline_pending,
-            after_frontline_pending,
-            self._min_frontline_runnable,
+            before_runnable_pending,
+            after_runnable_pending,
+            self._min_runnable_supply_count,
         )
 
     def _bootstrap_scheduler(self, url_ledger: UrlLedger) -> int:

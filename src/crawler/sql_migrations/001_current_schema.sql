@@ -95,47 +95,47 @@ CREATE TABLE public.crawler_runtime_stats (
     CONSTRAINT crawler_runtime_stats_pkey PRIMARY KEY (component)
 );
 
-CREATE TABLE public.scheduler_queue_frontline (
+CREATE TABLE public.scheduler_queue_runnable (
     url text NOT NULL,
     host text NOT NULL,
     priority real DEFAULT 1.0 NOT NULL,
     next_fetch_at double precision DEFAULT 0 NOT NULL,
     added_at double precision DEFAULT 0 NOT NULL,
     branch_key text DEFAULT '/'::text NOT NULL,
-    CONSTRAINT scheduler_queue_frontline_pkey PRIMARY KEY (url),
-    CONSTRAINT scheduler_queue_frontline_url_fkey
+    CONSTRAINT scheduler_queue_runnable_pkey PRIMARY KEY (url),
+    CONSTRAINT scheduler_queue_runnable_url_fkey
         FOREIGN KEY (url) REFERENCES public.url_ledger(url) ON DELETE CASCADE
 );
 
-CREATE INDEX idx_scheduler_queue_frontline_host
-    ON public.scheduler_queue_frontline(host);
+CREATE INDEX idx_scheduler_queue_runnable_host
+    ON public.scheduler_queue_runnable(host);
 
-CREATE INDEX idx_scheduler_queue_frontline_ready
-    ON public.scheduler_queue_frontline(priority DESC, next_fetch_at ASC, added_at ASC);
+CREATE INDEX idx_scheduler_queue_runnable_ready
+    ON public.scheduler_queue_runnable(priority DESC, next_fetch_at ASC, added_at ASC);
 
-CREATE INDEX idx_scheduler_queue_frontline_branch
-    ON public.scheduler_queue_frontline(host, branch_key);
+CREATE INDEX idx_scheduler_queue_runnable_branch
+    ON public.scheduler_queue_runnable(host, branch_key);
 
-CREATE TABLE public.scheduler_queue_deferred (
+CREATE TABLE public.scheduler_queue_scheduled (
     url text NOT NULL,
     host text NOT NULL,
     priority real DEFAULT 1.0 NOT NULL,
     next_fetch_at double precision DEFAULT 0 NOT NULL,
     added_at double precision DEFAULT 0 NOT NULL,
     branch_key text DEFAULT '/'::text NOT NULL,
-    CONSTRAINT scheduler_queue_deferred_pkey PRIMARY KEY (url),
-    CONSTRAINT scheduler_queue_deferred_url_fkey
+    CONSTRAINT scheduler_queue_scheduled_pkey PRIMARY KEY (url),
+    CONSTRAINT scheduler_queue_scheduled_url_fkey
         FOREIGN KEY (url) REFERENCES public.url_ledger(url) ON DELETE CASCADE
 );
 
-CREATE INDEX idx_scheduler_queue_deferred_host
-    ON public.scheduler_queue_deferred(host);
+CREATE INDEX idx_scheduler_queue_scheduled_host
+    ON public.scheduler_queue_scheduled(host);
 
-CREATE INDEX idx_scheduler_queue_deferred_ready
-    ON public.scheduler_queue_deferred(priority DESC, next_fetch_at ASC, added_at ASC);
+CREATE INDEX idx_scheduler_queue_scheduled_ready
+    ON public.scheduler_queue_scheduled(priority DESC, next_fetch_at ASC, added_at ASC);
 
-CREATE INDEX idx_scheduler_queue_deferred_branch
-    ON public.scheduler_queue_deferred(host, branch_key);
+CREATE INDEX idx_scheduler_queue_scheduled_branch
+    ON public.scheduler_queue_scheduled(host, branch_key);
 
 CREATE TABLE public.scheduler_queue_refresh (
     url text NOT NULL,

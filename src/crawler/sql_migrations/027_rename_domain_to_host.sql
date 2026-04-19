@@ -37,6 +37,8 @@ BEGIN
         'pages',
         'scheduler_queue_frontline',
         'scheduler_queue_deferred',
+        'scheduler_queue_runnable',
+        'scheduler_queue_scheduled',
         'scheduler_queue_refresh',
         'scheduler_queue_retry_quarantine',
         'active_leases'
@@ -64,6 +66,8 @@ DROP INDEX IF EXISTS public.idx_url_ledger_domain;
 DROP INDEX IF EXISTS public.idx_pages_domain;
 DROP INDEX IF EXISTS public.idx_scheduler_queue_frontline_domain;
 DROP INDEX IF EXISTS public.idx_scheduler_queue_deferred_domain;
+DROP INDEX IF EXISTS public.idx_scheduler_queue_runnable_domain;
+DROP INDEX IF EXISTS public.idx_scheduler_queue_scheduled_domain;
 DROP INDEX IF EXISTS public.idx_scheduler_queue_refresh_domain;
 DROP INDEX IF EXISTS public.idx_scheduler_queue_retry_quarantine_domain;
 DROP INDEX IF EXISTS public.idx_active_leases_domain;
@@ -74,11 +78,27 @@ CREATE INDEX IF NOT EXISTS idx_url_ledger_host
 CREATE INDEX IF NOT EXISTS idx_pages_host
     ON public.pages(host);
 
-CREATE INDEX IF NOT EXISTS idx_scheduler_queue_frontline_host
-    ON public.scheduler_queue_frontline(host);
-
-CREATE INDEX IF NOT EXISTS idx_scheduler_queue_deferred_host
-    ON public.scheduler_queue_deferred(host);
+DO $$
+DECLARE
+    target_table text;
+    index_name text;
+BEGIN
+    FOR target_table, index_name IN
+        VALUES
+            ('scheduler_queue_frontline', 'idx_scheduler_queue_frontline_host'),
+            ('scheduler_queue_deferred', 'idx_scheduler_queue_deferred_host'),
+            ('scheduler_queue_runnable', 'idx_scheduler_queue_runnable_host'),
+            ('scheduler_queue_scheduled', 'idx_scheduler_queue_scheduled_host')
+    LOOP
+        IF to_regclass(format('public.%I', target_table)) IS NOT NULL THEN
+            EXECUTE format(
+                'CREATE INDEX IF NOT EXISTS %I ON public.%I(host)',
+                index_name,
+                target_table
+            );
+        END IF;
+    END LOOP;
+END $$;
 
 CREATE INDEX IF NOT EXISTS idx_scheduler_queue_refresh_host
     ON public.scheduler_queue_refresh(host);
