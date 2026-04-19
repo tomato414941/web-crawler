@@ -11,6 +11,7 @@ from crawler.host_ledger import HOST_LEDGER_TABLE
 from crawler.url_ledger import (
     BLOCKED_HOST_BACKOFF_TABLE,
     CrawlTask,
+    HOST_RUNNABLE_HEADS_TABLE,
     INTENT_EXPLORE,
     INTENT_REFRESH,
     LEASE_TABLE,
@@ -125,6 +126,7 @@ class TestUrlLedger:
         conn.autocommit = False
         with conn.cursor() as cur:
             cur.execute("DROP TABLE IF EXISTS schema_migrations")
+            cur.execute(f"DROP TABLE IF EXISTS {HOST_RUNNABLE_HEADS_TABLE}")
             cur.execute(f"DROP TABLE IF EXISTS {LEASE_TABLE}")
             cur.execute("DROP TABLE IF EXISTS frontier_lease_active")
             cur.execute(f"DROP TABLE IF EXISTS {PHYSICAL_QUEUE_TABLES[QUEUE_EXPLORATION]}")
@@ -695,6 +697,78 @@ class TestUrlLedger:
         )
 
         assert [(head.host_key, head.url) for head in heads] == [("b.com", "http://b.com/1")]
+
+    def test_rebuild_host_runnable_heads_builds_one_head_per_host(self, ledger):
+        now = 1000.0
+        ledger.place(CrawlTask(url="http://a.com/1", added_at=1000, next_fetch_at=now - 1))
+        ledger.place(CrawlTask(url="http://a.com/2", added_at=1001, next_fetch_at=now - 1))
+        ledger.place(CrawlTask(url="http://b.com/1", added_at=900, next_fetch_at=now - 1))
+
+        rebuilt = ledger.rebuild_host_runnable_heads(
+            runnable_surface=RUNNABLE_SURFACE_FRONTLINE,
+            now=1234.0,
+        )
+        heads = ledger.host_runnable_heads_from_read_model(
+            runnable_surface=RUNNABLE_SURFACE_FRONTLINE,
+            now=now,
+        )
+
+        assert rebuilt == 2
+        assert [(head.host_key, head.url, head.runnable_url_count) for head in heads] == [
+            ("b.com", "http://b.com/1", 1),
+            ("a.com", "http://a.com/1", 2),
+        ]
+        assert {head.refreshed_at for head in heads} == {1234.0}
+
+    def test_host_runnable_heads_read_model_respects_runnable_at(self, ledger):
+        now = 1000.0
+        ledger.place(CrawlTask(url="http://a.com/1", added_at=1000, next_fetch_at=now - 1))
+
+        self.host_store.reserve_request_slot(
+            "a.com",
+            crawl_delay_seconds=10.0,
+            now=now,
+        )
+        rebuilt = ledger.rebuild_host_runnable_heads(
+            runnable_surface=RUNNABLE_SURFACE_FRONTLINE,
+            now=now,
+        )
+
+        assert rebuilt == 1
+        assert (
+            ledger.host_runnable_heads_from_read_model(
+                runnable_surface=RUNNABLE_SURFACE_FRONTLINE,
+                now=now,
+            )
+            == []
+        )
+
+        heads = ledger.host_runnable_heads_from_read_model(
+            runnable_surface=RUNNABLE_SURFACE_FRONTLINE,
+            now=now + 11.0,
+        )
+
+        assert len(heads) == 1
+        assert heads[0].host_key == "a.com"
+        assert heads[0].runnable_at == 1010.0
+
+    def test_host_runnable_heads_read_model_supports_limit_and_exclude_hosts(self, ledger):
+        now = 1000.0
+        ledger.place(CrawlTask(url="http://a.com/1", added_at=1000, next_fetch_at=now - 1))
+        ledger.place(CrawlTask(url="http://b.com/1", added_at=900, next_fetch_at=now - 1))
+        ledger.rebuild_host_runnable_heads(
+            runnable_surface=RUNNABLE_SURFACE_FRONTLINE,
+            now=now,
+        )
+
+        heads = ledger.host_runnable_heads_from_read_model(
+            runnable_surface=RUNNABLE_SURFACE_FRONTLINE,
+            exclude_hosts=["b.com"],
+            limit=1,
+            now=now,
+        )
+
+        assert [(head.host_key, head.url) for head in heads] == [("a.com", "http://a.com/1")]
 
     def test_select_runnable_host_head_uses_same_host_first_order(self, ledger):
         ledger.place(
