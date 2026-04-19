@@ -12,6 +12,7 @@ from crawler.url_ledger import (
     INTENT_REFRESH,
     RUNNABLE_SURFACE_DEFERRED,
     RUNNABLE_SURFACE_FRONTLINE,
+    RUNNABLE_SURFACE_NORMAL,
     RUNNABLE_SURFACE_REFRESH,
 )
 
@@ -44,7 +45,20 @@ class FakeLedger:
             if host in exclude_hosts:
                 continue
             effective_surface = task.runnable_surface or RUNNABLE_SURFACE_FRONTLINE
-            if runnable_surface is not None and effective_surface != runnable_surface:
+            if (
+                runnable_surface == RUNNABLE_SURFACE_NORMAL
+                and effective_surface
+                not in {
+                    RUNNABLE_SURFACE_FRONTLINE,
+                    RUNNABLE_SURFACE_DEFERRED,
+                }
+            ):
+                continue
+            if (
+                runnable_surface is not None
+                and runnable_surface != RUNNABLE_SURFACE_NORMAL
+                and effective_surface != runnable_surface
+            ):
                 continue
             return self.tasks.pop(index)
         return None
@@ -548,20 +562,19 @@ async def test_crawler_reserves_some_leases_for_breadth():
     assert ledger.lease_calls[:2] == [
         {
             "lease_strategy": "host_first",
-            "runnable_surface": "frontline",
+            "runnable_surface": "normal",
             "exclude_hosts": [],
         },
         {
             "lease_strategy": "host_first",
-            "runnable_surface": "frontline",
+            "runnable_surface": "normal",
             "exclude_hosts": [],
         },
     ]
 
 
 @pytest.mark.asyncio
-@pytest.mark.asyncio
-async def test_crawler_prefers_exploration_before_backlog_and_refresh():
+async def test_crawler_uses_normal_surface_for_regular_crawls():
     ledger = FakeLedger([CrawlTask(url="https://example.com/page")])
     host_manager = FakeHostManager()
     fetcher = FakeFetcher(
@@ -581,7 +594,7 @@ async def test_crawler_prefers_exploration_before_backlog_and_refresh():
         engine.fetcher = fetcher
         await engine.crawl()
 
-    assert ledger.lease_calls[0]["runnable_surface"] == "frontline"
+    assert ledger.lease_calls[0]["runnable_surface"] == "normal"
 
 
 @pytest.mark.asyncio
@@ -651,12 +664,12 @@ async def test_crawler_allows_second_inflight_for_fast_host_budget():
 
 
 @pytest.mark.asyncio
-async def test_crawler_splits_worker_pools_by_surface():
+async def test_crawler_uses_normal_workers_for_deferred_work():
     ledger = FakeLedger(
         [
             CrawlTask(
                 url="https://example.com/page",
-                runnable_surface=RUNNABLE_SURFACE_FRONTLINE,
+                runnable_surface=RUNNABLE_SURFACE_DEFERRED,
                 intent=INTENT_EXPLORE,
             )
         ]
@@ -678,10 +691,11 @@ async def test_crawler_splits_worker_pools_by_surface():
     ) as engine:
         engine.fetcher = fetcher
         runtime = engine.snapshot_runtime_stats()
+        assert runtime["normal_workers"] == 5
         assert runtime["frontline_workers"] == 5
         assert runtime["deferred_workers"] == 0
         assert runtime["refresh_workers"] == 1
-        assert runtime["refresh_workers"] == 1
         await engine.crawl()
 
-    assert ledger.lease_calls[0]["runnable_surface"] == "frontline"
+    assert ledger.lease_calls[0]["runnable_surface"] == "normal"
+    assert engine.pages_crawled == 1

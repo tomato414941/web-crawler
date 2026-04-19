@@ -64,6 +64,16 @@ The scheduler primarily wants to know:
 
 In this sense, the scheduler's first-class unit leans more toward host/site than raw URL.
 
+The implementation may still keep physical surfaces such as `frontline` and `deferred`.
+Normal crawler execution should not make those physical projections the primary runtime
+subject. It should lease from a combined `normal` runnable surface with host-first selection.
+
+That means:
+
+- `frontline` / `deferred`: internal queue projections
+- `normal`: runtime-facing runnable view for regular crawling
+- `refresh`: recrawl work kept separate from regular crawling
+
 ## Naming Guidance
 
 Naming guidance from the abstract model:
