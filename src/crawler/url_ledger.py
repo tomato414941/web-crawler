@@ -147,6 +147,7 @@ INTENT_DEFAULT_RUNNABLE_SURFACE = {
     INTENT_RETRY: RUNNABLE_SURFACE_DEFERRED,
 }
 HOST_HEAD_LOOKAHEAD = 32
+HOST_HEAD_READ_MODEL_LOOKAHEAD = HOST_HEAD_LOOKAHEAD * 4
 
 
 @dataclass(init=False)
@@ -1087,6 +1088,22 @@ class UrlLedger:
         for table_name in QUEUE_TABLES:
             cur.execute(f"DELETE FROM {table_name} WHERE url = ANY(%s)", (urls,))
         cur.execute(f"DELETE FROM {BLOCKED_HOST_BACKOFF_TABLE} WHERE url = ANY(%s)", (urls,))
+        cur.execute(f"DELETE FROM {HOST_RUNNABLE_HEADS_TABLE} WHERE head_url = ANY(%s)", (urls,))
+
+    def _delete_host_runnable_head_candidate(self, *, physical_queue: str, url: str) -> None:
+        """Drop a stale read-model candidate after source-of-truth revalidation misses."""
+        try:
+            with self._conn.cursor() as cur:
+                cur.execute(
+                    f"""DELETE FROM {HOST_RUNNABLE_HEADS_TABLE}
+                        WHERE physical_queue = %s
+                          AND head_url = %s""",
+                    (self._normalize_physical_queue(physical_queue), url),
+                )
+            self._conn.commit()
+        except Exception:
+            self._conn.rollback()
+            logger.debug("Failed to delete stale host runnable-head candidate", exc_info=True)
 
     def _insert_pending_queue_rows(
         self,
@@ -1641,6 +1658,79 @@ class UrlLedger:
         self._recover_leased_locked(now, expired_only=True)
         self._conn.commit()
 
+        try:
+            task = self._lease_next_host_first_from_read_model(
+                host=host,
+                lease_seconds=lease_seconds,
+                exclude_hosts=exclude_hosts,
+                physical_queue=physical_queue,
+                now=now,
+            )
+        except Exception:
+            self._conn.rollback()
+            logger.debug(
+                "Failed to lease from host runnable-head read model; falling back",
+                exc_info=True,
+            )
+            task = None
+        if task is not None:
+            return task
+
+        return self._lease_next_host_first_from_derived_query(
+            host=host,
+            lease_seconds=lease_seconds,
+            exclude_hosts=exclude_hosts,
+            physical_queue=physical_queue,
+            now=now,
+        )
+
+    def _lease_next_host_first_from_read_model(
+        self,
+        *,
+        host: str | None,
+        lease_seconds: float | None,
+        exclude_hosts: list[str] | None,
+        physical_queue: str,
+        now: float,
+    ) -> CrawlTask | None:
+        """Lease host-first candidates from the loose read model first."""
+        candidate_urls = [
+            head.url
+            for head in self.host_runnable_heads_from_read_model(
+                limit=HOST_HEAD_READ_MODEL_LOOKAHEAD,
+                host=host,
+                exclude_hosts=exclude_hosts,
+                physical_queues=[physical_queue],
+                now=now,
+            )
+        ]
+        for candidate_url in candidate_urls:
+            task = self._lease_candidate_url(
+                candidate_url=candidate_url,
+                physical_queue=physical_queue,
+                lease_seconds=lease_seconds,
+                host=host,
+                exclude_hosts=exclude_hosts,
+                now=now,
+            )
+            if task is not None:
+                return task
+            self._delete_host_runnable_head_candidate(
+                physical_queue=physical_queue,
+                url=candidate_url,
+            )
+        return None
+
+    def _lease_next_host_first_from_derived_query(
+        self,
+        *,
+        host: str | None,
+        lease_seconds: float | None,
+        exclude_hosts: list[str] | None,
+        physical_queue: str,
+        now: float,
+    ) -> CrawlTask | None:
+        """Lease host-first candidates by deriving host heads from queue tables."""
         candidate_urls = [
             head.url
             for head in self.runnable_host_heads(
