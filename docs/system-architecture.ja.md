@@ -6,6 +6,9 @@
 [scheduler-state-model.ja.md](/home/dev/projects/web-crawler/docs/scheduler-state-model.ja.md) よりも project 全体の
 責務分解を扱う。
 
+scheduler runtime execution と lease hot-path 制約は
+[scheduler-execution.ja.md](/home/dev/projects/web-crawler/docs/scheduler-execution.ja.md) で扱う。
+
 役割は、`web-crawler` という project 全体を system として見たときに、最終的にどの subsystem
 へ分解されるべきか、その責務を説明することである。
 
@@ -106,6 +109,10 @@ execution state は小さく明示的であるべきである。
 
 `leased` は ledger の概念でも host-state の概念でもなく、execution の概念である。
 
+次の URL を選ぶ execution strategy は、scheduler membership と host state の下位に置く。
+host-first lease query、runtime-facing runnable view、worker lane 数のような詳細は
+scheduler execution layer に属する。
+
 ## 5. Host State
 
 Host state は host/site 単位の politeness, backoff, capacity を持つ。
@@ -147,6 +154,9 @@ operator view は primary state から導出されるべきであり、scheduler
 - runtime snapshot
 
 これらは有用だが、primary state ではない。
+
+worker-facing な runtime view も derived read model として置ける。性能のために存在してよいが、
+scheduler membership を再定義してはいけない。
 
 ## 8. Bootstrap And Seed Management
 

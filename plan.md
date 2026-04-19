@@ -1,40 +1,37 @@
 # web-crawler plan
 
-## Current milestone: host-first execution thin slice
+## Current milestone: scheduler execution design
 
-The current priority is to reduce the gap between the crawler concepts and runtime
-behavior while also improving crawl throughput.
+The current priority is to make the scheduler execution layer explicit before the next
+performance change. The crawler now has host-first normal execution, but the lease hot path is too
+expensive at production concurrency.
 
-The target model is:
+The documentation split is:
 
-- `ledger` keeps durable URL identity and history
-- `scheduler_state` is derived from queue membership, active leases, and host state
-- `intent` explains why a URL should be crawled
-- `active_leases` owns execution
-- `host_state` owns politeness, backoff, and host-level runtime budget
+- `crawler-concepts`: abstract model and naming principles
+- `scheduler-state-model`: source-of-truth boundaries and invariants
+- `scheduler-execution`: runtime lease strategy, read models, and hot-path constraints
+- `system-architecture`: project-wide subsystem boundaries
 
 ## Active work
 
-- Treat `frontline` and `deferred` as internal physical scheduler projections.
-- Run normal crawl workers against the combined `normal` runnable surface.
-- Lease normal work with host-first selection so deferred work does not need promotion
-  to frontline before it can run.
-- Keep refresh work separate with a small reserved worker budget when concurrency is high
-  enough.
-- Expose `normal_workers` in runtime stats while keeping legacy worker fields as
-  compatibility aliases.
+- Add `docs/scheduler-execution.md` and `docs/scheduler-execution.ja.md`.
+- Keep `crawler-concepts` abstract by moving runtime execution details out of it.
+- Cross-link `scheduler-state-model` and `system-architecture` to the new execution document.
+- Record the current production bottleneck: host-first lease selection is the main hot path.
+- Keep the next implementation candidate narrow: optimize the host-first lease query before adding
+  a new durable projection.
 
 ## Not in this slice
 
+- No code change.
 - No database schema migration.
-- No removal of `frontline` / `deferred` physical queue tables.
-- No immediate jump to 100 production concurrency.
-- No host-per-inflight increase beyond the existing adaptive budget rules.
+- No production configuration change.
+- No new durable scheduler projection.
 
 ## Acceptance
 
-- Deferred-only normal crawl work can be processed by regular workers.
-- Runtime stats show `normal_workers`.
-- Existing host inflight limiting still prevents one host from consuming all workers.
-- Production can be tested first at about 24 concurrent workers before considering higher
-  concurrency.
+- Scheduler execution has a dedicated document in English and Japanese.
+- Existing docs clearly point to the right layer instead of repeating execution details.
+- `crawler-concepts` stays abstract and does not carry SQL or worker-lane details.
+- The next code task is clear: optimize host-first lease candidate selection.

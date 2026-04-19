@@ -3,6 +3,8 @@
 This document defines a practical state model for future refactors. It does not describe the current implementation directly, but it is also not the top-level idealized model. Its job is to describe which states the system should treat as source-of-truth in order to make correct scheduling decisions.
 
 The higher-level concepts live in [crawler-concepts.md](/home/dev/projects/web-crawler/docs/crawler-concepts.md).
+Runtime lease strategy and hot-path constraints live in
+[scheduler-execution.md](/home/dev/projects/web-crawler/docs/scheduler-execution.md).
 
 This document should be read as a transition/convergence model that helps move the current crawler toward that ideal.
 
@@ -101,6 +103,10 @@ The operator-facing `runnable` view is derived from:
 - host state allowing execution now
 
 If this derived `runnable` view is persisted as a separate primary state, it will drift.
+
+Execution may materialize or cache runtime-facing runnable views for performance, but those views
+must remain derived from scheduler membership, active leases, and host state. They must not become a
+second source of truth for current URL membership.
 
 ## State Transitions
 
