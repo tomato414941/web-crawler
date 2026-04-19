@@ -19,9 +19,9 @@ from .config import settings
 from .content_policy import should_extract_links, should_store_text_content
 from .core import HttpFetcher, Response
 from .discovery import PageSignals, rank_discovered_url, rank_seed_url, seed_hosts_from_urls
+from .error_stats import categorize_crawl_error
 from .host_manager import HostManager
 from .host_store import HostStore
-from .error_stats import categorize_crawl_error
 from .url_ledger import (
     CrawlTask,
     INTENT_EXPLORE,
@@ -226,17 +226,23 @@ class CrawlerEngine:
         self.host_store = host_store
         if self.host_store is not None:
             self.scheduler.attach_host_store(self.host_store)
+        self.host_ledger_store = getattr(self.scheduler, "host_ledger_store", None)
 
         if host_manager:
             self.host_manager = host_manager
             self._owns_host_manager = False
             if hasattr(self.host_manager, "attach_store"):
                 self.host_manager.attach_store(self.host_store)
+            if self.host_ledger_store is not None and hasattr(
+                self.host_manager, "attach_host_ledger_store"
+            ):
+                self.host_manager.attach_host_ledger_store(self.host_ledger_store)
         else:
             self.host_manager = HostManager(
                 user_agent=settings.user_agent,
                 default_delay=delay,
                 host_store=self.host_store,
+                host_ledger_store=self.host_ledger_store,
             )
             self._owns_host_manager = True
 
@@ -318,7 +324,7 @@ class CrawlerEngine:
             self._publisher_storage = None
         if self._finalizer_executor is not None:
             self._finalizer_executor.shutdown(wait=True, cancel_futures=False)
-            self._finalizer_executor = None
+        self._finalizer_executor = None
         self._finalizer_scheduler = None
         self._finalizer_host_store = None
         if self._finalizer_storage is not None:
