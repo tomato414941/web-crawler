@@ -414,8 +414,8 @@ class PgStorage:
         """Fetch runtime crawler stats snapshots."""
         try:
             with self._conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                cur.execute("SELECT to_regclass('public.crawler_runtime_stats')")
-                exists = cur.fetchone()[0] is not None
+                cur.execute("SELECT to_regclass('public.crawler_runtime_stats') AS table_name")
+                exists = cur.fetchone()["table_name"] is not None
                 if not exists:
                     self._finish_read()
                     return {}
