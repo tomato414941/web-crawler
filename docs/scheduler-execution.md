@@ -1,0 +1,110 @@
+# Scheduler Execution
+
+This document describes how scheduler state becomes executable crawler work.
+It sits below the abstract crawler concepts and next to the scheduler state model.
+
+Related documents:
+
+- [crawler-concepts.md](/home/dev/projects/web-crawler/docs/crawler-concepts.md) defines the abstract model.
+- [scheduler-state-model.md](/home/dev/projects/web-crawler/docs/scheduler-state-model.md) defines scheduler source-of-truth boundaries.
+- [system-architecture.md](/home/dev/projects/web-crawler/docs/system-architecture.md) defines the project-wide subsystem split.
+
+## Purpose
+
+Scheduler execution answers a narrower question:
+
+Given scheduler membership, host state, and active leases, how should the crawler select the next
+work without making the lease path too expensive?
+
+This document is about runtime execution strategy. It is not the source of truth for durable URL
+state, policy intent, or crawl pipeline output.
+
+## Execution Layers
+
+Execution should be understood as four related but separate layers:
+
+1. Scheduler membership: which live scheduler surface a URL belongs to.
+2. Execution strategy: how workers choose work from those surfaces.
+3. Runtime-facing read models: derived views used by workers or operators.
+4. Operator stats: summaries such as worker counts, active hosts, and queue depth.
+
+The same table or query may currently serve more than one layer, but the meanings should remain
+separate.
+
+## Current Runtime Interpretation
+
+The current runtime still has physical scheduler queues. Those queues are implementation surfaces,
+not the primary runtime subject for normal crawling.
+
+Current interpretation:
+
+- `frontline` and `deferred` are internal scheduler membership projections.
+- `normal` is the runtime-facing runnable view for regular crawling across those projections.
+- `refresh` is recrawl work and remains separate from regular crawling.
+- active leases own execution after a URL is selected.
+- host state decides whether a host may be touched and how much capacity it has.
+
+Normal crawler workers should lease from the combined `normal` view with host-first selection.
+They should not need to promote deferred work to frontline before it can run.
+
+## Hot Path Rule
+
+Lease selection is a hot path. It runs once per worker repeatedly, so it must avoid expensive
+global derivation on every lease.
+
+The lease path should not repeatedly derive host runnable capability by scanning, sorting, and
+windowing all ready queue rows for every worker lease.
+
+The scheduler should move toward a cheap host-first executable view:
+
+- host eligibility should be available without repeated correlated host lookups
+- host-level runnable heads should be cheap to read
+- URL selection should happen after a host has been chosen
+- operator-facing summaries should not make the worker lease path slower
+
+It is acceptable for read models to be derived. It is not acceptable for every lease to rebuild an
+expensive derived model from scratch when the crawler runs at high concurrency.
+
+## Observed Bottleneck
+
+The current production bottleneck is in host-first lease selection.
+
+Observed during the April 2026 production investigation:
+
+- 24 crawler workers kept PostgreSQL near 90-95% CPU while crawler CPU stayed much lower.
+- The current host-first candidate query took roughly hundreds of milliseconds to about one second.
+- Disabling PostgreSQL JIT reduced one measured query from about 1035 ms to about 662 ms.
+- Replacing repeated correlated `host_state` lookups with a single join reduced one measured shape to about 309 ms, and about 266 ms with larger `work_mem`.
+- With one crawler worker, publish/finalize backlog disappeared, but lease selection still often took hundreds of milliseconds.
+
+These numbers are observations, not permanent SLOs. They identify the next likely implementation
+area.
+
+## Design Constraints
+
+Execution changes should preserve these constraints:
+
+- keep URL ledger facts separate from live scheduler execution
+- keep queue membership as scheduler truth until a replacement exists
+- keep active leases as the owner of in-flight execution
+- keep host-first breadth as the normal execution strategy
+- keep `refresh` separate from normal crawling
+- keep `normal` as a runtime-facing view, not a durable URL state
+- avoid schema migrations unless the current query shape cannot be made cheap enough
+
+## Next Implementation Direction
+
+The next implementation work should optimize the existing host-first path before introducing a new
+durable projection.
+
+Recommended order:
+
+1. Replace correlated `host_state` subqueries in host-first candidate selection with a single join.
+2. Evaluate setting PostgreSQL JIT off for crawler sessions or for the specific hot-path query.
+3. Recheck whether `COUNT(*) OVER (PARTITION BY host)` is still too expensive at production scale.
+4. If the query still scans too much ready work per lease, design a host runnable capability
+   projection.
+
+A host runnable capability projection would be a runtime read model. It would summarize which hosts
+currently have executable work and enough host capacity. It should not become a second source of
+truth for URL membership.

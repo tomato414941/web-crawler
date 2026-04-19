@@ -63,16 +63,12 @@ scheduler は URL の集合そのものではなく、`runnable capability` の�
 
 この意味では、scheduler の一次単位は URL より host/site に寄る。
 
-実装上は、`frontline` や `deferred` のような物理 surface が残っていてもよい。
-ただし crawler の通常実行は、これらを直接の実行主語にせず、
-`normal` runnable surface としてまとめて見たうえで host-first に lease する方が
-この原則に近い。
+runtime 実装には、物理 queue projection、worker lane、operator-facing view が残っていてもよい。
+それらはこの concept より下の execution detail である。抽象ルールとしては、通常クロールは
+raw URL queue ではなく、host/site の runnable capability を見て動くべきである。
 
-つまり:
-
-- `frontline` / `deferred`: 内部 queue projection
-- `normal`: 通常クロールで見る runtime-facing runnable view
-- `refresh`: 通常クロールとは別扱いの再取得 work
+runtime execution の設計は
+[scheduler-execution.ja.md](/home/dev/projects/web-crawler/docs/scheduler-execution.ja.md) に置く。
 
 ## Naming Guidance
 

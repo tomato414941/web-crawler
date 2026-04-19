@@ -7,6 +7,9 @@ which defines the ideal principles, and broader than
 [scheduler-state-model.md](/home/dev/projects/web-crawler/docs/scheduler-state-model.md), which focuses on scheduler
 source-of-truth boundaries.
 
+Scheduler runtime execution and lease hot-path constraints are covered in
+[scheduler-execution.md](/home/dev/projects/web-crawler/docs/scheduler-execution.md).
+
 Its job is to explain how the whole `web-crawler` project should be decomposed as a system.
 
 ## Purpose
@@ -107,6 +110,10 @@ Execution state should be explicit and small.
 
 `leased` is not a ledger concept and not a host-state concept. It is an execution concept.
 
+The execution strategy for choosing the next URL should remain subordinate to scheduler membership
+and host state. Details such as host-first lease queries, runtime-facing runnable views, and worker
+lane counts belong in the scheduler execution layer.
+
 ## 5. Host State
 
 Host state owns politeness, backoff, and capacity at the host/site level.
@@ -149,6 +156,9 @@ This layer includes:
 - runtime snapshots
 
 These are useful, but they are not primary state.
+
+Worker-facing runtime views can also be derived read models. They may exist for performance, but
+they should not redefine scheduler membership.
 
 ## 8. Bootstrap And Seed Management
 
