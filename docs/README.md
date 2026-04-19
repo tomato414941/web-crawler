@@ -13,4 +13,6 @@ runtime overview.
 - [discovered-representation.ja.md](/home/dev/projects/web-crawler/docs/discovered-representation.ja.md) — `discovered` を durable ledger、scheduler membership、operational surface の間でどう表現するか
 - [scheduler-state-model.md](/home/dev/projects/web-crawler/docs/scheduler-state-model.md) — scheduler state model, source-of-truth boundaries, and URL/host state invariants
 - [scheduler-state-model.ja.md](/home/dev/projects/web-crawler/docs/scheduler-state-model.ja.md) — scheduler の状態モデル、正本境界、URL/host state の invariant
+- [scheduler-execution.md](/home/dev/projects/web-crawler/docs/scheduler-execution.md) — scheduler execution strategy, host-first lease path, runtime read models, and hot-path constraints
+- [scheduler-execution.ja.md](/home/dev/projects/web-crawler/docs/scheduler-execution.ja.md) — scheduler execution strategy、host-first lease path、runtime read model、hot-path 制約
 - [CONTENT_POLICY.md](/home/dev/projects/web-crawler/docs/CONTENT_POLICY.md) — content handling, metadata-only resources, and deferred document extraction
