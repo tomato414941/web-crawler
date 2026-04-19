@@ -4,7 +4,7 @@ from urllib.parse import parse_qsl, urlencode, urljoin, urlparse, urlunparse
 
 from selectolax.parser import HTMLParser
 
-_SKIP_SCHEMES = ('#', 'javascript:', 'mailto:', 'tel:', 'data:')
+_SKIP_SCHEMES = ("#", "javascript:", "mailto:", "tel:", "data:")
 
 
 def url_branch_key(url: str, max_segments: int = 2) -> str:
@@ -26,14 +26,16 @@ def normalize_url(url: str) -> str:
 
     path = parsed.path.rstrip("/") or "/"
 
-    normalized = urlunparse((
-        parsed.scheme.lower(),
-        parsed.netloc.lower(),
-        path,
-        parsed.params,
-        sorted_query,
-        "",
-    ))
+    normalized = urlunparse(
+        (
+            parsed.scheme.lower(),
+            parsed.netloc.lower(),
+            path,
+            parsed.params,
+            sorted_query,
+            "",
+        )
+    )
     return normalized
 
 
@@ -68,12 +70,12 @@ def extract_anchors(html: str, base_url: str) -> list[tuple[str, str]]:
         if href.startswith(_SKIP_SCHEMES):
             continue
 
-        if href.startswith('//'):
-            href = 'https:' + href
+        if href.startswith("//"):
+            href = "https:" + href
 
         absolute_url = urljoin(base_url, href)
 
-        if absolute_url.startswith(('http://', 'https://')):
+        if absolute_url.startswith(("http://", "https://")):
             text = node.text(separator=" ", strip=True)
             results.append((normalize_url(absolute_url), text))
 

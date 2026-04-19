@@ -43,7 +43,7 @@ class TestHttpFetcher:
         httpx_mock.add_response(
             url="https://example.com",
             status_code=200,
-            html="<html><head><title>Example Domain</title></head><body></body></html>",
+            html="<html><head><title>Example Host</title></head><body></body></html>",
             headers={"content-type": "text/html; charset=utf-8"},
         )
         response = await fetcher.fetch("https://example.com")
@@ -51,7 +51,7 @@ class TestHttpFetcher:
         assert isinstance(response, Response)
         assert response.status == 200
         assert "example.com" in response.url
-        assert "Example Domain" in response.text
+        assert "Example Host" in response.text
         assert "text/html" in response.headers.get("content-type", "")
         assert response.fetch_request_ms >= 0
         assert response.fetch_body_read_ms >= 0

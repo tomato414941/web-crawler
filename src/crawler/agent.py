@@ -63,7 +63,7 @@ def parse_action(response_text: str) -> dict:
         pass
 
     # Method 2: JSON inside code block
-    code_block = re.search(r'```(?:json)?\s*(\{[\s\S]*?\})\s*```', text)
+    code_block = re.search(r"```(?:json)?\s*(\{[\s\S]*?\})\s*```", text)
     if code_block:
         try:
             return json.loads(code_block.group(1))
@@ -74,15 +74,15 @@ def parse_action(response_text: str) -> dict:
     depth = 0
     start = -1
     for i, char in enumerate(text):
-        if char == '{':
+        if char == "{":
             if depth == 0:
                 start = i
             depth += 1
-        elif char == '}':
+        elif char == "}":
             depth -= 1
             if depth == 0 and start != -1:
                 try:
-                    return json.loads(text[start:i+1])
+                    return json.loads(text[start : i + 1])
                 except json.JSONDecodeError:
                     start = -1
 
@@ -92,6 +92,7 @@ def parse_action(response_text: str) -> dict:
 @dataclass
 class AgentState:
     """State of the AI agent."""
+
     url: str
     task: str
     steps: int = 0
@@ -233,6 +234,7 @@ class WebAgent:
             elif action_type == "wait":
                 seconds = action.get("seconds", 2)
                 import asyncio
+
                 await asyncio.sleep(seconds)
                 return f"Waited {seconds} seconds"
 
@@ -331,11 +333,13 @@ Step {self.state.steps + 1}/{self.max_steps}"""
                     typer.echo(f"Result: {last_result}")
 
                 # Record history
-                self.state.history.append({
-                    "observation": f"URL: {self.state.url}, Elements: {len(self.state.element_map)}",
-                    "action": action,
-                    "result": last_result,
-                })
+                self.state.history.append(
+                    {
+                        "observation": f"URL: {self.state.url}, Elements: {len(self.state.element_map)}",
+                        "action": action,
+                        "result": last_result,
+                    }
+                )
 
             await browser.close()
 

@@ -1,4 +1,4 @@
-"""Domain manager for robots.txt handling and rate limiting."""
+"""Host manager for robots.txt handling and rate limiting."""
 
 import asyncio
 import time
@@ -9,25 +9,25 @@ import httpx
 from robotexclusionrulesparser import RobotExclusionRulesParser
 
 from .config import settings
-from .domain_state import PersistedDomainState, RuntimeDomainState
+from .host_state import PersistedHostState, RuntimeHostState
 from .tls import build_ssl_context
 
 if TYPE_CHECKING:
-    from .domain_store import DomainStore
+    from .host_store import HostStore
 
 # Default TTL for robots.txt cache (1 hour)
 ROBOTS_CACHE_TTL = 3600.0
 DEFAULT_HOST_BACKOFF_SECONDS = 30.0
 MAX_HOST_BACKOFF_SECONDS = 600.0
 
-DomainState = RuntimeDomainState
+HostState = RuntimeHostState
 
 __all__ = [
     "compute_host_budget",
-    "DomainManager",
-    "DomainState",
-    "RuntimeDomainState",
-    "PersistedDomainState",
+    "HostManager",
+    "HostState",
+    "RuntimeHostState",
+    "PersistedHostState",
     "ROBOTS_CACHE_TTL",
 ]
 
@@ -59,7 +59,7 @@ def compute_host_budget(
     return budget
 
 
-class DomainManager:
+class HostManager:
     """Manages per-host runtime state including robots.txt and rate limiting."""
 
     def __init__(
@@ -69,7 +69,7 @@ class DomainManager:
         respect_robots: bool = True,
         max_retries: int = 3,
         robots_cache_ttl: float | None = None,
-        domain_store: "DomainStore | None" = None,
+        host_store: "HostStore | None" = None,
         host_backoff_seconds: float | None = None,
         max_host_backoff_seconds: float | None = None,
     ):
@@ -77,20 +77,23 @@ class DomainManager:
         self.default_delay = default_delay
         self.respect_robots = respect_robots
         self.max_retries = max_retries
-        self.robots_cache_ttl = settings.robots_cache_ttl if robots_cache_ttl is None else robots_cache_ttl
-        self._domain_store = domain_store
+        self.robots_cache_ttl = (
+            settings.robots_cache_ttl if robots_cache_ttl is None else robots_cache_ttl
+        )
+        self._host_store = host_store
         self._host_backoff_seconds = (
             settings.host_backoff_seconds if host_backoff_seconds is None else host_backoff_seconds
         )
         self._max_host_backoff_seconds = (
             settings.max_host_backoff_seconds
-            if max_host_backoff_seconds is None else max_host_backoff_seconds
+            if max_host_backoff_seconds is None
+            else max_host_backoff_seconds
         )
-        self._runtime_states: dict[str, RuntimeDomainState] = {}
+        self._runtime_states: dict[str, RuntimeHostState] = {}
         self._locks: dict[str, asyncio.Lock] = {}
         self._client: httpx.AsyncClient | None = None
         self._client_lock = asyncio.Lock()
-        self._domains = self._runtime_states
+        self._hosts = self._runtime_states
 
     def _get_host_key(self, url: str) -> str:
         """Extract the host key used for per-host scheduling."""
@@ -114,25 +117,25 @@ class DomainManager:
                     )
         return self._client
 
-    def _is_robots_cache_valid(self, state: RuntimeDomainState) -> bool:
+    def _is_robots_cache_valid(self, state: RuntimeHostState) -> bool:
         """Check if robots.txt cache is still valid."""
         if not state.has_checked_robots:
             return False
         elapsed = time.time() - state.robots_checked_at
         return elapsed < self.robots_cache_ttl
 
-    def _build_runtime_state(self, host_key: str) -> RuntimeDomainState:
+    def _build_runtime_state(self, host_key: str) -> RuntimeHostState:
         """Create a new in-memory runtime state."""
-        return RuntimeDomainState(
+        return RuntimeHostState(
             host_key=host_key,
             crawl_delay_seconds=self.default_delay,
         )
 
     def _apply_persisted_state(
         self,
-        runtime_state: RuntimeDomainState,
-        persisted_state: PersistedDomainState,
-    ) -> RuntimeDomainState:
+        runtime_state: RuntimeHostState,
+        persisted_state: PersistedHostState,
+    ) -> RuntimeHostState:
         """Copy durable scheduling fields into runtime state."""
         runtime_state.crawl_delay_seconds = persisted_state.crawl_delay_seconds
         runtime_state.consecutive_failures = persisted_state.consecutive_failures
@@ -147,25 +150,25 @@ class DomainManager:
         delay = base * (2 ** (consecutive_failures - 1))
         return min(delay, self._max_host_backoff_seconds)
 
-    def attach_store(self, domain_store: "DomainStore | None") -> None:
-        """Attach or replace the durable domain store."""
-        self._domain_store = domain_store
+    def attach_store(self, host_store: "HostStore | None") -> None:
+        """Attach or replace the durable host store."""
+        self._host_store = host_store
 
-    def build_persisted_state(self, host_key: str) -> PersistedDomainState:
+    def build_persisted_state(self, host_key: str) -> PersistedHostState:
         """Create the durable state shape that P2 will persist."""
-        return PersistedDomainState(
+        return PersistedHostState(
             host_key=host_key,
             crawl_delay_seconds=self.default_delay,
         )
 
-    async def get_state(self, url: str) -> RuntimeDomainState:
+    async def get_state(self, url: str) -> RuntimeHostState:
         """Get or create runtime state for a host key."""
         host_key = self._get_host_key(url)
 
         if host_key not in self._runtime_states:
             runtime_state = self._build_runtime_state(host_key)
-            if self._domain_store is not None:
-                persisted_state = self._domain_store.get_or_create(host_key)
+            if self._host_store is not None:
+                persisted_state = self._host_store.get_or_create(host_key)
                 runtime_state = self._apply_persisted_state(runtime_state, persisted_state)
             self._runtime_states[host_key] = runtime_state
 
@@ -176,7 +179,7 @@ class DomainManager:
 
         return state
 
-    async def _fetch_robots(self, state: RuntimeDomainState, url: str):
+    async def _fetch_robots(self, state: RuntimeHostState, url: str):
         """Fetch and parse robots.txt for a host key using the shared client."""
         parsed = urlparse(url)
         robots_url = f"{parsed.scheme}://{parsed.netloc}/robots.txt"
@@ -199,8 +202,8 @@ class DomainManager:
         checked_at = time.time()
         state.has_checked_robots = True
         state.robots_checked_at = checked_at
-        if self._domain_store is not None:
-            persisted_state = self._domain_store.update_robots(
+        if self._host_store is not None:
+            persisted_state = self._host_store.update_robots(
                 state.host_key,
                 crawl_delay_seconds=state.crawl_delay_seconds,
                 checked_at=checked_at,
@@ -227,8 +230,8 @@ class DomainManager:
         lock = await self._get_lock(host_key)
 
         async with lock:
-            if self._domain_store is not None:
-                wait_time, persisted_state = self._domain_store.reserve_request_slot(
+            if self._host_store is not None:
+                wait_time, persisted_state = self._host_store.reserve_request_slot(
                     host_key,
                     crawl_delay_seconds=state.crawl_delay_seconds,
                 )
@@ -250,8 +253,8 @@ class DomainManager:
         if host_key in self._runtime_states:
             state = self._runtime_states[host_key]
             state.consecutive_failures += 1
-            if self._domain_store is not None:
-                persisted_state = self._domain_store.record_failure(
+            if self._host_store is not None:
+                persisted_state = self._host_store.record_failure(
                     host_key,
                     backoff_seconds=self._compute_host_backoff(state.consecutive_failures),
                 )
@@ -272,8 +275,8 @@ class DomainManager:
         if host_key in self._runtime_states:
             state = self._runtime_states[host_key]
             state.consecutive_failures = 0
-            if self._domain_store is not None:
-                persisted_state = self._domain_store.record_success(host_key)
+            if self._host_store is not None:
+                persisted_state = self._host_store.record_success(host_key)
                 self._apply_persisted_state(state, persisted_state)
 
     def record_success_runtime(self, url: str) -> None:

@@ -1,4 +1,4 @@
-"""Structured domain state models."""
+"""Structured host state models."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from robotexclusionrulesparser import RobotExclusionRulesParser
 
 
 @dataclass(slots=True)
-class PersistedDomainState:
+class PersistedHostState:
     """Durable scheduling state for a host key."""
 
     host_key: str
@@ -22,7 +22,7 @@ class PersistedDomainState:
 
 
 @dataclass(slots=True)
-class RuntimeDomainState:
+class RuntimeHostState:
     """In-memory crawler state for a host key."""
 
     host_key: str
@@ -36,4 +36,4 @@ class RuntimeDomainState:
     crawl_delay_seconds: float = 1.0
 
 
-DomainState = RuntimeDomainState
+HostState = RuntimeHostState

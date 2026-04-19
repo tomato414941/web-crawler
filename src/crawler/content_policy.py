@@ -88,4 +88,6 @@ def should_extract_links(content_type: str | None, content: bytes) -> bool:
     if normalized:
         return is_html_content_type(normalized)
     snippet = content[:2048].lstrip().lower()
-    return snippet.startswith(b"<!doctype html") or snippet.startswith(b"<html") or b"<a " in snippet
+    return (
+        snippet.startswith(b"<!doctype html") or snippet.startswith(b"<html") or b"<a " in snippet
+    )

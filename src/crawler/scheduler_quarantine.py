@@ -39,23 +39,23 @@ class SchedulerQuarantine:
 
         with self._conn.cursor() as cur:
             cur.execute(
-                f"""SELECT queue.url, queue.domain, queue.priority, queue.next_fetch_at, queue.added_at,
+                f"""SELECT queue.url, queue.host, queue.priority, queue.next_fetch_at, queue.added_at,
                            %s AS physical_queue
                     FROM {self._queue_table_sql(self._queue_frontline)} AS queue
-                    JOIN domain_state ON domain_state.host_key = queue.domain
-                    WHERE domain_state.backoff_until > %s
+                    JOIN host_state ON host_state.host_key = queue.host
+                    WHERE host_state.backoff_until > %s
                     UNION ALL
-                    SELECT queue.url, queue.domain, queue.priority, queue.next_fetch_at, queue.added_at,
+                    SELECT queue.url, queue.host, queue.priority, queue.next_fetch_at, queue.added_at,
                            %s AS physical_queue
                     FROM {self._queue_table_sql(self._queue_deferred)} AS queue
-                    JOIN domain_state ON domain_state.host_key = queue.domain
-                    WHERE domain_state.backoff_until > %s
+                    JOIN host_state ON host_state.host_key = queue.host
+                    WHERE host_state.backoff_until > %s
                     UNION ALL
-                    SELECT queue.url, queue.domain, queue.priority, queue.next_fetch_at, queue.added_at,
+                    SELECT queue.url, queue.host, queue.priority, queue.next_fetch_at, queue.added_at,
                            %s AS physical_queue
                     FROM {self._queue_table_sql(self._queue_refresh)} AS queue
-                    JOIN domain_state ON domain_state.host_key = queue.domain
-                    WHERE domain_state.backoff_until > %s""",
+                    JOIN host_state ON host_state.host_key = queue.host
+                    WHERE host_state.backoff_until > %s""",
                 (
                     self._queue_frontline,
                     now,
@@ -93,11 +93,11 @@ class SchedulerQuarantine:
                 f"""WITH doomed AS (
                         SELECT blocked.url
                         FROM {self._blocked_queue_table} AS blocked
-                        JOIN domain_state ON domain_state.host_key = blocked.domain
-                        WHERE COALESCE(domain_state.consecutive_failures, 0) >= %s
+                        JOIN host_state ON host_state.host_key = blocked.host
+                        WHERE COALESCE(host_state.consecutive_failures, 0) >= %s
                           AND blocked.quarantined_at <= %s
                         ORDER BY
-                            COALESCE(domain_state.consecutive_failures, 0) DESC,
+                            COALESCE(host_state.consecutive_failures, 0) DESC,
                             blocked.quarantined_at ASC,
                             blocked.added_at ASC,
                             blocked.url ASC
@@ -131,11 +131,11 @@ class SchedulerQuarantine:
         self,
         *,
         limit: int,
-        per_domain: int,
+        per_host: int,
         now: float | None = None,
     ) -> int:
         """Return recovered blocked URLs to the deferred runnable surface."""
-        if limit <= 0 or per_domain <= 0:
+        if limit <= 0 or per_host <= 0:
             return 0
 
         now = time.time() if now is None else now
@@ -144,23 +144,23 @@ class SchedulerQuarantine:
                 f"""WITH ranked AS (
                         SELECT
                             blocked.url,
-                            blocked.domain,
+                            blocked.host,
                             blocked.priority,
                             blocked.next_fetch_at,
                             blocked.added_at,
                             %s AS physical_queue,
                             ROW_NUMBER() OVER (
-                                PARTITION BY blocked.domain
+                                PARTITION BY blocked.host
                                 ORDER BY blocked.next_fetch_at ASC, blocked.added_at ASC, blocked.url ASC
-                            ) AS domain_rownum
+                            ) AS host_rownum
                         FROM {self._blocked_queue_table} AS blocked
-                        LEFT JOIN domain_state ON domain_state.host_key = blocked.domain
-                        WHERE COALESCE(domain_state.backoff_until, 0) <= %s
-                          AND COALESCE(domain_state.consecutive_failures, 0) = 0
+                        LEFT JOIN host_state ON host_state.host_key = blocked.host
+                        WHERE COALESCE(host_state.backoff_until, 0) <= %s
+                          AND COALESCE(host_state.consecutive_failures, 0) = 0
                     ), picked AS (
                         SELECT url
                         FROM ranked
-                        WHERE domain_rownum <= %s
+                        WHERE host_rownum <= %s
                         ORDER BY priority DESC, next_fetch_at ASC, added_at ASC, url ASC
                         LIMIT %s
                     )
@@ -169,12 +169,12 @@ class SchedulerQuarantine:
                     WHERE blocked.url = picked.url
                     RETURNING
                         blocked.url,
-                        blocked.domain,
+                        blocked.host,
                         blocked.priority,
                         blocked.next_fetch_at,
                         blocked.added_at,
                         %s AS physical_queue""",
-                (self._queue_deferred, now, per_domain, limit, self._queue_deferred),
+                (self._queue_deferred, now, per_host, limit, self._queue_deferred),
             )
             rows = cur.fetchall()
             if rows:
@@ -186,12 +186,12 @@ class SchedulerQuarantine:
         self,
         limit: int,
         *,
-        per_domain: int = 1,
+        per_host: int = 1,
         max_consecutive_failures: int | None = None,
         now: float | None = None,
     ) -> int:
         """Return a small cooled-down subset from blocked queue back into the deferred runnable surface."""
-        if limit <= 0 or per_domain <= 0:
+        if limit <= 0 or per_host <= 0:
             return 0
 
         now = time.time() if now is None else now
@@ -205,31 +205,31 @@ class SchedulerQuarantine:
                 f"""WITH ranked_candidates AS (
                         SELECT
                             blocked.url,
-                            blocked.domain,
+                            blocked.host,
                             blocked.priority,
                             blocked.next_fetch_at,
                             blocked.added_at,
                             %s AS physical_queue,
-                            COALESCE(domain_state.consecutive_failures, 0) AS failure_count,
+                            COALESCE(host_state.consecutive_failures, 0) AS failure_count,
                             ROW_NUMBER() OVER (
-                                PARTITION BY blocked.domain
+                                PARTITION BY blocked.host
                                 ORDER BY
-                                    COALESCE(domain_state.consecutive_failures, 0) ASC,
+                                    COALESCE(host_state.consecutive_failures, 0) ASC,
                                     blocked.next_fetch_at ASC,
                                     blocked.added_at ASC,
                                     blocked.url ASC
-                            ) AS domain_rownum
+                            ) AS host_rownum
                         FROM {self._blocked_queue_table} AS blocked
-                        LEFT JOIN domain_state ON domain_state.host_key = blocked.domain
-                        WHERE COALESCE(domain_state.backoff_until, 0) <= %s
+                        LEFT JOIN host_state ON host_state.host_key = blocked.host
+                        WHERE COALESCE(host_state.backoff_until, 0) <= %s
                           AND (
                                 %s IS NULL
-                                OR COALESCE(domain_state.consecutive_failures, 0) <= %s
+                                OR COALESCE(host_state.consecutive_failures, 0) <= %s
                           )
                     ), picked AS (
                         SELECT url
                         FROM ranked_candidates
-                        WHERE domain_rownum <= %s
+                        WHERE host_rownum <= %s
                         ORDER BY
                             failure_count ASC,
                             next_fetch_at ASC,
@@ -242,7 +242,7 @@ class SchedulerQuarantine:
                     WHERE blocked.url = picked.url
                     RETURNING
                         blocked.url,
-                        blocked.domain,
+                        blocked.host,
                         blocked.priority,
                         blocked.next_fetch_at,
                         blocked.added_at,
@@ -252,7 +252,7 @@ class SchedulerQuarantine:
                     now,
                     effective_max_failures,
                     effective_max_failures,
-                    per_domain,
+                    per_host,
                     limit,
                     self._queue_deferred,
                 ),

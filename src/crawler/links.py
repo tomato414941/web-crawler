@@ -46,7 +46,7 @@ async def check_page_links(
 ) -> LinkCheckResult:
     """Check all links on a page for broken links."""
     fetcher = HttpFetcher(timeout=settings.timeout)
-    base_domain = urlparse(url).netloc
+    base_host = urlparse(url).netloc
 
     checked_urls: set[str] = set()
     pages_to_check: list[tuple[str, int]] = [(url, 0)]  # (url, depth)
@@ -82,8 +82,8 @@ async def check_page_links(
 
                 filtered_links: list[LinkReference] = []
                 for link in links:
-                    link_domain = urlparse(link.url).netloc
-                    is_external = link_domain != base_domain
+                    link_host = urlparse(link.url).netloc
+                    is_external = link_host != base_host
 
                     if is_external and not check_external:
                         continue
@@ -96,10 +96,8 @@ async def check_page_links(
 
                 batch_size = 10
                 for i in range(0, len(filtered_links), batch_size):
-                    batch = filtered_links[i:i + batch_size]
-                    results = await asyncio.gather(*[
-                        check_url(client, link.url) for link in batch
-                    ])
+                    batch = filtered_links[i : i + batch_size]
+                    results = await asyncio.gather(*[check_url(client, link.url) for link in batch])
 
                     for link, result in zip(batch, results):
                         result.source = link.source
@@ -120,11 +118,13 @@ async def check_page_links(
 
                 if recursive and depth < max_depth:
                     for link in links:
-                        link_domain = urlparse(link.url).netloc
-                        if link_domain == base_domain and link.url not in checked_urls:
+                        link_host = urlparse(link.url).netloc
+                        if link_host == base_host and link.url not in checked_urls:
                             parsed = urlparse(link.url)
                             path = parsed.path.lower()
-                            if not path or path.endswith(('/', '.html', '.htm', '.php', '.asp', '.aspx')):
+                            if not path or path.endswith(
+                                ("/", ".html", ".htm", ".php", ".asp", ".aspx")
+                            ):
                                 pages_to_check.append((link.url, depth + 1))
     finally:
         await fetcher.close()

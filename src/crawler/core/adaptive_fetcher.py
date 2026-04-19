@@ -8,8 +8,8 @@ from .protocols import Response
 
 JS_INDICATORS = [
     re.compile(r"<noscript>", re.IGNORECASE),
-    re.compile(r'data-react|data-vue|data-ng|ng-app', re.IGNORECASE),
-    re.compile(r'__NEXT_DATA__|__NUXT__|window\.__INITIAL_STATE__', re.IGNORECASE),
+    re.compile(r"data-react|data-vue|data-ng|ng-app", re.IGNORECASE),
+    re.compile(r"__NEXT_DATA__|__NUXT__|window\.__INITIAL_STATE__", re.IGNORECASE),
     re.compile(r'<div id="(root|app|__next)">\s*</div>', re.IGNORECASE),
 ]
 
@@ -60,8 +60,10 @@ class AdaptiveFetcher:
 
         # Check for minimal content (might be JS-rendered)
         # Strip scripts and styles first
-        stripped = re.sub(r'<(script|style)[^>]*>.*?</\1>', '', text, flags=re.DOTALL | re.IGNORECASE)
-        stripped = re.sub(r'<[^>]+>', '', stripped)
+        stripped = re.sub(
+            r"<(script|style)[^>]*>.*?</\1>", "", text, flags=re.DOTALL | re.IGNORECASE
+        )
+        stripped = re.sub(r"<[^>]+>", "", stripped)
         stripped = stripped.strip()
 
         if len(stripped) < MINIMAL_CONTENT_THRESHOLD:

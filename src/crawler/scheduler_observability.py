@@ -12,7 +12,7 @@ class SchedulerReadiness:
 
     pending: int
     runnable: int
-    runnable_domains: int
+    runnable_hosts: int
     next_runnable_delay: float | None
     blocked: dict[str, int]
     state_counts: dict[str, int]
@@ -55,13 +55,15 @@ class SchedulerObservability:
     def _pending_queue_union_sql(self, runnable_surface: str | None = None) -> str:
         normalized_physical_queues = self._normalized_physical_queues(runnable_surface)
         selects = [
-            f"SELECT url, domain, branch_key, next_fetch_at FROM {self._physical_queue_tables[physical_queue]}"
+            f"SELECT url, host, branch_key, next_fetch_at FROM {self._physical_queue_tables[physical_queue]}"
             for physical_queue in normalized_physical_queues
         ]
         return "\nUNION ALL\n".join(selects)
 
-    def _blocked_queue_sql(self, runnable_surface: str | None = None) -> tuple[str, tuple[object, ...]]:
-        sql = f"SELECT url, domain, branch_key, next_fetch_at FROM {self._blocked_queue_table}"
+    def _blocked_queue_sql(
+        self, runnable_surface: str | None = None
+    ) -> tuple[str, tuple[object, ...]]:
+        sql = f"SELECT url, host, branch_key, next_fetch_at FROM {self._blocked_queue_table}"
         physical_queues = self._normalized_physical_queues(runnable_surface)
         if runnable_surface is not None:
             sql += " WHERE physical_queue = ANY(%s)"
@@ -173,7 +175,7 @@ class SchedulerObservability:
             "discovered": int(durable_state_counts.get("discovered", 0) or 0),
             "scheduled": int(state_counts.get("scheduled", 0) or 0),
             "runnable": int(state_counts.get("runnable", 0) or 0),
-            "blocked": int(state_counts.get("blocked_domain_next_request", 0) or 0)
+            "blocked": int(state_counts.get("blocked_host_next_request", 0) or 0)
             + int(state_counts.get("blocked_host_backoff", 0) or 0)
             + int(state_counts.get("retry_quarantine", 0) or 0),
             "leased": int(durable_state_counts.get("leased", 0) or 0),
@@ -299,11 +301,11 @@ class SchedulerObservability:
                 total += cur.fetchone()[0]
         return total
 
-    def pending_domain_count(self, *, runnable_surface: str | None = None) -> int:
+    def pending_host_count(self, *, runnable_surface: str | None = None) -> int:
         pending_queue_sql = self._pending_queue_union_sql(runnable_surface)
         with self._conn.cursor() as cur:
             cur.execute(
-                f"SELECT COUNT(DISTINCT domain) FROM ({pending_queue_sql}) AS pending_entries"
+                f"SELECT COUNT(DISTINCT host) FROM ({pending_queue_sql}) AS pending_entries"
             )
             value = cur.fetchone()[0]
         return int(value or 0)
@@ -324,13 +326,13 @@ class SchedulerObservability:
     ) -> int:
         return self.readiness(now=now, runnable_surface=runnable_surface).scheduled
 
-    def runnable_domain_count(
+    def runnable_host_count(
         self,
         *,
         now: float | None = None,
         runnable_surface: str | None = None,
     ) -> int:
-        return self.readiness(now=now, runnable_surface=runnable_surface).runnable_domains
+        return self.readiness(now=now, runnable_surface=runnable_surface).runnable_hosts
 
     def blocked_count(self) -> int:
         with self._conn.cursor() as cur:
@@ -355,28 +357,28 @@ class SchedulerObservability:
                     ), readiness_entries AS (
                         SELECT
                             queue_entry.url,
-                            queue_entry.domain,
+                            queue_entry.host,
                             queue_entry.branch_key,
                             queue_entry.next_fetch_at,
                             queue_entry.next_fetch_at > %s AS blocked_next_fetch,
-                            COALESCE(domain_state.next_request_at, 0) > %s AS blocked_domain_next_request,
-                            COALESCE(domain_state.backoff_until, 0) > %s AS blocked_host_backoff,
+                            COALESCE(host_state.next_request_at, 0) > %s AS blocked_host_next_request,
+                            COALESCE(host_state.backoff_until, 0) > %s AS blocked_host_backoff,
                             FALSE AS retry_quarantine,
                             GREATEST(
                                 queue_entry.next_fetch_at,
-                                COALESCE(domain_state.next_request_at, 0),
-                                COALESCE(domain_state.backoff_until, 0)
+                                COALESCE(host_state.next_request_at, 0),
+                                COALESCE(host_state.backoff_until, 0)
                             ) AS ready_at
                         FROM pending_entries AS queue_entry
-                        LEFT JOIN domain_state ON domain_state.host_key = queue_entry.domain
+                        LEFT JOIN host_state ON host_state.host_key = queue_entry.host
                         UNION ALL
                         SELECT
                             blocked_entry.url,
-                            blocked_entry.domain,
+                            blocked_entry.host,
                             blocked_entry.branch_key,
                             blocked_entry.next_fetch_at,
                             FALSE AS blocked_next_fetch,
-                            FALSE AS blocked_domain_next_request,
+                            FALSE AS blocked_host_next_request,
                             FALSE AS blocked_host_backoff,
                             TRUE AS retry_quarantine,
                             NULL::DOUBLE PRECISION AS ready_at
@@ -386,36 +388,36 @@ class SchedulerObservability:
                         COUNT(*) AS pending,
                         COUNT(*) FILTER (
                             WHERE NOT blocked_next_fetch
-                              AND NOT blocked_domain_next_request
+                              AND NOT blocked_host_next_request
                               AND NOT blocked_host_backoff
                               AND NOT retry_quarantine
                         ) AS runnable,
-                        COUNT(DISTINCT domain) FILTER (
+                        COUNT(DISTINCT host) FILTER (
                             WHERE NOT blocked_next_fetch
-                              AND NOT blocked_domain_next_request
+                              AND NOT blocked_host_next_request
                               AND NOT blocked_host_backoff
                               AND NOT retry_quarantine
-                        ) AS runnable_domains,
+                        ) AS runnable_hosts,
                         MIN(ready_at) AS next_ready_at,
                         COUNT(*) FILTER (WHERE blocked_next_fetch) AS blocked_next_fetch,
-                        COUNT(*) FILTER (WHERE blocked_domain_next_request) AS blocked_domain_next_request,
+                        COUNT(*) FILTER (WHERE blocked_host_next_request) AS blocked_host_next_request,
                         COUNT(*) FILTER (WHERE blocked_host_backoff) AS blocked_host_backoff,
                         COUNT(*) FILTER (WHERE retry_quarantine) AS retry_quarantine,
                         COUNT(*) FILTER (
                             WHERE NOT blocked_host_backoff
                               AND NOT retry_quarantine
-                              AND blocked_domain_next_request
-                        ) AS state_blocked_domain_next_request,
+                              AND blocked_host_next_request
+                        ) AS state_blocked_host_next_request,
                         COUNT(*) FILTER (
                             WHERE NOT blocked_host_backoff
                               AND NOT retry_quarantine
-                              AND NOT blocked_domain_next_request
+                              AND NOT blocked_host_next_request
                               AND blocked_next_fetch
                         ) AS state_scheduled,
                         COUNT(*) FILTER (
                             WHERE NOT blocked_host_backoff
                               AND NOT retry_quarantine
-                              AND NOT blocked_domain_next_request
+                              AND NOT blocked_host_next_request
                               AND NOT blocked_next_fetch
                         ) AS state_runnable
                     FROM readiness_entries""",
@@ -424,31 +426,31 @@ class SchedulerObservability:
             (
                 pending,
                 runnable,
-                runnable_domains,
+                runnable_hosts,
                 next_ready_at,
                 blocked_next_fetch,
-                blocked_domain_next_request,
+                blocked_host_next_request,
                 blocked_host_backoff,
                 retry_quarantine,
-                state_blocked_domain_next_request,
+                state_blocked_host_next_request,
                 state_scheduled,
                 state_runnable,
             ) = cur.fetchone()
         return SchedulerReadiness(
             pending=pending or 0,
             runnable=runnable or 0,
-            runnable_domains=runnable_domains or 0,
+            runnable_hosts=runnable_hosts or 0,
             next_runnable_delay=None if next_ready_at is None else max(0.0, next_ready_at - now),
             blocked={
                 "next_fetch_at": blocked_next_fetch or 0,
-                "domain_next_request": blocked_domain_next_request or 0,
+                "host_next_request": blocked_host_next_request or 0,
                 "host_backoff": blocked_host_backoff or 0,
                 "retry_quarantine": retry_quarantine or 0,
             },
             state_counts={
                 "runnable": state_runnable or 0,
                 "scheduled": state_scheduled or 0,
-                "blocked_domain_next_request": state_blocked_domain_next_request or 0,
+                "blocked_host_next_request": state_blocked_host_next_request or 0,
                 "blocked_host_backoff": blocked_host_backoff or 0,
                 "retry_quarantine": retry_quarantine or 0,
             },
