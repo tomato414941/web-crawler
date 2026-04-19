@@ -1115,6 +1115,25 @@ class CrawlerEngine:
                 self._active_host_counts[host_key] += 1
             return task
 
+    def _refresh_host_runnable_heads_read_model(self) -> None:
+        """Refresh the loose host-first read model once before workers start."""
+        rebuild = getattr(self.scheduler, "rebuild_host_runnable_heads", None)
+        if rebuild is None:
+            return
+        started_at = time.perf_counter()
+        try:
+            rebuilt = rebuild(runnable_surface=RUNNABLE_SURFACE_NORMAL)
+        except Exception:
+            logger.exception(
+                "Failed to refresh host runnable-head read model; using derived host-first fallback"
+            )
+            return
+        logger.info(
+            "Refreshed host runnable-head read model rows=%d elapsed=%0.1fms",
+            rebuilt,
+            _elapsed_ms(started_at),
+        )
+
     async def crawl(self) -> list[dict]:
         """Run the crawler and return results."""
         self._running = True
@@ -1134,6 +1153,8 @@ class CrawlerEngine:
 
         if self.start_url and self.scheduler.pending_count() == 0:
             self.scheduler.place(self._build_seed_task(self.start_url))
+
+        self._refresh_host_runnable_heads_read_model()
 
         self._parse_queue = asyncio.Queue()
         self._finalize_queue = asyncio.Queue()

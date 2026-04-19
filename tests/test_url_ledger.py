@@ -770,6 +770,76 @@ class TestUrlLedger:
 
         assert [(head.host_key, head.url) for head in heads] == [("a.com", "http://a.com/1")]
 
+    def test_lease_next_host_first_uses_read_model_before_derived_query(
+        self, ledger, monkeypatch
+    ):
+        now = 1000.0
+        ledger.place(CrawlTask(url="http://a.com/1", added_at=1000, next_fetch_at=now - 1))
+        ledger.place(CrawlTask(url="http://a.com/2", added_at=1001, next_fetch_at=now - 1))
+        ledger.place(CrawlTask(url="http://b.com/1", added_at=900, next_fetch_at=now - 1))
+        ledger.rebuild_host_runnable_heads(
+            runnable_surface=RUNNABLE_SURFACE_FRONTLINE,
+            now=now,
+        )
+
+        def fail_derived_query(**_kwargs):
+            raise AssertionError("derived host-first query should not run")
+
+        monkeypatch.setattr(ledger, "runnable_host_heads", fail_derived_query)
+
+        result = ledger.lease_next(
+            lease_strategy=LEASE_STRATEGY_HOST_FIRST,
+            runnable_surface=RUNNABLE_SURFACE_FRONTLINE,
+        )
+
+        assert result is not None
+        assert result.url == "http://b.com/1"
+
+    def test_lease_next_host_first_falls_back_when_read_model_is_empty(
+        self, ledger, monkeypatch
+    ):
+        ledger.place(CrawlTask(url="http://a.com/1", added_at=1000))
+
+        monkeypatch.setattr(ledger, "host_runnable_heads_from_read_model", lambda **_kwargs: [])
+
+        result = ledger.lease_next(
+            lease_strategy=LEASE_STRATEGY_HOST_FIRST,
+            runnable_surface=RUNNABLE_SURFACE_FRONTLINE,
+        )
+
+        assert result is not None
+        assert result.url == "http://a.com/1"
+
+    def test_lease_next_host_first_deletes_stale_read_model_candidate(self, ledger):
+        now = 1000.0
+        ledger.place(CrawlTask(url="http://a.com/1", added_at=900, next_fetch_at=now - 1))
+        ledger.place(CrawlTask(url="http://b.com/1", added_at=1000, next_fetch_at=now - 1))
+        ledger.rebuild_host_runnable_heads(
+            runnable_surface=RUNNABLE_SURFACE_FRONTLINE,
+            now=now,
+        )
+        with ledger._conn.cursor() as cur:
+            cur.execute(
+                f"DELETE FROM {PHYSICAL_QUEUE_TABLES[QUEUE_EXPLORATION]} WHERE url = %s",
+                ("http://a.com/1",),
+            )
+        ledger._conn.commit()
+
+        result = ledger.lease_next(
+            lease_strategy=LEASE_STRATEGY_HOST_FIRST,
+            runnable_surface=RUNNABLE_SURFACE_FRONTLINE,
+        )
+
+        assert result is not None
+        assert result.url == "http://b.com/1"
+        with ledger._conn.cursor() as cur:
+            cur.execute(
+                f"SELECT COUNT(*) FROM {HOST_RUNNABLE_HEADS_TABLE} WHERE head_url = %s",
+                ("http://a.com/1",),
+            )
+            (stale_count,) = cur.fetchone()
+        assert stale_count == 0
+
     def test_select_runnable_host_head_uses_same_host_first_order(self, ledger):
         ledger.place(
             CrawlTask(
