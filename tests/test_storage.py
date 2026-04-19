@@ -13,8 +13,8 @@ from crawler.url_ledger import (
     BLOCKED_HOST_BACKOFF_TABLE,
     LEASE_TABLE,
     PHYSICAL_QUEUE_TABLES,
-    QUEUE_BACKLOG,
-    QUEUE_EXPLORATION,
+    QUEUE_SCHEDULED,
+    QUEUE_RUNNABLE,
     QUEUE_RECRAWL,
     URL_LEDGER_TABLE,
 )
@@ -27,8 +27,8 @@ pytestmark = pytest.mark.skipif(
 
 
 def _reset_schema(dsn: str) -> None:
-    frontline_table = PHYSICAL_QUEUE_TABLES[QUEUE_EXPLORATION]
-    deferred_table = PHYSICAL_QUEUE_TABLES[QUEUE_BACKLOG]
+    runnable_table = PHYSICAL_QUEUE_TABLES[QUEUE_RUNNABLE]
+    scheduled_table = PHYSICAL_QUEUE_TABLES[QUEUE_SCHEDULED]
     refresh_table = PHYSICAL_QUEUE_TABLES[QUEUE_RECRAWL]
     conn = psycopg2.connect(dsn)
     conn.autocommit = False
@@ -37,8 +37,8 @@ def _reset_schema(dsn: str) -> None:
             cur.execute("DROP TABLE IF EXISTS public.schema_migrations")
             cur.execute(f"DROP TABLE IF EXISTS public.{HOST_LEDGER_TABLE}")
             cur.execute("DROP TABLE IF EXISTS public.host_state")
-            cur.execute(f"DROP TABLE IF EXISTS public.{frontline_table}")
-            cur.execute(f"DROP TABLE IF EXISTS public.{deferred_table}")
+            cur.execute(f"DROP TABLE IF EXISTS public.{runnable_table}")
+            cur.execute(f"DROP TABLE IF EXISTS public.{scheduled_table}")
             cur.execute(f"DROP TABLE IF EXISTS public.{refresh_table}")
             cur.execute(f"DROP TABLE IF EXISTS public.{BLOCKED_HOST_BACKOFF_TABLE}")
             cur.execute("DROP TABLE IF EXISTS public.frontier_queue_exploration")
@@ -168,7 +168,7 @@ def test_get_stats_includes_scheduler_breakdown(pg_storage):
         )
         cur.execute(
             f"""
-            INSERT INTO {PHYSICAL_QUEUE_TABLES[QUEUE_EXPLORATION]} (url, host, priority, next_fetch_at, added_at, branch_key)
+            INSERT INTO {PHYSICAL_QUEUE_TABLES[QUEUE_RUNNABLE]} (url, host, priority, next_fetch_at, added_at, branch_key)
             VALUES
                 ('https://example.com/page2', 'example.com', 1.25, 1710000002.0, 1710000002.0, '/page2'),
                 ('https://other.com/page1', 'other.com', 0.8, 1710000003.0, 1710000003.0, '/page1')
@@ -243,7 +243,7 @@ def test_get_stats_includes_scheduler_breakdown(pg_storage):
                 "retry_quarantine": 0,
             },
         },
-        "pending_surfaces": {"frontline": 2},
+        "pending_surfaces": {"runnable": 2},
         "blocked_surfaces": {},
         "pending": 2,
         "total": 2,
@@ -307,7 +307,7 @@ def test_get_stats_includes_scheduler_breakdown(pg_storage):
             "retry_quarantine": 0,
         },
     }
-    assert stats["pending_surfaces"] == {"frontline": 2}
+    assert stats["pending_surfaces"] == {"runnable": 2}
     assert stats["blocked_surfaces"] == {}
     assert stats["readiness"] == {
         "pending": 2,
@@ -588,7 +588,7 @@ def test_get_stats_includes_readiness_breakdown(pg_storage):
         )
         cur.execute(
             f"""
-            INSERT INTO {PHYSICAL_QUEUE_TABLES[QUEUE_EXPLORATION]} (url, host, priority, next_fetch_at, added_at, branch_key)
+            INSERT INTO {PHYSICAL_QUEUE_TABLES[QUEUE_RUNNABLE]} (url, host, priority, next_fetch_at, added_at, branch_key)
             VALUES
                 ('https://ready.example/', 'ready.example', 1.0, %s, %s, '/'),
                 ('https://future.example/', 'future.example', 1.0, %s, %s, '/'),
@@ -699,7 +699,7 @@ def test_get_stats_prioritizes_hosts_blocked_by_backoff(pg_storage):
         )
         cur.execute(
             f"""
-            INSERT INTO {PHYSICAL_QUEUE_TABLES[QUEUE_EXPLORATION]} (url, host, priority, next_fetch_at, added_at, branch_key)
+            INSERT INTO {PHYSICAL_QUEUE_TABLES[QUEUE_RUNNABLE]} (url, host, priority, next_fetch_at, added_at, branch_key)
             VALUES
                 ('https://backoff.example/a', 'backoff.example', 1.0, %s, %s, '/a'),
                 ('https://backoff.example/b', 'backoff.example', 1.0, %s, %s, '/b'),
@@ -757,7 +757,7 @@ def test_get_stats_counts_blocked_surfaces(pg_storage):
             )
             VALUES
                 ('https://blocked.example/explore', 'blocked.example', 1.0, NULL, %s, %s, 'retry'),
-                ('https://blocked.example/backlog', 'blocked.example', 1.0, NULL, %s, %s, 'retry')
+                ('https://blocked.example/scheduled', 'blocked.example', 1.0, NULL, %s, %s, 'retry')
             """,
             (now, now, now, now),
         )
@@ -767,8 +767,8 @@ def test_get_stats_counts_blocked_surfaces(pg_storage):
                 url, host, physical_queue, priority, next_fetch_at, added_at, branch_key
             )
             VALUES
-                ('https://blocked.example/explore', 'blocked.example', 'exploration', 1.0, %s, %s, '/explore'),
-                ('https://blocked.example/backlog', 'blocked.example', 'backlog', 1.0, %s, %s, '/backlog')
+                ('https://blocked.example/explore', 'blocked.example', 'runnable', 1.0, %s, %s, '/explore'),
+                ('https://blocked.example/scheduled', 'blocked.example', 'scheduled', 1.0, %s, %s, '/scheduled')
             """,
             (now, now, now, now),
         )
@@ -797,7 +797,7 @@ def test_get_stats_counts_blocked_surfaces(pg_storage):
     stats = pg_storage.get_stats()
 
     assert stats["pending_surfaces"] == {}
-    assert stats["blocked_surfaces"] == {"deferred": 1, "frontline": 1}
+    assert stats["blocked_surfaces"] == {"scheduled": 1, "runnable": 1}
     assert stats["intent_counts"] == {"explore": 0, "refresh": 0, "retry": 2}
     assert stats["durable_state_counts"] == {
         "discovered": 0,
@@ -860,7 +860,7 @@ def test_get_stats_includes_top_slow_hosts(pg_storage):
         )
         cur.execute(
             f"""
-            INSERT INTO {PHYSICAL_QUEUE_TABLES[QUEUE_EXPLORATION]} (url, host, priority, next_fetch_at, added_at, branch_key)
+            INSERT INTO {PHYSICAL_QUEUE_TABLES[QUEUE_RUNNABLE]} (url, host, priority, next_fetch_at, added_at, branch_key)
             VALUES
                 ('https://slow.example/a', 'slow.example', 1.0, %s, %s, '/a'),
                 ('https://fast.example/', 'fast.example', 1.0, %s, %s, '/')
@@ -872,7 +872,7 @@ def test_get_stats_includes_top_slow_hosts(pg_storage):
             INSERT INTO {BLOCKED_HOST_BACKOFF_TABLE} (
                 url, host, physical_queue, priority, next_fetch_at, added_at, branch_key
             )
-            VALUES ('https://slow.example/b', 'slow.example', 'backlog', 1.0, %s, %s, '/b')
+            VALUES ('https://slow.example/b', 'slow.example', 'scheduled', 1.0, %s, %s, '/b')
             """,
             (now, now),
         )
@@ -913,8 +913,8 @@ def test_get_stats_includes_top_slow_hosts(pg_storage):
             "latency_ewma_ms": 900.0,
             "consecutive_failures": 4,
             "surface_counts": {
-                "frontline": 1,
-                "deferred": 1,
+                "runnable": 1,
+                "scheduled": 1,
                 "refresh": 0,
             },
         },
@@ -924,8 +924,8 @@ def test_get_stats_includes_top_slow_hosts(pg_storage):
             "latency_ewma_ms": 80.0,
             "consecutive_failures": 0,
             "surface_counts": {
-                "frontline": 1,
-                "deferred": 0,
+                "runnable": 1,
+                "scheduled": 0,
                 "refresh": 0,
             },
         },
@@ -937,8 +937,8 @@ def test_get_stats_includes_top_slow_hosts(pg_storage):
             "latency_ewma_ms": 80.0,
             "consecutive_failures": 0,
             "surface_counts": {
-                "frontline": 1,
-                "deferred": 0,
+                "runnable": 1,
+                "scheduled": 0,
                 "refresh": 0,
             },
             "host_budget": 2,

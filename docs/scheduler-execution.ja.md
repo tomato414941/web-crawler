@@ -38,14 +38,14 @@ execution は、次の 4 つの layer として分けて考える。
 
 現在の解釈:
 
-- `frontline` と `deferred` は内部 scheduler membership projection
+- `runnable` と `scheduled` は内部 scheduler membership projection
 - `normal` は、それらをまたいだ通常クロール用の runtime-facing runnable view
 - `refresh` は recrawl work であり、通常クロールとは分ける
 - URL が選ばれた後の実行所有権は active lease が持つ
 - host に触れてよいか、どの程度触れてよいかは host state が決める
 
 通常 crawler worker は、combined `normal` view から host-first に lease するべきである。
-`deferred` work を `frontline` に promotion しないと通常実行できない、という形にはしない。
+`scheduled` work を `runnable` に promotion しないと通常実行できない、という形にはしない。
 
 ## Hot Path Rule
 
@@ -75,7 +75,7 @@ read model が派生値であること自体は問題ない。ただし、高並
 - PostgreSQL JIT を無効化すると、ある測定では query が約 1035 ms から約 662 ms になった
 - 繰り返しの correlated `host_state` lookup を single join にすると、ある測定形では約 309 ms、
   `work_mem` を大きくすると約 266 ms になった
-- crawler 1 worker では publish/finalize backlog は消えたが、lease selection はなお数百 ms になることがあった
+- crawler 1 worker では publish/finalize scheduled は消えたが、lease selection はなお数百 ms になることがあった
 
 これらの数値は恒久的な SLO ではない。次に見るべき実装箇所を示す観測値である。
 

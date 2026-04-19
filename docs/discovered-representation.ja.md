@@ -65,13 +65,13 @@ scheduler membership は durable URL identity とは別責務である。
 - `leased` は execution ownership があること
 - `quarantined` は通常の leasing から意図的に外されていること
 
-つまり `discovered` は `runnable` の前段であり、deferred queue の別名ではない。
+つまり `discovered` は `runnable` の前段であり、scheduled queue の別名ではない。
 
 ## Why Backlog Is Not `discovered`
 
-`backlog` は deferred work ではあっても scheduler work である。
+`scheduled` は scheduled work ではあっても scheduler work である。
 
-URL が `backlog` にいるなら、scheduler はすでに:
+URL が `scheduled` にいるなら、scheduler はすでに:
 
 - この URL は live scheduler surface に属する
 - 現在の scheduling policy に参加する
@@ -85,8 +85,8 @@ URL が `backlog` にいるなら、scheduler はすでに:
 
 という意味である。
 
-したがって、`backlog` は discovered-but-unscheduled ではなく
-scheduled-but-deferred と読むべきである。
+したがって、`scheduled` は discovered-but-unscheduled ではなく
+scheduled-but-scheduled と読むべきである。
 
 ## Operational Surface
 
@@ -138,6 +138,6 @@ current scheduler membership をまだ持っていないことで定義される
 
 1. ledger insertion と scheduler admission は分離可能であるべき
 2. live scheduler state の正本は queue membership のままであるべき
-3. `backlog` に `discovered` の意味を背負わせるべきではない
+3. `scheduled` に `discovered` の意味を背負わせるべきではない
 4. runtime が discovered-processing surface を必要とするなら、それは概念定義ではなく
    operational mechanism として導入するべき

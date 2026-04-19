@@ -64,13 +64,13 @@ By contrast:
 - `leased` means execution ownership exists
 - `quarantined` means it is intentionally excluded from normal leasing
 
-This means `discovered` is logically before `runnable`, not a synonym for a deferred queue.
+This means `discovered` is logically before `runnable`, not a synonym for a scheduled queue.
 
 ## Why Backlog Is Not `discovered`
 
-`backlog` may be deferred work, but it is still scheduler work.
+`scheduled` may be scheduled work, but it is still scheduler work.
 
-If a URL is in `backlog`, the scheduler has already decided:
+If a URL is in `scheduled`, the scheduler has already decided:
 
 - this URL belongs to a live scheduler surface
 - it participates in current scheduling policy
@@ -80,7 +80,7 @@ That is different from `discovered`, which means:
 - the URL is known
 - but normal scheduler membership has not yet been assigned
 
-So `backlog` should be read as scheduled-but-deferred, not discovered-but-unscheduled.
+So `scheduled` should be read as scheduled-but-scheduled, not discovered-but-unscheduled.
 
 ## Operational Surface
 
@@ -130,6 +130,6 @@ of current scheduler membership.
 
 1. Ledger insertion and scheduler admission should be separable operations.
 2. Queue membership should remain the truth for live scheduler state.
-3. `backlog` should not be overloaded to mean `discovered`.
+3. `scheduled` should not be overloaded to mean `discovered`.
 4. If the runtime needs a discovered-processing surface, it should be introduced as an operational
    mechanism, not as the conceptual definition of `discovered`.

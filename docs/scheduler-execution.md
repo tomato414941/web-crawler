@@ -38,14 +38,14 @@ not the primary runtime subject for normal crawling.
 
 Current interpretation:
 
-- `frontline` and `deferred` are internal scheduler membership projections.
+- `runnable` and `scheduled` are internal scheduler membership projections.
 - `normal` is the runtime-facing runnable view for regular crawling across those projections.
 - `refresh` is recrawl work and remains separate from regular crawling.
 - active leases own execution after a URL is selected.
 - host state decides whether a host may be touched and how much capacity it has.
 
 Normal crawler workers should lease from the combined `normal` view with host-first selection.
-They should not need to promote deferred work to frontline before it can run.
+They should not need to copy scheduled work into a separate runtime-only queue before it can run.
 
 ## Hot Path Rule
 
@@ -75,7 +75,7 @@ Observed during the April 2026 production investigation:
 - The current host-first candidate query took roughly hundreds of milliseconds to about one second.
 - Disabling PostgreSQL JIT reduced one measured query from about 1035 ms to about 662 ms.
 - Replacing repeated correlated `host_state` lookups with a single join reduced one measured shape to about 309 ms, and about 266 ms with larger `work_mem`.
-- With one crawler worker, publish/finalize backlog disappeared, but lease selection still often took hundreds of milliseconds.
+- With one crawler worker, publish/finalize pressure disappeared, but lease selection still often took hundreds of milliseconds.
 
 These numbers are observations, not permanent SLOs. They identify the next likely implementation
 area.
