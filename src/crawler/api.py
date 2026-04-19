@@ -57,6 +57,13 @@ def get_page(url_hash: str):
 
 @app.get("/stats")
 def stats():
-    """Crawl statistics."""
+    """Fast runtime crawl statistics."""
+    storage = get_storage()
+    return storage.get_runtime_stats_summary()
+
+
+@app.get("/stats/diagnostics")
+def diagnostic_stats():
+    """Full live crawl diagnostics."""
     storage = get_storage()
     return storage.get_stats()
