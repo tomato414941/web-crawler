@@ -24,13 +24,14 @@ crawler model が理想形だとすると、`web-crawler` 全体は最終的に�
 project 全体としては、crawler は次の layer へ収束していくべきである。
 
 1. URL ledger
-2. Discovery and admission
-3. Scheduler membership
-4. Execution and lease ownership
-5. Host state
-6. Fetch / parse / finalize / persist pipeline
-7. Read models and operator surfaces
-8. Bootstrap and seed management
+2. Host ledger
+3. Discovery and admission
+4. Scheduler membership
+5. Execution and lease ownership
+6. Host state
+7. Fetch / parse / finalize / persist pipeline
+8. Read models and operator surfaces
+9. Bootstrap and seed management
 
 runtime 上で table や code path をまだ共有していても、概念上はこれらを分離できるべきである。
 
@@ -54,7 +55,30 @@ URL ledger は durable な URL identity と durable な URL history を持つ。
 
 ledger は durable fact であり、live scheduling truth ではない。
 
-## 2. Discovery And Admission
+## 2. Host Ledger
+
+Host ledger は durable な host identity と durable な host history を持つ。
+
+答えるべき問い:
+
+- この host を知っているか
+- この host はどの registrable domain に属するか
+- 最初と最後に見たのはいつか
+- 最後に成功または失敗したのはいつか
+- 既知 URL や crawl outcome がどれくらい紐づいているか
+- 最後の robots check summary は何か
+
+持つべきでないもの:
+
+- host pacing
+- backoff
+- active in-flight budget
+- runnable host eligibility
+
+host ledger は durable fact である。runtime host scheduler でも worker-facing な host-ready
+index でもない。
+
+## 3. Discovery And Admission
 
 Discovery and admission は、「URL を見つけた」から「scheduler が考慮してよい」へ進める責務を持つ。
 
@@ -74,7 +98,7 @@ Discovery and admission は、「URL を見つけた」から「scheduler が考
 
 であり、自動的に `backlog` と同一視するべきではない。
 
-## 3. Scheduler Membership
+## 4. Scheduler Membership
 
 Scheduler membership は、URL を今 live にどう扱うかを持つ。
 
@@ -96,7 +120,7 @@ operational lane は、必要なら持ってよい実装面であって、第一
 runtime が複数の worker lane を持つとしても、それは scheduler membership の上に載る一時的 /
 operational な grouping と読むべきであり、URL state そのものの定義にしてはいけない。
 
-## 4. Execution And Lease Ownership
+## 5. Execution And Lease Ownership
 
 Execution は active work ownership を持つ。
 
@@ -113,7 +137,7 @@ execution state は小さく明示的であるべきである。
 host-first lease query、runtime-facing runnable view、worker lane 数のような詳細は
 scheduler execution layer に属する。
 
-## 5. Host State
+## 6. Host State
 
 Host state は host/site 単位の politeness, backoff, capacity を持つ。
 
@@ -126,7 +150,7 @@ Host state は host/site 単位の politeness, backoff, capacity を持つ。
 
 host state は URL state ではない。scheduler への入力である。
 
-## 6. Crawl Pipeline
+## 7. Crawl Pipeline
 
 Crawl pipeline は execution 中の work の流れを持つ。
 
@@ -141,7 +165,7 @@ project はすでに次の段へ収束しつつある。
 
 pipeline stage は operational boundary であり、durable URL identity boundary ではない。
 
-## 7. Read Models And Operator Surfaces
+## 8. Read Models And Operator Surfaces
 
 operator view は primary state から導出されるべきであり、scheduler truth として扱うべきではない。
 
@@ -158,7 +182,7 @@ operator view は primary state から導出されるべきであり、scheduler
 worker-facing な runtime view も derived read model として置ける。性能のために存在してよいが、
 scheduler membership を再定義してはいけない。
 
-## 8. Bootstrap And Seed Management
+## 9. Bootstrap And Seed Management
 
 seed は bootstrap input であり、恒久的な scheduler category ではない。
 
@@ -175,6 +199,7 @@ URL が crawler の内部に入った後まで、通常の scheduler treatment �
 現在の実装概念は次の意味へ収束していくべきである。
 
 - `url_ledger` => URL ledger
+- `host_ledger` => host ledger
 - `discover` / admission logic => discovery and admission
 - `scheduler_queue_*` => scheduler membership surfaces
 - worker lane / queue ごとの worker pool => model truth ではなく operational execution surface

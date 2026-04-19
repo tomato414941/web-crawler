@@ -1,10 +1,10 @@
 # web-crawler plan
 
-## Current milestone: scheduler execution design
+## Current milestone: host ledger foundation
 
-The current priority is to make the scheduler execution layer explicit before the next
-performance change. The crawler now has host-first normal execution, but the lease hot path is too
-expensive at production concurrency.
+The current priority is to add the durable host identity/history layer that would have existed in a
+greenfield host-first crawler. This does not replace the lease hot-path work, but it clarifies host
+responsibilities before adding more scheduler read models.
 
 The documentation split is:
 
@@ -15,23 +15,23 @@ The documentation split is:
 
 ## Active work
 
-- Add `docs/scheduler-execution.md` and `docs/scheduler-execution.ja.md`.
-- Keep `crawler-concepts` abstract by moving runtime execution details out of it.
-- Cross-link `scheduler-state-model` and `system-architecture` to the new execution document.
-- Record the current production bottleneck: host-first lease selection is the main hot path.
-- Keep the next implementation candidate narrow: optimize the host-first lease query before adding
-  a new durable projection.
+- Add a new `host_ledger` table for durable host identity/history.
+- Keep `host_state` as runtime scheduling state, not host identity.
+- Record host discovery from URL ledger insertion.
+- Record host success/failure history from crawl completion.
+- Record robots check summary without putting robots parser details into the ledger.
 
 ## Not in this slice
 
-- No code change.
-- No database schema migration.
+- No `host_state` rename.
 - No production configuration change.
-- No new durable scheduler projection.
+- No `host_ready` execution read model.
+- No lease hot-path query rewrite.
 
 ## Acceptance
 
-- Scheduler execution has a dedicated document in English and Japanese.
-- Existing docs clearly point to the right layer instead of repeating execution details.
-- `crawler-concepts` stays abstract and does not carry SQL or worker-lane details.
-- The next code task is clear: optimize host-first lease candidate selection.
+- `host_ledger` exists on new and migrated databases.
+- URL discovery updates host first/last seen and known URL counts.
+- crawl success/failure updates host history counters.
+- robots checks update a compact host-level robots summary.
+- normal lease execution does not depend on `host_ledger`.

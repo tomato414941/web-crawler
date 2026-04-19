@@ -7,6 +7,7 @@ import psycopg2
 import pytest
 
 from crawler.host_store import HostStore
+from crawler.host_ledger import HOST_LEDGER_TABLE
 from crawler.url_ledger import (
     BLOCKED_HOST_BACKOFF_TABLE,
     CrawlTask,
@@ -119,6 +120,7 @@ class TestUrlLedger:
             cur.execute("DROP TABLE IF EXISTS frontier_queue_recrawl")
             cur.execute("DROP TABLE IF EXISTS frontier_queue_blocked_host_backoff")
             cur.execute(f"DROP TABLE IF EXISTS {URL_LEDGER_TABLE} CASCADE")
+            cur.execute(f"DROP TABLE IF EXISTS {HOST_LEDGER_TABLE}")
             cur.execute("DROP TABLE IF EXISTS host_state")
             cur.execute("DROP TABLE IF EXISTS crawler_runtime_stats")
             cur.execute("DROP TABLE IF EXISTS pages")
@@ -156,11 +158,20 @@ class TestUrlLedger:
         task = CrawlTask(url="http://example.com")
         assert ledger.place(task) is True
 
+        record = ledger.host_ledger_store.get("example.com")
+        assert record is not None
+        assert record.host == "example.com"
+        assert record.known_url_count == 1
+
     def test_add_duplicate_url_returns_false(self, ledger):
         task1 = CrawlTask(url="http://example.com")
         task2 = CrawlTask(url="http://example.com")
         ledger.place(task1)
         assert ledger.place(task2) is False
+
+        record = ledger.host_ledger_store.get("example.com")
+        assert record is not None
+        assert record.known_url_count == 1
 
     def test_add_normalizes_url(self, ledger):
         task1 = CrawlTask(url="http://example.com/page#section")
