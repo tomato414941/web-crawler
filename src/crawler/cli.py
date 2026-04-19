@@ -27,6 +27,7 @@ async def _fetch(url: str, use_browser: bool = False, auto: bool = False) -> Fet
 
     if auto:
         from .core import get_adaptive_fetcher
+
         AdaptiveFetcher = get_adaptive_fetcher()
         fetcher = AdaptiveFetcher(
             timeout=settings.timeout,
@@ -36,6 +37,7 @@ async def _fetch(url: str, use_browser: bool = False, auto: bool = False) -> Fet
         response, used_browser = await fetcher.fetch(url)
     elif use_browser:
         from .core import get_browser_fetcher
+
         BrowserFetcher = get_browser_fetcher()
         fetcher = BrowserFetcher(timeout=30.0, user_agent=settings.user_agent)
         response = await fetcher.fetch(url)
@@ -126,28 +128,34 @@ def fetch(
 def crawl(
     start_url: str = typer.Argument(..., help="Starting URL for crawl"),
     max_pages: int = typer.Option(100, "--max-pages", "-n", help="Maximum pages to crawl"),
-    same_domain: bool = typer.Option(True, "--same-domain/--any-domain", help="Stay on same domain"),
+    same_host: bool = typer.Option(True, "--same-host/--any-host", help="Stay on same host"),
     output: str = typer.Option(None, "-o", "--output", help="Output file path (JSONL)"),
     js: bool = typer.Option(False, "--js", help="Use browser for all pages"),
     delay: float = typer.Option(1.0, "--delay", help="Delay between requests (seconds)"),
     concurrency: int = typer.Option(5, "--concurrency", "-c", help="Concurrent requests"),
-    no_content: bool = typer.Option(False, "--no-content", help="Save metadata only, exclude page content"),
-    postgres: str = typer.Option(None, "--postgres", envvar="CRAWLER_POSTGRES_DSN", help="Postgres DSN for storing results"),
+    no_content: bool = typer.Option(
+        False, "--no-content", help="Save metadata only, exclude page content"
+    ),
+    postgres: str = typer.Option(
+        None, "--postgres", envvar="CRAWLER_POSTGRES_DSN", help="Postgres DSN for storing results"
+    ),
 ):
     """Crawl a website starting from a URL."""
     from .crawl import run_crawl
 
-    asyncio.run(run_crawl(
-        start_url=start_url,
-        max_pages=max_pages,
-        same_domain=same_domain,
-        output_file=output,
-        use_browser=js,
-        delay=delay,
-        concurrency=concurrency,
-        include_content=not no_content,
-        postgres_dsn=postgres,
-    ))
+    asyncio.run(
+        run_crawl(
+            start_url=start_url,
+            max_pages=max_pages,
+            same_host=same_host,
+            output_file=output,
+            use_browser=js,
+            delay=delay,
+            concurrency=concurrency,
+            include_content=not no_content,
+            postgres_dsn=postgres,
+        )
+    )
 
 
 @app.command("check-links")
@@ -161,13 +169,15 @@ def check_links(
     """Check for broken links on a page."""
     from .links import check_page_links
 
-    result = asyncio.run(check_page_links(
-        url=url,
-        recursive=recursive,
-        max_depth=max_depth,
-        check_external=external,
-        progress=typer.echo,
-    ))
+    result = asyncio.run(
+        check_page_links(
+            url=url,
+            recursive=recursive,
+            max_depth=max_depth,
+            check_external=external,
+            progress=typer.echo,
+        )
+    )
 
     if output:
         _write_json_output(output, result)
@@ -187,13 +197,15 @@ def extract(
     """Extract data from a page using CSS selectors or XPath."""
     from .extract import extract_data
 
-    result = asyncio.run(extract_data(
-        url=url,
-        css_selector=selector,
-        xpath=xpath,
-        attribute=attr,
-        use_browser=js,
-    ))
+    result = asyncio.run(
+        extract_data(
+            url=url,
+            css_selector=selector,
+            xpath=xpath,
+            attribute=attr,
+            use_browser=js,
+        )
+    )
 
     if output:
         _write_json_output(output, result)
@@ -206,25 +218,29 @@ def agent(
     url: str = typer.Argument(..., help="Starting URL"),
     task: str = typer.Option(..., "-t", "--task", help="Task description for the AI agent"),
     max_steps: int = typer.Option(10, "--max-steps", help="Maximum steps before stopping"),
-    model: str = typer.Option("claude-sonnet-4-20250514", "--model", "-m", help="Claude model to use"),
+    model: str = typer.Option(
+        "claude-sonnet-4-20250514", "--model", "-m", help="Claude model to use"
+    ),
     headless: bool = typer.Option(True, "--headless/--headed", help="Run browser headlessly"),
     verbose: bool = typer.Option(False, "-v", "--verbose", help="Show detailed output"),
 ):
     """Run an AI agent to perform tasks on web pages."""
     from .agent import run_agent
 
-    result = asyncio.run(run_agent(
-        start_url=url,
-        task=task,
-        max_steps=max_steps,
-        model=model,
-        headless=headless,
-        verbose=verbose,
-    ))
+    result = asyncio.run(
+        run_agent(
+            start_url=url,
+            task=task,
+            max_steps=max_steps,
+            model=model,
+            headless=headless,
+            verbose=verbose,
+        )
+    )
 
     typer.echo(f"\nAgent completed in {result['steps']} steps")
     typer.echo(f"Status: {result['status']}")
-    if result.get('result'):
+    if result.get("result"):
         typer.echo(f"Result: {result['result']}")
 
 
@@ -232,7 +248,9 @@ def agent(
 def serve(
     host: str = typer.Option("0.0.0.0", "--host", help="Bind host"),
     port: int = typer.Option(8080, "--port", "-p", help="Bind port"),
-    postgres: str = typer.Option(None, "--postgres", envvar="CRAWLER_POSTGRES_DSN", help="Postgres DSN"),
+    postgres: str = typer.Option(
+        None, "--postgres", envvar="CRAWLER_POSTGRES_DSN", help="Postgres DSN"
+    ),
 ):
     """Start the API server to serve crawl results."""
     import uvicorn
@@ -250,7 +268,9 @@ def serve(
 
 @app.command()
 def migrate(
-    postgres: str = typer.Option(None, "--postgres", envvar="CRAWLER_POSTGRES_DSN", help="Postgres DSN"),
+    postgres: str = typer.Option(
+        None, "--postgres", envvar="CRAWLER_POSTGRES_DSN", help="Postgres DSN"
+    ),
 ):
     """Apply pending database migrations."""
     if not postgres:
@@ -272,12 +292,18 @@ def migrate(
 def daemon(
     seeds: list[str] = typer.Argument(..., help="Seed URLs to crawl"),
     cycle_pages: int = typer.Option(500, "--cycle-pages", help="Pages per cycle"),
-    refresh_ttl: int = typer.Option(86400, "--refresh-ttl", help="Refresh pages older than N seconds"),
+    refresh_ttl: int = typer.Option(
+        86400, "--refresh-ttl", help="Refresh pages older than N seconds"
+    ),
     concurrency: int = typer.Option(5, "--concurrency", "-c", help="Concurrent requests"),
     delay: float = typer.Option(1.0, "--delay", help="Delay between requests (seconds)"),
     cycle_pause: float = typer.Option(5.0, "--cycle-pause", help="Pause between cycles (seconds)"),
-    idle_sleep: float = typer.Option(60.0, "--idle-sleep", help="Sleep when no URLs to crawl (seconds)"),
-    postgres: str = typer.Option(None, "--postgres", envvar="CRAWLER_POSTGRES_DSN", help="Postgres DSN"),
+    idle_sleep: float = typer.Option(
+        60.0, "--idle-sleep", help="Sleep when no URLs to crawl (seconds)"
+    ),
+    postgres: str = typer.Option(
+        None, "--postgres", envvar="CRAWLER_POSTGRES_DSN", help="Postgres DSN"
+    ),
 ):
     """Run crawler as a continuous daemon."""
     if not postgres:

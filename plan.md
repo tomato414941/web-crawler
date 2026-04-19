@@ -16,7 +16,7 @@ The completed end state is:
 - `retry` is modeled as an intent, not as a queue name
 - `blocked` is modeled as scheduler/host state, not as a queue flavor
 - `active_leases` remains execution state
-- `domain_state` remains host state
+- `host_state` remains host state
 - queue tables are internal physical projections for leasing and maintenance
 - `scheduler_state_snapshot` is the primary runtime-facing scheduler state view
 - `queue_class` no longer defines crawler meaning

@@ -30,18 +30,18 @@ class FakeLedger:
         lease_strategy: str | None = None,
         **kwargs: object,
     ):
-        exclude_domains = set(kwargs.get("exclude_domains") or [])
+        exclude_hosts = set(kwargs.get("exclude_hosts") or [])
         runnable_surface = kwargs.get("runnable_surface")
         self.lease_calls.append(
             {
                 "lease_strategy": lease_strategy,
                 "runnable_surface": runnable_surface,
-                "exclude_domains": sorted(exclude_domains),
+                "exclude_hosts": sorted(exclude_hosts),
             }
         )
         for index, task in enumerate(self.tasks):
-            domain = task.url.split('/')[2]
-            if domain in exclude_domains:
+            host = task.url.split("/")[2]
+            if host in exclude_hosts:
                 continue
             effective_surface = task.runnable_surface or RUNNABLE_SURFACE_FRONTLINE
             if runnable_surface is not None and effective_surface != runnable_surface:
@@ -60,16 +60,22 @@ class FakeLedger:
                     runnable_surface = RUNNABLE_SURFACE_DEFERRED
             intent = task.intent
             if intent is None:
-                intent = INTENT_REFRESH if runnable_surface == RUNNABLE_SURFACE_REFRESH else INTENT_EXPLORE
-            prepared.append(CrawlTask(
-                url=task.url,
-                priority=task.priority,
-                runnable_surface=runnable_surface,
-                intent=intent,
-                source_url=task.source_url,
-                added_at=task.added_at,
-                next_fetch_at=task.next_fetch_at,
-            ))
+                intent = (
+                    INTENT_REFRESH
+                    if runnable_surface == RUNNABLE_SURFACE_REFRESH
+                    else INTENT_EXPLORE
+                )
+            prepared.append(
+                CrawlTask(
+                    url=task.url,
+                    priority=task.priority,
+                    runnable_surface=runnable_surface,
+                    intent=intent,
+                    source_url=task.source_url,
+                    added_at=task.added_at,
+                    next_fetch_at=task.next_fetch_at,
+                )
+            )
         return prepared
 
     def place(self, task: CrawlTask):
@@ -113,7 +119,7 @@ class FakeLedger:
         return len(self.tasks)
 
 
-class FakeDomainManager:
+class FakeHostManager:
     def __init__(self, budgets: dict[str, int] | None = None, *, allowed: bool = True):
         self.errors: list[str] = []
         self.successes: list[str] = []
@@ -165,20 +171,22 @@ class FakeFetcher:
 @pytest.mark.asyncio
 async def test_crawler_marks_client_errors_done_without_saving():
     ledger = FakeLedger([CrawlTask(url="https://example.com/missing")])
-    domain_manager = FakeDomainManager()
-    fetcher = FakeFetcher([
-        Response(
-            url="https://example.com/missing",
-            status=404,
-            content=b"<html>missing</html>",
-            headers={},
-        )
-    ])
+    host_manager = FakeHostManager()
+    fetcher = FakeFetcher(
+        [
+            Response(
+                url="https://example.com/missing",
+                status=404,
+                content=b"<html>missing</html>",
+                headers={},
+            )
+        ]
+    )
 
     async with CrawlerEngine(
         max_pages=10,
         url_ledger=ledger,
-        domain_manager=domain_manager,
+        host_manager=host_manager,
     ) as engine:
         engine.fetcher = fetcher
         results = await engine.crawl()
@@ -192,12 +200,12 @@ async def test_crawler_marks_client_errors_done_without_saving():
 @pytest.mark.asyncio
 async def test_crawler_finalizes_robots_denied_without_counting_failure():
     ledger = FakeLedger([CrawlTask(url="https://example.com/private")])
-    domain_manager = FakeDomainManager(allowed=False)
+    host_manager = FakeHostManager(allowed=False)
 
     async with CrawlerEngine(
         max_pages=10,
         url_ledger=ledger,
-        domain_manager=domain_manager,
+        host_manager=host_manager,
     ) as engine:
         results = await engine.crawl()
 
@@ -206,27 +214,29 @@ async def test_crawler_finalizes_robots_denied_without_counting_failure():
     assert ledger.done == ["https://example.com/private"]
     assert ledger.failed == []
     assert engine.failure_breakdown == {}
-    assert domain_manager.errors == []
-    assert domain_manager.successes == []
+    assert host_manager.errors == []
+    assert host_manager.successes == []
 
 
 @pytest.mark.asyncio
 async def test_crawler_marks_auth_walls_failed_and_records_host_error():
     ledger = FakeLedger([CrawlTask(url="https://example.com/forbidden")])
-    domain_manager = FakeDomainManager()
-    fetcher = FakeFetcher([
-        Response(
-            url="https://example.com/forbidden",
-            status=403,
-            content=b"<html>forbidden</html>",
-            headers={},
-        )
-    ])
+    host_manager = FakeHostManager()
+    fetcher = FakeFetcher(
+        [
+            Response(
+                url="https://example.com/forbidden",
+                status=403,
+                content=b"<html>forbidden</html>",
+                headers={},
+            )
+        ]
+    )
 
     async with CrawlerEngine(
         max_pages=10,
         url_ledger=ledger,
-        domain_manager=domain_manager,
+        host_manager=host_manager,
     ) as engine:
         engine.fetcher = fetcher
         results = await engine.crawl()
@@ -244,27 +254,29 @@ async def test_crawler_marks_auth_walls_failed_and_records_host_error():
             "lease_token": None,
         }
     ]
-    assert domain_manager.errors == ["https://example.com/forbidden"]
-    assert domain_manager.successes == []
+    assert host_manager.errors == ["https://example.com/forbidden"]
+    assert host_manager.successes == []
 
 
 @pytest.mark.asyncio
 async def test_crawler_marks_server_errors_failed():
     ledger = FakeLedger([CrawlTask(url="https://example.com/error")])
-    domain_manager = FakeDomainManager()
-    fetcher = FakeFetcher([
-        Response(
-            url="https://example.com/error",
-            status=503,
-            content=b"<html>error</html>",
-            headers={},
-        )
-    ])
+    host_manager = FakeHostManager()
+    fetcher = FakeFetcher(
+        [
+            Response(
+                url="https://example.com/error",
+                status=503,
+                content=b"<html>error</html>",
+                headers={},
+            )
+        ]
+    )
 
     async with CrawlerEngine(
         max_pages=10,
         url_ledger=ledger,
-        domain_manager=domain_manager,
+        host_manager=host_manager,
     ) as engine:
         engine.fetcher = fetcher
         results = await engine.crawl()
@@ -273,27 +285,29 @@ async def test_crawler_marks_server_errors_failed():
     assert engine.pages_crawled == 0
     assert ledger.done == []
     assert ledger.failed == ["https://example.com/error"]
-    assert domain_manager.errors == ["https://example.com/error"]
+    assert host_manager.errors == ["https://example.com/error"]
     assert engine.failure_breakdown == {"http_5xx": 1}
 
 
 @pytest.mark.asyncio
 async def test_crawler_marks_parse_errors_failed():
     ledger = FakeLedger([CrawlTask(url="https://example.com/parse")])
-    domain_manager = FakeDomainManager()
-    fetcher = FakeFetcher([
-        Response(
-            url="https://example.com/parse",
-            status=200,
-            content=b"<html>ok</html>",
-            headers={"content-type": "text/html"},
-        )
-    ])
+    host_manager = FakeHostManager()
+    fetcher = FakeFetcher(
+        [
+            Response(
+                url="https://example.com/parse",
+                status=200,
+                content=b"<html>ok</html>",
+                headers={"content-type": "text/html"},
+            )
+        ]
+    )
 
     async with CrawlerEngine(
         max_pages=10,
         url_ledger=ledger,
-        domain_manager=domain_manager,
+        host_manager=host_manager,
     ) as engine:
         engine.fetcher = fetcher
 
@@ -307,7 +321,7 @@ async def test_crawler_marks_parse_errors_failed():
     assert engine.pages_crawled == 1
     assert ledger.done == []
     assert ledger.failed == ["https://example.com/parse"]
-    assert domain_manager.errors == ["https://example.com/parse"]
+    assert host_manager.errors == ["https://example.com/parse"]
     assert engine.failure_breakdown == {"other": 1}
 
 
@@ -320,12 +334,18 @@ async def test_crawler_does_not_exceed_max_pages_with_concurrency():
             CrawlTask(url="https://example.com/3"),
         ]
     )
-    domain_manager = FakeDomainManager()
+    host_manager = FakeHostManager()
     fetcher = FakeFetcher(
         [
-            Response(url="https://example.com/1", status=200, content=b"<html>1</html>", headers={}),
-            Response(url="https://example.com/2", status=200, content=b"<html>2</html>", headers={}),
-            Response(url="https://example.com/3", status=200, content=b"<html>3</html>", headers={}),
+            Response(
+                url="https://example.com/1", status=200, content=b"<html>1</html>", headers={}
+            ),
+            Response(
+                url="https://example.com/2", status=200, content=b"<html>2</html>", headers={}
+            ),
+            Response(
+                url="https://example.com/3", status=200, content=b"<html>3</html>", headers={}
+            ),
         ],
         delay=0.05,
     )
@@ -334,7 +354,7 @@ async def test_crawler_does_not_exceed_max_pages_with_concurrency():
         max_pages=1,
         concurrency=3,
         url_ledger=ledger,
-        domain_manager=domain_manager,
+        host_manager=host_manager,
     ) as engine:
         engine.fetcher = fetcher
         results = await engine.crawl()
@@ -352,7 +372,7 @@ async def test_crawler_collects_failure_breakdown():
             CrawlTask(url="https://example.com/error"),
         ]
     )
-    domain_manager = FakeDomainManager()
+    host_manager = FakeHostManager()
     fetcher = FakeFetcher(
         [
             Response(
@@ -374,7 +394,7 @@ async def test_crawler_collects_failure_breakdown():
         max_pages=10,
         concurrency=1,
         url_ledger=ledger,
-        domain_manager=domain_manager,
+        host_manager=host_manager,
     ) as engine:
         engine.fetcher = fetcher
         await engine.crawl()
@@ -385,14 +405,14 @@ async def test_crawler_collects_failure_breakdown():
 @pytest.mark.asyncio
 async def test_crawler_assigns_discovery_metadata_to_outlinks():
     ledger = FakeLedger([CrawlTask(url="https://example.com/")])
-    domain_manager = FakeDomainManager()
+    host_manager = FakeHostManager()
     fetcher = FakeFetcher(
         [
             Response(
                 url="https://example.com/",
                 status=200,
                 content=(
-                    b'<a href="https://example.com/domains">same host</a>'
+                    b'<a href="https://example.com/hosts">same host</a>'
                     b'<a href="https://docs.example.com/guide/">seed host</a>'
                     b'<a href="https://external.example.net/project">external</a>'
                 ),
@@ -403,9 +423,9 @@ async def test_crawler_assigns_discovery_metadata_to_outlinks():
 
     async with CrawlerEngine(
         max_pages=1,
-        same_domain=False,
+        same_host=False,
         url_ledger=ledger,
-        domain_manager=domain_manager,
+        host_manager=host_manager,
         seed_urls=["https://example.com/", "https://docs.example.com/"],
     ) as engine:
         engine.fetcher = fetcher
@@ -414,15 +434,19 @@ async def test_crawler_assigns_discovery_metadata_to_outlinks():
     added = ledger.added_batches[0]
     by_url = {task.url: task for task in added}
 
-    assert by_url["https://example.com/domains"].priority > by_url[
-        "https://docs.example.com/guide"
-    ].priority
-    assert by_url["https://docs.example.com/guide"].priority > by_url[
-        "https://external.example.net/project"
-    ].priority
+    assert (
+        by_url["https://example.com/hosts"].priority
+        > by_url["https://docs.example.com/guide"].priority
+    )
+    assert (
+        by_url["https://docs.example.com/guide"].priority
+        > by_url["https://external.example.net/project"].priority
+    )
     assert by_url["https://docs.example.com/guide"].runnable_surface == RUNNABLE_SURFACE_DEFERRED
     assert by_url["https://docs.example.com/guide"].intent == INTENT_EXPLORE
-    assert by_url["https://external.example.net/project"].runnable_surface == RUNNABLE_SURFACE_DEFERRED
+    assert (
+        by_url["https://external.example.net/project"].runnable_surface == RUNNABLE_SURFACE_DEFERRED
+    )
     assert by_url["https://external.example.net/project"].intent == INTENT_EXPLORE
 
 
@@ -433,7 +457,7 @@ async def test_crawler_assigns_known_hosts_to_deferred_surface():
         [CrawlTask(url="https://example.com/")],
         known_counts={"example.com": 8},
     )
-    domain_manager = FakeDomainManager()
+    host_manager = FakeHostManager()
     fetcher = FakeFetcher(
         [
             Response(
@@ -447,9 +471,9 @@ async def test_crawler_assigns_known_hosts_to_deferred_surface():
 
     async with CrawlerEngine(
         max_pages=1,
-        same_domain=False,
+        same_host=False,
         url_ledger=ledger,
-        domain_manager=domain_manager,
+        host_manager=host_manager,
         seed_urls=["https://example.com/"],
     ) as engine:
         engine.fetcher = fetcher
@@ -460,17 +484,16 @@ async def test_crawler_assigns_known_hosts_to_deferred_surface():
     assert added[0].intent == INTENT_EXPLORE
 
 
-
 @pytest.mark.asyncio
 async def test_crawler_treats_pdf_as_metadata_only():
     ledger = FakeLedger([CrawlTask(url="https://example.com/spec.pdf")])
-    domain_manager = FakeDomainManager()
+    host_manager = FakeHostManager()
     fetcher = FakeFetcher(
         [
             Response(
                 url="https://example.com/spec.pdf",
                 status=200,
-                content=b"%PDF-1.7\x00binary<a href=\"https://example.com/hidden\">ignored</a>",
+                content=b'%PDF-1.7\x00binary<a href="https://example.com/hidden">ignored</a>',
                 headers={"content-type": "application/pdf"},
             )
         ]
@@ -479,7 +502,7 @@ async def test_crawler_treats_pdf_as_metadata_only():
     async with CrawlerEngine(
         max_pages=1,
         url_ledger=ledger,
-        domain_manager=domain_manager,
+        host_manager=host_manager,
     ) as engine:
         engine.fetcher = fetcher
         results = await engine.crawl()
@@ -501,11 +524,15 @@ async def test_crawler_reserves_some_leases_for_breadth():
             CrawlTask(url="https://example.com/2"),
         ]
     )
-    domain_manager = FakeDomainManager()
+    host_manager = FakeHostManager()
     fetcher = FakeFetcher(
         [
-            Response(url="https://example.com/1", status=200, content=b"<html>1</html>", headers={}),
-            Response(url="https://example.com/2", status=200, content=b"<html>2</html>", headers={}),
+            Response(
+                url="https://example.com/1", status=200, content=b"<html>1</html>", headers={}
+            ),
+            Response(
+                url="https://example.com/2", status=200, content=b"<html>2</html>", headers={}
+            ),
         ]
     )
 
@@ -513,7 +540,7 @@ async def test_crawler_reserves_some_leases_for_breadth():
         max_pages=2,
         concurrency=1,
         url_ledger=ledger,
-        domain_manager=domain_manager,
+        host_manager=host_manager,
     ) as engine:
         engine.fetcher = fetcher
         await engine.crawl()
@@ -522,31 +549,34 @@ async def test_crawler_reserves_some_leases_for_breadth():
         {
             "lease_strategy": "host_first",
             "runnable_surface": "frontline",
-            "exclude_domains": [],
+            "exclude_hosts": [],
         },
         {
             "lease_strategy": "host_first",
             "runnable_surface": "frontline",
-            "exclude_domains": [],
+            "exclude_hosts": [],
         },
     ]
-
 
 
 @pytest.mark.asyncio
 @pytest.mark.asyncio
 async def test_crawler_prefers_exploration_before_backlog_and_refresh():
     ledger = FakeLedger([CrawlTask(url="https://example.com/page")])
-    domain_manager = FakeDomainManager()
-    fetcher = FakeFetcher([
-        Response(url="https://example.com/page", status=200, content=b"<html></html>", headers={}),
-    ])
+    host_manager = FakeHostManager()
+    fetcher = FakeFetcher(
+        [
+            Response(
+                url="https://example.com/page", status=200, content=b"<html></html>", headers={}
+            ),
+        ]
+    )
 
     async with CrawlerEngine(
         max_pages=1,
         concurrency=1,
         url_ledger=ledger,
-        domain_manager=domain_manager,
+        host_manager=host_manager,
     ) as engine:
         engine.fetcher = fetcher
         await engine.crawl()
@@ -563,7 +593,7 @@ async def test_crawler_avoids_leasing_same_host_while_request_in_flight():
             CrawlTask(url="https://b.com/1"),
         ]
     )
-    domain_manager = FakeDomainManager()
+    host_manager = FakeHostManager()
     fetcher = FakeFetcher(
         [
             Response(url="https://a.com/1", status=200, content=b"<html>a1</html>", headers={}),
@@ -576,14 +606,14 @@ async def test_crawler_avoids_leasing_same_host_while_request_in_flight():
         max_pages=2,
         concurrency=3,
         url_ledger=ledger,
-        domain_manager=domain_manager,
+        host_manager=host_manager,
     ) as engine:
         engine.max_inflight_requests_per_host = 1
         engine.fetcher = fetcher
         await engine.crawl()
 
     assert fetcher.calls == ["https://a.com/1", "https://b.com/1"]
-    assert ledger.lease_calls[1]["exclude_domains"] == ["a.com"]
+    assert ledger.lease_calls[1]["exclude_hosts"] == ["a.com"]
 
 
 @pytest.mark.asyncio
@@ -595,7 +625,7 @@ async def test_crawler_allows_second_inflight_for_fast_host_budget():
             CrawlTask(url="https://b.com/1"),
         ]
     )
-    domain_manager = FakeDomainManager(budgets={"a.com": 2})
+    host_manager = FakeHostManager(budgets={"a.com": 2})
     fetcher = FakeFetcher(
         [
             Response(url="https://a.com/1", status=200, content=b"<html>a1</html>", headers={}),
@@ -609,32 +639,42 @@ async def test_crawler_allows_second_inflight_for_fast_host_budget():
         max_pages=3,
         concurrency=3,
         url_ledger=ledger,
-        domain_manager=domain_manager,
+        host_manager=host_manager,
     ) as engine:
         engine.max_inflight_requests_per_host = 1
         engine.fetcher = fetcher
         await engine.crawl()
 
     assert fetcher.calls == ["https://a.com/1", "https://a.com/2", "https://b.com/1"]
-    assert ledger.lease_calls[1]["exclude_domains"] == []
-    assert ledger.lease_calls[2]["exclude_domains"] == ["a.com"]
+    assert ledger.lease_calls[1]["exclude_hosts"] == []
+    assert ledger.lease_calls[2]["exclude_hosts"] == ["a.com"]
 
 
 @pytest.mark.asyncio
 async def test_crawler_splits_worker_pools_by_surface():
     ledger = FakeLedger(
-        [CrawlTask(url="https://example.com/page", runnable_surface=RUNNABLE_SURFACE_FRONTLINE, intent=INTENT_EXPLORE)]
+        [
+            CrawlTask(
+                url="https://example.com/page",
+                runnable_surface=RUNNABLE_SURFACE_FRONTLINE,
+                intent=INTENT_EXPLORE,
+            )
+        ]
     )
-    domain_manager = FakeDomainManager()
-    fetcher = FakeFetcher([
-        Response(url="https://example.com/page", status=200, content=b"<html></html>", headers={}),
-    ])
+    host_manager = FakeHostManager()
+    fetcher = FakeFetcher(
+        [
+            Response(
+                url="https://example.com/page", status=200, content=b"<html></html>", headers={}
+            ),
+        ]
+    )
 
     async with CrawlerEngine(
         max_pages=1,
         concurrency=6,
         url_ledger=ledger,
-        domain_manager=domain_manager,
+        host_manager=host_manager,
     ) as engine:
         engine.fetcher = fetcher
         runtime = engine.snapshot_runtime_stats()

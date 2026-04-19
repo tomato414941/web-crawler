@@ -11,7 +11,10 @@ from crawler.content_policy import (
 def test_html_is_parsed_and_stored_as_text():
     assert is_html_content_type("text/html; charset=utf-8") is True
     assert should_store_text_content("text/html; charset=utf-8", b"<html>Hello</html>") is True
-    assert should_extract_links("text/html; charset=utf-8", b"<a href='https://example.com'>x</a>") is True
+    assert (
+        should_extract_links("text/html; charset=utf-8", b"<a href='https://example.com'>x</a>")
+        is True
+    )
 
 
 def test_pdf_is_binary_metadata_only():

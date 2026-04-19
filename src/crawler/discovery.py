@@ -89,7 +89,9 @@ def _normalized_path(url: str) -> str:
 
 def _path_segments(path: str) -> tuple[str, ...]:
     """Return normalized path segments for host-agnostic heuristics."""
-    return tuple(segment.lower() for segment in PurePosixPath(path).parts if segment not in {"", "/"})
+    return tuple(
+        segment.lower() for segment in PurePosixPath(path).parts if segment not in {"", "/"}
+    )
 
 
 def _path_has_hint(path: str, hints: tuple[str, ...] | set[str]) -> bool:

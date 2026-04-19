@@ -1,23 +1,23 @@
-"""Tests for domain manager module."""
+"""Tests for host manager module."""
 
 import time
 from dataclasses import replace
 
 import httpx
 
-from crawler.domain_manager import DomainManager
-from crawler.domain_state import PersistedDomainState, RuntimeDomainState
+from crawler.host_manager import HostManager
+from crawler.host_state import PersistedHostState, RuntimeHostState
 
 
-class StubDomainStore:
+class StubHostStore:
     def __init__(self):
-        self.states: dict[str, PersistedDomainState] = {}
+        self.states: dict[str, PersistedHostState] = {}
         self.reserve_wait_seconds = 0.0
 
-    def get_or_create(self, host_key: str) -> PersistedDomainState:
+    def get_or_create(self, host_key: str) -> PersistedHostState:
         state = self.states.get(host_key)
         if state is None:
-            state = PersistedDomainState(host_key=host_key)
+            state = PersistedHostState(host_key=host_key)
             self.states[host_key] = state
         return state
 
@@ -27,7 +27,7 @@ class StubDomainStore:
         *,
         crawl_delay_seconds: float,
         checked_at: float | None = None,
-    ) -> PersistedDomainState:
+    ) -> PersistedHostState:
         state = replace(
             self.get_or_create(host_key),
             crawl_delay_seconds=crawl_delay_seconds,
@@ -43,7 +43,7 @@ class StubDomainStore:
         *,
         crawl_delay_seconds: float,
         now: float | None = None,
-    ) -> tuple[float, PersistedDomainState]:
+    ) -> tuple[float, PersistedHostState]:
         state = replace(
             self.get_or_create(host_key),
             crawl_delay_seconds=crawl_delay_seconds,
@@ -51,7 +51,7 @@ class StubDomainStore:
         self.states[host_key] = state
         return self.reserve_wait_seconds, state
 
-    def record_success(self, host_key: str, *, now: float | None = None) -> PersistedDomainState:
+    def record_success(self, host_key: str, *, now: float | None = None) -> PersistedHostState:
         state = replace(
             self.get_or_create(host_key),
             consecutive_failures=0,
@@ -67,7 +67,7 @@ class StubDomainStore:
         *,
         backoff_seconds: float,
         now: float | None = None,
-    ) -> PersistedDomainState:
+    ) -> PersistedHostState:
         current = self.get_or_create(host_key)
         state = replace(
             current,
@@ -79,10 +79,10 @@ class StubDomainStore:
         return state
 
 
-class TestRuntimeDomainState:
+class TestRuntimeHostState:
     def test_default_values(self):
-        """RuntimeDomainState should have sensible defaults."""
-        state = RuntimeDomainState(host_key="example.com")
+        """RuntimeHostState should have sensible defaults."""
+        state = RuntimeHostState(host_key="example.com")
         assert state.host_key == "example.com"
         assert state.robots_parser is None
         assert state.has_checked_robots is False
@@ -91,10 +91,10 @@ class TestRuntimeDomainState:
         assert state.crawl_delay_seconds == 1.0
 
 
-class TestPersistedDomainState:
+class TestPersistedHostState:
     def test_default_values(self):
-        """PersistedDomainState should model durable scheduler fields."""
-        state = PersistedDomainState(host_key="example.com")
+        """PersistedHostState should model durable scheduler fields."""
+        state = PersistedHostState(host_key="example.com")
         assert state.host_key == "example.com"
         assert state.crawl_delay_seconds == 1.0
         assert state.next_request_at == 0.0
@@ -103,14 +103,14 @@ class TestPersistedDomainState:
         assert state.robots_checked_at == 0.0
 
 
-class TestDomainManagerHostBudget:
+class TestHostManagerHostBudget:
     async def test_fast_healthy_host_gets_extra_budget(self):
-        store = StubDomainStore()
-        store.states["fast.example"] = PersistedDomainState(
+        store = StubHostStore()
+        store.states["fast.example"] = PersistedHostState(
             host_key="fast.example",
             latency_ewma_ms=80.0,
         )
-        manager = DomainManager(domain_store=store)
+        manager = HostManager(host_store=store)
         try:
             await manager.get_state("http://fast.example/page")
             assert manager.get_host_budget("fast.example", default_budget=1) == 2
@@ -118,13 +118,13 @@ class TestDomainManagerHostBudget:
             await manager.close()
 
     async def test_failing_host_stays_at_single_budget(self):
-        store = StubDomainStore()
-        store.states["slow.example"] = PersistedDomainState(
+        store = StubHostStore()
+        store.states["slow.example"] = PersistedHostState(
             host_key="slow.example",
             latency_ewma_ms=80.0,
             consecutive_failures=2,
         )
-        manager = DomainManager(domain_store=store)
+        manager = HostManager(host_store=store)
         try:
             await manager.get_state("http://slow.example/page")
             assert manager.get_host_budget("slow.example", default_budget=1) == 1
@@ -132,12 +132,12 @@ class TestDomainManagerHostBudget:
             await manager.close()
 
 
-class TestDomainManagerIsAllowed:
+class TestHostManagerIsAllowed:
     async def test_is_allowed_without_robots(self, httpx_mock):
         """Should allow all URLs when robots.txt is not available."""
         httpx_mock.add_response(url="http://example.com/robots.txt", status_code=404)
 
-        manager = DomainManager()
+        manager = HostManager()
         try:
             allowed = await manager.is_allowed("http://example.com/page")
             assert allowed is True
@@ -156,7 +156,7 @@ Allow: /
             text=robots_txt,
         )
 
-        manager = DomainManager()
+        manager = HostManager()
         try:
             allowed = await manager.is_allowed("http://example.com/page")
             assert allowed is True
@@ -175,7 +175,7 @@ Disallow: /private/
             text=robots_txt,
         )
 
-        manager = DomainManager()
+        manager = HostManager()
         try:
             allowed_public = await manager.is_allowed("http://example.com/public")
             allowed_private = await manager.is_allowed("http://example.com/private/secret")
@@ -199,7 +199,7 @@ Allow: /
             text=robots_txt,
         )
 
-        manager = DomainManager(user_agent="TestBot")
+        manager = HostManager(user_agent="TestBot")
         try:
             allowed = await manager.is_allowed("http://example.com/page")
             assert allowed is False
@@ -208,7 +208,7 @@ Allow: /
 
     async def test_is_allowed_when_respect_robots_false(self, httpx_mock):
         """Should allow all URLs when respect_robots is False."""
-        manager = DomainManager(respect_robots=False)
+        manager = HostManager(respect_robots=False)
         try:
             # No HTTP mock needed since robots.txt won't be fetched
             allowed = await manager.is_allowed("http://example.com/private")
@@ -223,7 +223,7 @@ Allow: /
             url="http://example.com/robots.txt",
         )
 
-        manager = DomainManager()
+        manager = HostManager()
         try:
             allowed = await manager.is_allowed("http://example.com/page")
             assert allowed is True  # Default to allow
@@ -231,11 +231,11 @@ Allow: /
             await manager.close()
 
 
-class TestDomainManagerRateLimit:
+class TestHostManagerRateLimit:
     async def test_first_request_no_wait(self):
         """First request should not wait (excluding robots.txt fetch time)."""
         # Use respect_robots=False to skip robots.txt fetch
-        manager = DomainManager(default_delay=1.0, respect_robots=False)
+        manager = HostManager(default_delay=1.0, respect_robots=False)
         try:
             start = time.time()
             await manager.wait_for_rate_limit("http://example.com/page")
@@ -246,7 +246,7 @@ class TestDomainManagerRateLimit:
 
     async def test_consecutive_requests_wait(self):
         """Consecutive requests should wait for delay."""
-        manager = DomainManager(default_delay=0.2, respect_robots=False)
+        manager = HostManager(default_delay=0.2, respect_robots=False)
         try:
             await manager.wait_for_rate_limit("http://example.com/page1")
             start = time.time()
@@ -258,7 +258,7 @@ class TestDomainManagerRateLimit:
 
     async def test_default_delay_is_used(self):
         """Default delay should be used when no Crawl-delay in robots.txt."""
-        manager = DomainManager(default_delay=0.5, respect_robots=False)
+        manager = HostManager(default_delay=0.5, respect_robots=False)
         try:
             await manager.get_state("http://example.com/page")
             state = manager._runtime_states["example.com"]
@@ -266,14 +266,14 @@ class TestDomainManagerRateLimit:
         finally:
             await manager.close()
 
-    async def test_wait_for_rate_limit_uses_domain_store(self):
+    async def test_wait_for_rate_limit_uses_host_store(self):
         """Durable store reservations should drive wait timing."""
-        store = StubDomainStore()
+        store = StubHostStore()
         store.reserve_wait_seconds = 0.05
-        manager = DomainManager(
+        manager = HostManager(
             default_delay=0.5,
             respect_robots=False,
-            domain_store=store,
+            host_store=store,
         )
         try:
             start = time.time()
@@ -284,12 +284,12 @@ class TestDomainManagerRateLimit:
             await manager.close()
 
 
-class TestDomainManagerErrorHandling:
+class TestHostManagerErrorHandling:
     async def test_record_error_increments_count(self, httpx_mock):
         """record_error should increment consecutive failures."""
         httpx_mock.add_response(url="http://example.com/robots.txt", status_code=404)
 
-        manager = DomainManager()
+        manager = HostManager()
         try:
             await manager.get_state("http://example.com/page")
             manager.record_error("http://example.com/page")
@@ -302,7 +302,7 @@ class TestDomainManagerErrorHandling:
         """record_success should reset consecutive failures."""
         httpx_mock.add_response(url="http://example.com/robots.txt", status_code=404)
 
-        manager = DomainManager()
+        manager = HostManager()
         try:
             await manager.get_state("http://example.com/page")
             manager.record_error("http://example.com/page")
@@ -315,16 +315,16 @@ class TestDomainManagerErrorHandling:
 
     async def test_get_state_loads_persisted_delay_without_enabling_runtime_cache(self):
         """Persisted state should seed scheduler fields but not robots parser cache."""
-        store = StubDomainStore()
-        store.states["example.com"] = PersistedDomainState(
+        store = StubHostStore()
+        store.states["example.com"] = PersistedHostState(
             host_key="example.com",
             crawl_delay_seconds=2.5,
             robots_checked_at=time.time(),
         )
-        manager = DomainManager(
+        manager = HostManager(
             default_delay=0.5,
             respect_robots=False,
-            domain_store=store,
+            host_store=store,
         )
         try:
             state = await manager.get_state("http://example.com/page")
@@ -337,8 +337,8 @@ class TestDomainManagerErrorHandling:
         """record_error should update durable failure state."""
         httpx_mock.add_response(url="http://example.com/robots.txt", status_code=404)
 
-        store = StubDomainStore()
-        manager = DomainManager(domain_store=store)
+        store = StubHostStore()
+        manager = HostManager(host_store=store)
         try:
             await manager.get_state("http://example.com/page")
             manager.record_error("http://example.com/page")
@@ -351,9 +351,9 @@ class TestDomainManagerErrorHandling:
         """record_error should honor explicit backoff settings."""
         httpx_mock.add_response(url="http://example.com/robots.txt", status_code=404)
 
-        store = StubDomainStore()
-        manager = DomainManager(
-            domain_store=store,
+        store = StubHostStore()
+        manager = HostManager(
+            host_store=store,
             host_backoff_seconds=5.0,
             max_host_backoff_seconds=12.0,
         )
@@ -372,8 +372,8 @@ class TestDomainManagerErrorHandling:
         """record_success should reset durable failure state."""
         httpx_mock.add_response(url="http://example.com/robots.txt", status_code=404)
 
-        store = StubDomainStore()
-        manager = DomainManager(domain_store=store)
+        store = StubHostStore()
+        manager = HostManager(host_store=store)
         try:
             await manager.get_state("http://example.com/page")
             manager.record_error("http://example.com/page")
@@ -387,7 +387,7 @@ class TestDomainManagerErrorHandling:
         """should_retry should return True under max_retries."""
         httpx_mock.add_response(url="http://example.com/robots.txt", status_code=404)
 
-        manager = DomainManager(max_retries=3)
+        manager = HostManager(max_retries=3)
         try:
             await manager.get_state("http://example.com/page")
             manager.record_error("http://example.com/page")
@@ -400,7 +400,7 @@ class TestDomainManagerErrorHandling:
         """should_retry should return False at max_retries."""
         httpx_mock.add_response(url="http://example.com/robots.txt", status_code=404)
 
-        manager = DomainManager(max_retries=3)
+        manager = HostManager(max_retries=3)
         try:
             await manager.get_state("http://example.com/page")
             manager.record_error("http://example.com/page")
@@ -410,18 +410,18 @@ class TestDomainManagerErrorHandling:
         finally:
             await manager.close()
 
-    def test_should_retry_unknown_domain(self):
-        """should_retry should return True for unknown domain."""
-        manager = DomainManager()
+    def test_should_retry_unknown_host(self):
+        """should_retry should return True for unknown host."""
+        manager = HostManager()
         assert manager.should_retry("http://unknown.com/page") is True
 
 
-class TestDomainManagerStats:
+class TestHostManagerStats:
     async def test_get_stats(self, httpx_mock):
-        """get_stats should return domain statistics."""
+        """get_stats should return host statistics."""
         httpx_mock.add_response(url="http://example.com/robots.txt", status_code=404)
 
-        manager = DomainManager()
+        manager = HostManager()
         try:
             await manager.get_state("http://example.com/page")
             await manager.wait_for_rate_limit("http://example.com/page")
@@ -436,7 +436,7 @@ class TestDomainManagerStats:
             await manager.close()
 
 
-class TestDomainManagerCaching:
+class TestHostManagerCaching:
     async def test_robots_cache(self, httpx_mock):
         """Should cache robots.txt and not refetch."""
         httpx_mock.add_response(
@@ -445,7 +445,7 @@ class TestDomainManagerCaching:
             text="User-agent: *\nAllow: /",
         )
 
-        manager = DomainManager()
+        manager = HostManager()
         try:
             # First request - should fetch
             await manager.is_allowed("http://example.com/page1")
@@ -458,12 +458,12 @@ class TestDomainManagerCaching:
         finally:
             await manager.close()
 
-    async def test_different_domains_separate_state(self, httpx_mock):
-        """Different domains should have separate state."""
+    async def test_different_hosts_separate_state(self, httpx_mock):
+        """Different hosts should have separate state."""
         httpx_mock.add_response(url="http://a.com/robots.txt", status_code=404)
         httpx_mock.add_response(url="http://b.com/robots.txt", status_code=404)
 
-        manager = DomainManager()
+        manager = HostManager()
         try:
             await manager.get_state("http://a.com/page")
             await manager.get_state("http://b.com/page")
@@ -474,10 +474,10 @@ class TestDomainManagerCaching:
             await manager.close()
 
 
-class TestDomainManagerNaming:
+class TestHostManagerNaming:
     async def test_build_persisted_state_uses_host_key_vocabulary(self):
         """Persisted state should use host-key oriented names."""
-        manager = DomainManager()
+        manager = HostManager()
         try:
             state = manager.build_persisted_state("example.com")
             assert state.host_key == "example.com"

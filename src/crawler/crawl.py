@@ -20,8 +20,8 @@ from .config import settings
 from .content_policy import should_extract_links, should_store_text_content
 from .core import HttpFetcher, Response
 from .discovery import PageSignals, rank_discovered_url, rank_seed_url, seed_hosts_from_urls
-from .domain_manager import DomainManager
-from .domain_store import DomainStore
+from .host_manager import HostManager
+from .host_store import HostStore
 from .error_stats import categorize_crawl_error
 from .url_ledger import (
     CrawlTask,
@@ -190,20 +190,20 @@ class CrawlerEngine:
         self,
         start_url: str = "",
         max_pages: int = 100,
-        same_domain: bool = True,
+        same_host: bool = True,
         use_browser: bool = False,
         delay: float = 1.0,
         concurrency: int = 5,
         output_writer: StreamingOutputWriter | None = None,
         pg_storage: "PgStorage | None" = None,
         url_ledger: UrlLedger | None = None,
-        domain_manager: DomainManager | None = None,
-        domain_store: DomainStore | None = None,
+        host_manager: HostManager | None = None,
+        host_store: HostStore | None = None,
         seed_urls: list[str] | None = None,
     ):
         self.start_url = start_url
         self.max_pages = max_pages
-        self.same_domain = same_domain
+        self.same_host = same_host
         self.use_browser = use_browser
         self.concurrency = concurrency
         self.output_writer = output_writer
@@ -220,12 +220,12 @@ class CrawlerEngine:
         self._finalizer_executor: concurrent.futures.ThreadPoolExecutor | None = None
         self._finalizer_storage = None
         self._finalizer_scheduler: UrlLedger | None = None
-        self._finalizer_domain_store: DomainStore | None = None
+        self._finalizer_host_store: HostStore | None = None
 
-        self.start_domain = urlparse(start_url).netloc if start_url else ""
+        self.start_host = urlparse(start_url).netloc if start_url else ""
         self.seed_hosts = seed_hosts_from_urls(seed_urls or [])
-        if self.start_domain:
-            self.seed_hosts.add(self.start_domain.lower())
+        if self.start_host:
+            self.seed_hosts.add(self.start_host.lower())
         if url_ledger:
             self.scheduler = url_ledger
         elif pg_storage:
@@ -233,24 +233,24 @@ class CrawlerEngine:
         else:
             raise ValueError("Postgres connection required for scheduler state")
 
-        if domain_store is None and pg_storage is not None:
-            domain_store = DomainStore(pg_storage.conn, default_delay=delay)
-        self.domain_store = domain_store
-        if self.domain_store is not None:
-            self.scheduler.attach_domain_store(self.domain_store)
+        if host_store is None and pg_storage is not None:
+            host_store = HostStore(pg_storage.conn, default_delay=delay)
+        self.host_store = host_store
+        if self.host_store is not None:
+            self.scheduler.attach_host_store(self.host_store)
 
-        if domain_manager:
-            self.domain_manager = domain_manager
-            self._owns_domain_manager = False
-            if hasattr(self.domain_manager, "attach_store"):
-                self.domain_manager.attach_store(self.domain_store)
+        if host_manager:
+            self.host_manager = host_manager
+            self._owns_host_manager = False
+            if hasattr(self.host_manager, "attach_store"):
+                self.host_manager.attach_store(self.host_store)
         else:
-            self.domain_manager = DomainManager(
+            self.host_manager = HostManager(
                 user_agent=settings.user_agent,
                 default_delay=delay,
-                domain_store=self.domain_store,
+                host_store=self.host_store,
             )
-            self._owns_domain_manager = True
+            self._owns_host_manager = True
 
         if use_browser:
             from .core import get_browser_fetcher
@@ -331,14 +331,14 @@ class CrawlerEngine:
             self._finalizer_executor.shutdown(wait=True, cancel_futures=False)
             self._finalizer_executor = None
         self._finalizer_scheduler = None
-        self._finalizer_domain_store = None
+        self._finalizer_host_store = None
         if self._finalizer_storage is not None:
             self._finalizer_storage.close()
             self._finalizer_storage = None
         if hasattr(self.fetcher, "close"):
             await self.fetcher.close()
-        if self._owns_domain_manager:
-            await self.domain_manager.close()
+        if self._owns_host_manager:
+            await self.host_manager.close()
 
     def _finalize_sync(
         self,
@@ -355,18 +355,18 @@ class CrawlerEngine:
             else:
                 scheduler.place_many(new_tasks)
 
-        domain_store = self._finalizer_domain_store or self._domain_store_for_success_tracking()
-        if domain_store is not None:
-            domain_store.record_success(
+        host_store = self._finalizer_host_store or self._host_store_for_success_tracking()
+        if host_store is not None:
+            host_store.record_success(
                 self._host_key_for_url(task.url),
                 request_latency_ms=request_latency_ms,
             )
 
         scheduler.mark_done(task.url, lease_token=task.lease_token)
 
-    def _domain_store_for_success_tracking(self) -> DomainStore | None:
+    def _host_store_for_success_tracking(self) -> HostStore | None:
         """Return the durable store used for host success resets when available."""
-        return getattr(self.domain_manager, "_domain_store", None)
+        return getattr(self.host_manager, "_host_store", None)
 
     def _enqueue_finalize_item(self, item: _FinalizeItem) -> None:
         """Track finalize queue depth before handing work to finalizer workers."""
@@ -374,16 +374,16 @@ class CrawlerEngine:
 
     def _record_error_runtime(self, url: str) -> float:
         """Advance runtime failure state without requiring durable writes on the event loop."""
-        if hasattr(self.domain_manager, "record_error_runtime"):
-            return self.domain_manager.record_error_runtime(url)
-        self.domain_manager.record_error(url)
+        if hasattr(self.host_manager, "record_error_runtime"):
+            return self.host_manager.record_error_runtime(url)
+        self.host_manager.record_error(url)
         return 0.0
 
     def _host_inflight_budget(self, host_key: str) -> int:
         """Resolve the allowed concurrent in-flight requests for a host."""
         default_budget = self.max_inflight_requests_per_host
-        if hasattr(self.domain_manager, "get_host_budget"):
-            budget = self.domain_manager.get_host_budget(
+        if hasattr(self.host_manager, "get_host_budget"):
+            budget = self.host_manager.get_host_budget(
                 host_key,
                 default_budget=default_budget,
             )
@@ -393,11 +393,11 @@ class CrawlerEngine:
     def _finalize_failed_sync(self, failed: _FailedTask) -> None:
         """Apply durable failure mutations on the dedicated finalizer connection."""
         scheduler = self._finalizer_scheduler or self.scheduler
-        domain_store = self._finalizer_domain_store or self._domain_store_for_success_tracking()
-        if failed.record_success and domain_store is not None:
-            domain_store.record_success(self._host_key_for_url(failed.task.url))
-        if failed.record_error and domain_store is not None:
-            domain_store.record_failure(
+        host_store = self._finalizer_host_store or self._host_store_for_success_tracking()
+        if failed.record_success and host_store is not None:
+            host_store.record_success(self._host_key_for_url(failed.task.url))
+        if failed.record_error and host_store is not None:
+            host_store.record_failure(
                 self._host_key_for_url(failed.task.url),
                 backoff_seconds=failed.backoff_seconds or 0.0,
             )
@@ -433,8 +433,8 @@ class CrawlerEngine:
 
     def _is_valid_url(self, url: str) -> bool:
         """Check if URL should be crawled."""
-        if self.same_domain:
-            return urlparse(url).netloc == self.start_domain
+        if self.same_host:
+            return urlparse(url).netloc == self.start_host
         return True
 
     def _build_seed_task(self, url: str) -> CrawlTask:
@@ -518,14 +518,16 @@ class CrawlerEngine:
         skipped.timings.process_ms = _elapsed_ms(skipped.process_started)
         return skipped
 
-    async def _process_url(self, task: CrawlTask) -> _FetchedPage | _FailedTask | _SkippedTask | None:
+    async def _process_url(
+        self, task: CrawlTask
+    ) -> _FetchedPage | _FailedTask | _SkippedTask | None:
         """Process a single URL."""
         url = task.url
         timings = CrawlStageTimings()
         process_started = time.perf_counter()
 
         precheck_started = time.perf_counter()
-        if not await self.domain_manager.is_allowed(url):
+        if not await self.host_manager.is_allowed(url):
             timings.precheck_ms = _elapsed_ms(precheck_started)
             return _SkippedTask(
                 task=task,
@@ -534,7 +536,7 @@ class CrawlerEngine:
                 process_started=process_started,
             )
 
-        await self.domain_manager.wait_for_rate_limit(url)
+        await self.host_manager.wait_for_rate_limit(url)
         timings.precheck_ms = _elapsed_ms(precheck_started)
 
         fetch_started = time.perf_counter()
@@ -561,10 +563,10 @@ class CrawlerEngine:
                             backoff_seconds=backoff_seconds,
                         )
                     else:
-                        if hasattr(self.domain_manager, "record_success_runtime"):
-                            self.domain_manager.record_success_runtime(url)
+                        if hasattr(self.host_manager, "record_success_runtime"):
+                            self.host_manager.record_success_runtime(url)
                         else:
-                            self.domain_manager.record_success(url)
+                            self.host_manager.record_success(url)
                         failed = _FailedTask(
                             task=task,
                             failure=CrawlFailure(
@@ -636,7 +638,7 @@ class CrawlerEngine:
         except Exception as e:
             timings.fetch_ms = _elapsed_ms(fetch_started)
             backoff_seconds = self._record_error_runtime(url)
-            retryable = self.domain_manager.should_retry(url)
+            retryable = self.host_manager.should_retry(url)
             return _FailedTask(
                 task=task,
                 failure=CrawlFailure(
@@ -897,7 +899,7 @@ class CrawlerEngine:
                 failure = CrawlFailure(
                     url=fetched.task.url,
                     error=str(exc),
-                    retryable=self.domain_manager.should_retry(fetched.task.url),
+                    retryable=self.host_manager.should_retry(fetched.task.url),
                     timings=fetched.timings,
                 )
                 category = categorize_crawl_error(str(exc))
@@ -942,18 +944,20 @@ class CrawlerEngine:
                 parsed.new_tasks,
                 parsed.result.timings.fetch_request_ms or parsed.result.timings.fetch_ms,
             )
-            if hasattr(self.domain_manager, "record_success_runtime"):
-                self.domain_manager.record_success_runtime(parsed.task.url)
+            if hasattr(self.host_manager, "record_success_runtime"):
+                self.host_manager.record_success_runtime(parsed.task.url)
             else:
-                self.domain_manager.record_success(parsed.task.url)
+                self.host_manager.record_success(parsed.task.url)
         else:
             if parsed.new_tasks:
-                if hasattr(self.scheduler, "discover_many") and hasattr(self.scheduler, "admit_discovered_tasks"):
+                if hasattr(self.scheduler, "discover_many") and hasattr(
+                    self.scheduler, "admit_discovered_tasks"
+                ):
                     self.scheduler.discover_many(parsed.new_tasks)
                     self.scheduler.admit_discovered_tasks(parsed.new_tasks)
                 else:
                     self.scheduler.place_many(parsed.new_tasks)
-            self.domain_manager.record_success(parsed.task.url)
+            self.host_manager.record_success(parsed.task.url)
             self.scheduler.mark_done(parsed.task.url, lease_token=parsed.task.lease_token)
         result.timings.scheduler_ms += _elapsed_ms(scheduler_started)
         result.timings.process_ms = _elapsed_ms(parsed.process_started)
@@ -1109,7 +1113,7 @@ class CrawlerEngine:
             task = self.scheduler.lease_next(
                 runnable_surface=lease_lane.runnable_surface,
                 lease_strategy=lease_lane.lease_strategy,
-                exclude_domains=excluded_hosts or None,
+                exclude_hosts=excluded_hosts or None,
             )
             if task is not None:
                 host_key = self._host_key_for_url(task.url)
@@ -1139,16 +1143,18 @@ class CrawlerEngine:
         self._parse_queue = asyncio.Queue()
         self._finalize_queue = asyncio.Queue()
         self._publish_queue = asyncio.Queue()
-        publisher_dsn = getattr(self.pg_storage, "_dsn", None) if self.pg_storage is not None else None
+        publisher_dsn = (
+            getattr(self.pg_storage, "_dsn", None) if self.pg_storage is not None else None
+        )
         if publisher_dsn and self._publisher_storage is None:
             from .storage import PgStorage
 
             self._publisher_storage = PgStorage(publisher_dsn)
             self._finalizer_storage = PgStorage(publisher_dsn)
             self._finalizer_scheduler = UrlLedger(self._finalizer_storage.conn)
-            self._finalizer_domain_store = DomainStore(
+            self._finalizer_host_store = HostStore(
                 self._finalizer_storage.conn,
-                default_delay=self.domain_manager.default_delay,
+                default_delay=self.host_manager.default_delay,
             )
         if publisher_dsn and self._publisher_executor is None:
             self._publisher_executor = concurrent.futures.ThreadPoolExecutor(
@@ -1240,7 +1246,7 @@ class CrawlerEngine:
 async def run_crawl(
     start_url: str,
     max_pages: int = 100,
-    same_domain: bool = True,
+    same_host: bool = True,
     output_file: str | None = None,
     use_browser: bool = False,
     delay: float = 1.0,
@@ -1270,7 +1276,7 @@ async def run_crawl(
             async with CrawlerEngine(
                 start_url=start_url,
                 max_pages=max_pages,
-                same_domain=same_domain,
+                same_host=same_host,
                 use_browser=use_browser,
                 delay=delay,
                 concurrency=concurrency,

@@ -1,6 +1,6 @@
 CREATE TABLE public.url_ledger (
     url text NOT NULL,
-    domain text NOT NULL,
+    host text NOT NULL,
     priority real DEFAULT 1.0 NOT NULL,
     source_url text,
     added_at double precision NOT NULL,
@@ -14,13 +14,13 @@ CREATE TABLE public.url_ledger (
     CONSTRAINT url_ledger_pkey PRIMARY KEY (url)
 );
 
-CREATE INDEX idx_url_ledger_domain
-    ON public.url_ledger(domain);
+CREATE INDEX idx_url_ledger_host
+    ON public.url_ledger(host);
 
 CREATE INDEX idx_url_ledger_current_intent
     ON public.url_ledger(current_intent);
 
-CREATE TABLE public.domain_state (
+CREATE TABLE public.host_state (
     host_key text NOT NULL,
     crawl_delay_seconds double precision DEFAULT 1.0 NOT NULL,
     next_request_at double precision DEFAULT 0 NOT NULL,
@@ -29,19 +29,19 @@ CREATE TABLE public.domain_state (
     robots_checked_at double precision DEFAULT 0 NOT NULL,
     updated_at double precision DEFAULT 0 NOT NULL,
     latency_ewma_ms double precision DEFAULT 0 NOT NULL,
-    CONSTRAINT domain_state_pkey PRIMARY KEY (host_key)
+    CONSTRAINT host_state_pkey PRIMARY KEY (host_key)
 );
 
-CREATE INDEX idx_domain_state_next_request_at
-    ON public.domain_state(next_request_at);
+CREATE INDEX idx_host_state_next_request_at
+    ON public.host_state(next_request_at);
 
-CREATE INDEX idx_domain_state_backoff_until
-    ON public.domain_state(backoff_until);
+CREATE INDEX idx_host_state_backoff_until
+    ON public.host_state(backoff_until);
 
 CREATE TABLE public.pages (
     url_hash text NOT NULL,
     url text NOT NULL,
-    domain text NOT NULL,
+    host text NOT NULL,
     title text,
     content text,
     status integer,
@@ -53,8 +53,8 @@ CREATE TABLE public.pages (
     CONSTRAINT pages_pkey PRIMARY KEY (url_hash)
 );
 
-CREATE INDEX idx_pages_domain
-    ON public.pages(domain);
+CREATE INDEX idx_pages_host
+    ON public.pages(host);
 
 CREATE INDEX idx_pages_crawled_at
     ON public.pages(crawled_at);
@@ -68,7 +68,7 @@ CREATE TABLE public.crawler_runtime_stats (
 
 CREATE TABLE public.scheduler_queue_frontline (
     url text NOT NULL,
-    domain text NOT NULL,
+    host text NOT NULL,
     priority real DEFAULT 1.0 NOT NULL,
     next_fetch_at double precision DEFAULT 0 NOT NULL,
     added_at double precision DEFAULT 0 NOT NULL,
@@ -78,18 +78,18 @@ CREATE TABLE public.scheduler_queue_frontline (
         FOREIGN KEY (url) REFERENCES public.url_ledger(url) ON DELETE CASCADE
 );
 
-CREATE INDEX idx_scheduler_queue_frontline_domain
-    ON public.scheduler_queue_frontline(domain);
+CREATE INDEX idx_scheduler_queue_frontline_host
+    ON public.scheduler_queue_frontline(host);
 
 CREATE INDEX idx_scheduler_queue_frontline_ready
     ON public.scheduler_queue_frontline(priority DESC, next_fetch_at ASC, added_at ASC);
 
 CREATE INDEX idx_scheduler_queue_frontline_branch
-    ON public.scheduler_queue_frontline(domain, branch_key);
+    ON public.scheduler_queue_frontline(host, branch_key);
 
 CREATE TABLE public.scheduler_queue_deferred (
     url text NOT NULL,
-    domain text NOT NULL,
+    host text NOT NULL,
     priority real DEFAULT 1.0 NOT NULL,
     next_fetch_at double precision DEFAULT 0 NOT NULL,
     added_at double precision DEFAULT 0 NOT NULL,
@@ -99,18 +99,18 @@ CREATE TABLE public.scheduler_queue_deferred (
         FOREIGN KEY (url) REFERENCES public.url_ledger(url) ON DELETE CASCADE
 );
 
-CREATE INDEX idx_scheduler_queue_deferred_domain
-    ON public.scheduler_queue_deferred(domain);
+CREATE INDEX idx_scheduler_queue_deferred_host
+    ON public.scheduler_queue_deferred(host);
 
 CREATE INDEX idx_scheduler_queue_deferred_ready
     ON public.scheduler_queue_deferred(priority DESC, next_fetch_at ASC, added_at ASC);
 
 CREATE INDEX idx_scheduler_queue_deferred_branch
-    ON public.scheduler_queue_deferred(domain, branch_key);
+    ON public.scheduler_queue_deferred(host, branch_key);
 
 CREATE TABLE public.scheduler_queue_refresh (
     url text NOT NULL,
-    domain text NOT NULL,
+    host text NOT NULL,
     priority real DEFAULT 1.0 NOT NULL,
     next_fetch_at double precision DEFAULT 0 NOT NULL,
     added_at double precision DEFAULT 0 NOT NULL,
@@ -120,18 +120,18 @@ CREATE TABLE public.scheduler_queue_refresh (
         FOREIGN KEY (url) REFERENCES public.url_ledger(url) ON DELETE CASCADE
 );
 
-CREATE INDEX idx_scheduler_queue_refresh_domain
-    ON public.scheduler_queue_refresh(domain);
+CREATE INDEX idx_scheduler_queue_refresh_host
+    ON public.scheduler_queue_refresh(host);
 
 CREATE INDEX idx_scheduler_queue_refresh_ready
     ON public.scheduler_queue_refresh(priority DESC, next_fetch_at ASC, added_at ASC);
 
 CREATE INDEX idx_scheduler_queue_refresh_branch
-    ON public.scheduler_queue_refresh(domain, branch_key);
+    ON public.scheduler_queue_refresh(host, branch_key);
 
 CREATE TABLE public.scheduler_queue_retry_quarantine (
     url text NOT NULL,
-    domain text NOT NULL,
+    host text NOT NULL,
     physical_queue text NOT NULL,
     priority real DEFAULT 1.0 NOT NULL,
     next_fetch_at double precision DEFAULT 0 NOT NULL,
@@ -143,21 +143,21 @@ CREATE TABLE public.scheduler_queue_retry_quarantine (
         FOREIGN KEY (url) REFERENCES public.url_ledger(url) ON DELETE CASCADE
 );
 
-CREATE INDEX idx_scheduler_queue_retry_quarantine_domain
-    ON public.scheduler_queue_retry_quarantine(domain);
+CREATE INDEX idx_scheduler_queue_retry_quarantine_host
+    ON public.scheduler_queue_retry_quarantine(host);
 
 CREATE INDEX idx_scheduler_queue_retry_quarantine_physical_queue
     ON public.scheduler_queue_retry_quarantine(physical_queue);
 
 CREATE INDEX idx_scheduler_queue_retry_quarantine_branch
-    ON public.scheduler_queue_retry_quarantine(domain, branch_key);
+    ON public.scheduler_queue_retry_quarantine(host, branch_key);
 
 CREATE INDEX idx_scheduler_queue_retry_quarantine_quarantined_at
     ON public.scheduler_queue_retry_quarantine(quarantined_at);
 
 CREATE TABLE public.active_leases (
     url text NOT NULL,
-    domain text NOT NULL,
+    host text NOT NULL,
     physical_queue text NOT NULL,
     lease_token text NOT NULL,
     lease_expires_at double precision NOT NULL,
@@ -166,8 +166,8 @@ CREATE TABLE public.active_leases (
         FOREIGN KEY (url) REFERENCES public.url_ledger(url) ON DELETE CASCADE
 );
 
-CREATE INDEX idx_active_leases_domain
-    ON public.active_leases(domain);
+CREATE INDEX idx_active_leases_host
+    ON public.active_leases(host);
 
 CREATE INDEX idx_active_leases_physical_queue
     ON public.active_leases(physical_queue);

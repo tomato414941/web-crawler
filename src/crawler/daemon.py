@@ -12,8 +12,8 @@ import psycopg2
 from .config import settings
 from .crawl import CrawlerEngine
 from .daemon_policy import DaemonSchedulerPolicy
-from .domain_manager import DomainManager
-from .domain_store import DomainStore
+from .host_manager import HostManager
+from .host_store import HostStore
 from .discovery import seed_hosts_from_urls
 from .storage import PgStorage
 from .url_ledger import RUNNABLE_SURFACE_FRONTLINE, UrlLedger
@@ -53,7 +53,7 @@ class CrawlDaemon:
         delay: float = 1.0,
         cycle_pause: float = 5.0,
         idle_sleep: float = 60.0,
-        deferred_runnable_per_domain: int | None = None,
+        deferred_runnable_per_host: int | None = None,
         deferred_runnable_per_branch: int | None = None,
         deferred_surface_defer_seconds: float | None = None,
         min_runnable_sleep: float | None = None,
@@ -67,10 +67,10 @@ class CrawlDaemon:
         self._delay = delay
         self._cycle_pause = cycle_pause
         self._idle_sleep = idle_sleep
-        self._deferred_runnable_per_domain = (
-            settings.daemon_keep_runnable_per_domain
-            if deferred_runnable_per_domain is None
-            else deferred_runnable_per_domain
+        self._deferred_runnable_per_host = (
+            settings.daemon_keep_runnable_per_host
+            if deferred_runnable_per_host is None
+            else deferred_runnable_per_host
         )
         self._deferred_runnable_per_branch = (
             settings.daemon_keep_runnable_per_branch
@@ -96,17 +96,21 @@ class CrawlDaemon:
             ),
         )
         self._blocked_retry_budget = max(0, settings.daemon_blocked_retry_budget)
-        self._blocked_retry_per_domain = max(1, settings.daemon_blocked_retry_per_domain)
-        self._blocked_retry_max_consecutive_failures = settings.daemon_blocked_retry_max_consecutive_failures
+        self._blocked_retry_per_host = max(1, settings.daemon_blocked_retry_per_host)
+        self._blocked_retry_max_consecutive_failures = (
+            settings.daemon_blocked_retry_max_consecutive_failures
+        )
         self._quarantine_retire_min_consecutive_failures = (
             settings.daemon_quarantine_retire_min_consecutive_failures
         )
-        self._quarantine_retire_after_seconds = max(0.0, settings.daemon_quarantine_retire_after_seconds)
+        self._quarantine_retire_after_seconds = max(
+            0.0, settings.daemon_quarantine_retire_after_seconds
+        )
         self._shutdown = False
         self._engine: CrawlerEngine | None = None
         self._last_runtime_snapshot: dict[str, object] = {}
-        self._domain_store: DomainStore | None = None
-        self._domain_manager = DomainManager(
+        self._host_store: HostStore | None = None
+        self._host_manager = HostManager(
             user_agent=settings.user_agent,
             default_delay=delay,
         )
@@ -115,11 +119,11 @@ class CrawlDaemon:
             min_frontline_runnable=self._min_frontline_runnable,
             min_frontline_hosts=self._min_frontline_hosts,
             blocked_retry_budget=self._blocked_retry_budget,
-            blocked_retry_per_domain=self._blocked_retry_per_domain,
+            blocked_retry_per_host=self._blocked_retry_per_host,
             blocked_retry_max_consecutive_failures=self._blocked_retry_max_consecutive_failures,
             quarantine_retire_min_consecutive_failures=self._quarantine_retire_min_consecutive_failures,
             quarantine_retire_after_seconds=self._quarantine_retire_after_seconds,
-            deferred_runnable_per_domain=self._deferred_runnable_per_domain,
+            deferred_runnable_per_host=self._deferred_runnable_per_host,
             deferred_runnable_per_branch=self._deferred_runnable_per_branch,
             deferred_surface_defer_seconds=self._deferred_surface_defer_seconds,
         )
@@ -156,25 +160,37 @@ class CrawlDaemon:
                         refresh_stale=lambda: self._refresh_stale(storage, url_ledger),
                     )
                     if maintenance["admitted"]:
-                        logger.info("Admitted %d discovered URLs into the deferred surface", maintenance["admitted"])
+                        logger.info(
+                            "Admitted %d discovered URLs into the deferred surface",
+                            maintenance["admitted"],
+                        )
                     if maintenance["rebalanced_before"]:
                         logger.info(
-                            "Rebalanced blocked-domain-backoff queue: quarantined=%d restored=0",
+                            "Rebalanced blocked-host-backoff queue: quarantined=%d restored=0",
                             maintenance["rebalanced_before"],
                         )
                     if maintenance["deferred"]:
-                        logger.info("Deferred %d low-priority deferred-surface URLs", maintenance["deferred"])
+                        logger.info(
+                            "Deferred %d low-priority deferred-surface URLs",
+                            maintenance["deferred"],
+                        )
                     if maintenance["rebalanced_after"]:
                         logger.info(
-                            "Rebalanced blocked-domain-backoff queue: quarantined=%d restored=0",
+                            "Rebalanced blocked-host-backoff queue: quarantined=%d restored=0",
                             maintenance["rebalanced_after"],
                         )
                     if maintenance["restored"]:
-                        logger.info("Restored %d recovered blocked-domain-backoff URLs", maintenance["restored"])
+                        logger.info(
+                            "Restored %d recovered blocked-host-backoff URLs",
+                            maintenance["restored"],
+                        )
                     if maintenance["retired"]:
-                        logger.info("Retired %d blocked-domain-backoff URLs", maintenance["retired"])
+                        logger.info("Retired %d blocked-host-backoff URLs", maintenance["retired"])
                     if maintenance["promoted"]:
-                        logger.info("Promoted %d blocked-domain-backoff URLs for retry", maintenance["promoted"])
+                        logger.info(
+                            "Promoted %d blocked-host-backoff URLs for retry",
+                            maintenance["promoted"],
+                        )
 
                     readiness = url_ledger.readiness()
                     pending = readiness.pending
@@ -213,7 +229,8 @@ class CrawlDaemon:
                                 pending=pending,
                                 runnable=runnable,
                                 cycle=cycle,
-                            ) | {
+                            )
+                            | {
                                 "next_runnable_delay": next_runnable_delay,
                             }
                             | self._scheduler_runtime_views(
@@ -272,7 +289,7 @@ class CrawlDaemon:
 
         finally:
             self._close_storage(storage)
-            await self._domain_manager.close()
+            await self._host_manager.close()
 
         logger.info("Daemon shutdown complete")
 
@@ -404,24 +421,28 @@ class CrawlDaemon:
             try:
                 storage = PgStorage(self._postgres_dsn)
                 url_ledger = UrlLedger(storage.conn)
-                self._domain_store = DomainStore(storage.conn, default_delay=self._delay)
-                url_ledger.attach_domain_store(self._domain_store)
-                self._domain_manager.attach_store(self._domain_store)
+                self._host_store = HostStore(storage.conn, default_delay=self._delay)
+                url_ledger.attach_host_store(self._host_store)
+                self._host_manager.attach_store(self._host_store)
                 count = url_ledger.recover_leased(expired_only=False)
                 if count:
                     logger.info("Recovered %d leased URLs", count)
                 prime = self._policy.prime_scheduler(url_ledger)
                 if prime["admitted"]:
-                    logger.info("Admitted %d discovered URLs into the deferred surface", prime["admitted"])
+                    logger.info(
+                        "Admitted %d discovered URLs into the deferred surface", prime["admitted"]
+                    )
                 if prime["rebalanced"]:
                     logger.info(
-                        "Rebalanced blocked-domain-backoff queue: quarantined=%d restored=0",
+                        "Rebalanced blocked-host-backoff queue: quarantined=%d restored=0",
                         prime["rebalanced"],
                     )
                 if prime["deferred"]:
                     logger.info("Deferred %d low-priority deferred-surface URLs", prime["deferred"])
                 if prime["promoted"]:
-                    logger.info("Promoted %d blocked-domain-backoff URLs for retry", prime["promoted"])
+                    logger.info(
+                        "Promoted %d blocked-host-backoff URLs for retry", prime["promoted"]
+                    )
                 logger.info("Database connected (attempt %d)", attempt)
                 return storage, url_ledger
             except psycopg2.OperationalError as e:
@@ -449,13 +470,13 @@ class CrawlDaemon:
         try:
             async with CrawlerEngine(
                 max_pages=self._cycle_pages,
-                same_domain=False,
+                same_host=False,
                 delay=self._delay,
                 concurrency=self._concurrency,
                 pg_storage=storage,
-url_ledger=url_ledger,
-                domain_manager=self._domain_manager,
-                domain_store=self._domain_store,
+                url_ledger=url_ledger,
+                host_manager=self._host_manager,
+                host_store=self._host_store,
                 seed_urls=self._seeds,
             ) as engine:
                 self._engine = engine
@@ -482,11 +503,15 @@ url_ledger=url_ledger,
         """Keep the frontline runnable surface supplied from existing scheduler state."""
         before_pending = url_ledger.pending_count()
         before_runnable = url_ledger.runnable_count(runnable_surface=RUNNABLE_SURFACE_FRONTLINE)
-        before_frontline_pending = url_ledger.pending_count(runnable_surface=RUNNABLE_SURFACE_FRONTLINE)
+        before_frontline_pending = url_ledger.pending_count(
+            runnable_surface=RUNNABLE_SURFACE_FRONTLINE
+        )
         self._policy.ensure_frontline_supply(url_ledger)
         after_pending = url_ledger.pending_count()
         after_runnable = url_ledger.runnable_count(runnable_surface=RUNNABLE_SURFACE_FRONTLINE)
-        after_frontline_pending = url_ledger.pending_count(runnable_surface=RUNNABLE_SURFACE_FRONTLINE)
+        after_frontline_pending = url_ledger.pending_count(
+            runnable_surface=RUNNABLE_SURFACE_FRONTLINE
+        )
         if after_pending == before_pending and after_runnable == before_runnable:
             return
         logger.info(
@@ -515,7 +540,7 @@ url_ledger=url_ledger,
         return self._policy.retire_blocked_retry(url_ledger)
 
     def _restore_recovered_blocked_retry(self, url_ledger: UrlLedger) -> int:
-        """Restore healthy blocked retry domains before using bounded retry promotion."""
+        """Restore healthy blocked retry hosts before using bounded retry promotion."""
         return self._policy.restore_recovered_blocked_retry(url_ledger)
 
     def _refresh_stale(self, storage: PgStorage, url_ledger: UrlLedger):
@@ -555,7 +580,6 @@ url_ledger=url_ledger,
                 pending,
                 self._cycle_pages,
             )
-
 
     def _install_signals(self):
         """Register signal handlers for graceful shutdown."""

@@ -13,9 +13,9 @@ import psycopg2
 import psycopg2.extras
 
 from .error_stats import categorize_crawl_error
-from .domain_manager import compute_host_budget
+from .host_manager import compute_host_budget
 from .url_ledger import (
-    BLOCKED_DOMAIN_BACKOFF_TABLE,
+    BLOCKED_HOST_BACKOFF_TABLE,
     LEASE_TABLE,
     PHYSICAL_QUEUE_DEFAULT_RUNNABLE_SURFACE,
     PHYSICAL_QUEUE_ORDER,
@@ -31,7 +31,7 @@ logger = logging.getLogger(__name__)
 PAGES_REQUIRED_COLUMNS = {
     "url_hash",
     "url",
-    "domain",
+    "host",
     "title",
     "content",
     "content_length",
@@ -41,7 +41,7 @@ PAGES_REQUIRED_COLUMNS = {
     "created_at",
 }
 URL_LEDGER_STATS_REQUIRED_COLUMNS = {
-    "domain",
+    "host",
     "current_intent",
     "last_error",
 }
@@ -65,10 +65,10 @@ def _sanitize_stored_content(content: object) -> str:
 
 def _pending_queue_sql() -> str:
     queue_union = "\n                        UNION ALL\n                        ".join(
-        f"SELECT '{physical_queue}' AS physical_queue, url, domain, next_fetch_at FROM public.{PHYSICAL_QUEUE_TABLES[physical_queue]}"
+        f"SELECT '{physical_queue}' AS physical_queue, url, host, next_fetch_at FROM public.{PHYSICAL_QUEUE_TABLES[physical_queue]}"
         for physical_queue in PHYSICAL_QUEUE_ORDER
     )
-    return f"SELECT physical_queue, url, domain, next_fetch_at FROM (\n                        {queue_union}\n                    ) AS pending_queue_rows"
+    return f"SELECT physical_queue, url, host, next_fetch_at FROM (\n                        {queue_union}\n                    ) AS pending_queue_rows"
 
 
 def _retry_surface_sql() -> str:
@@ -86,7 +86,9 @@ def _physical_queue_count_projection_sql(physical_queue_expr: str) -> str:
     )
 
 
-def _surface_counts_from_physical_queue_count_values(queue_count_values: tuple[int, ...]) -> dict[str, int]:
+def _surface_counts_from_physical_queue_count_values(
+    queue_count_values: tuple[int, ...],
+) -> dict[str, int]:
     surface_counts: dict[str, int] = {}
     for physical_queue, count in zip(PHYSICAL_QUEUE_ORDER, queue_count_values, strict=True):
         surface = PHYSICAL_QUEUE_DEFAULT_RUNNABLE_SURFACE[physical_queue]
@@ -121,9 +123,7 @@ def _build_operator_summary(
         "pending": int(readiness.get("pending", 0) or 0),
         "runnable": int(state_counts.get("runnable", 0) or 0),
         "scheduled": int(state_counts.get("scheduled", 0) or 0),
-        "blocked_domain_next_request": int(
-            state_counts.get("blocked_domain_next_request", 0) or 0
-        ),
+        "blocked_host_next_request": int(state_counts.get("blocked_host_next_request", 0) or 0),
         "blocked_host_backoff": int(state_counts.get("blocked_host_backoff", 0) or 0),
         "retry_quarantine": int(state_counts.get("retry_quarantine", 0) or 0),
         "leased": int(scheduler_status.get("leased", 0) or 0),
@@ -237,7 +237,7 @@ class PgStorage:
 
         url = data["url"]
         url_hash = _url_hash(url)
-        domain = urlparse(url).netloc
+        host = urlparse(url).netloc
 
         title = None
         content = _sanitize_stored_content(data.get("content", ""))
@@ -251,7 +251,7 @@ class PgStorage:
         try:
             with self._conn.cursor() as cur:
                 cur.execute(
-                    """INSERT INTO pages (url_hash, url, domain, title, content, status,
+                    """INSERT INTO pages (url_hash, url, host, title, content, status,
                            content_length, source_url, outlinks, crawled_at)
                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                        ON CONFLICT (url_hash) DO UPDATE SET
@@ -264,7 +264,7 @@ class PgStorage:
                     (
                         url_hash,
                         url,
-                        domain,
+                        host,
                         title,
                         content,
                         data.get("status"),
@@ -296,15 +296,15 @@ class PgStorage:
         since: float = 0,
         limit: int = 100,
         offset: int = 0,
-        domain: str | None = None,
+        host: str | None = None,
     ) -> list[dict]:
         """List crawled pages with optional filters."""
         conditions = ["crawled_at > %s"]
         params: list = [since]
 
-        if domain:
-            conditions.append("domain = %s")
-            params.append(domain)
+        if host:
+            conditions.append("host = %s")
+            params.append(host)
 
         where = " AND ".join(conditions)
         params.extend([limit, offset])
@@ -312,7 +312,7 @@ class PgStorage:
         try:
             with self._conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
                 cur.execute(
-                    f"""SELECT url_hash, url, domain, title, status, content_length,
+                    f"""SELECT url_hash, url, host, title, status, content_length,
                                outlinks, crawled_at
                         FROM pages WHERE {where}
                         ORDER BY crawled_at ASC
@@ -386,7 +386,7 @@ class PgStorage:
         try:
             with self._conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
                 cur.execute(
-                    """SELECT url_hash, url, domain, title, content, status,
+                    """SELECT url_hash, url, host, title, content, status,
                               content_length, source_url, outlinks, crawled_at
                        FROM pages WHERE url_hash = %s""",
                     (url_hash,),
@@ -405,7 +405,7 @@ class PgStorage:
                 cur.execute(
                     """SELECT
                          count(*) as total_pages,
-                         count(DISTINCT domain) as domains,
+                         count(DISTINCT host) as hosts,
                          min(crawled_at) as oldest,
                          max(crawled_at) as newest,
                          sum(content_length) as total_bytes
@@ -420,19 +420,19 @@ class PgStorage:
                 pending_surfaces: dict[str, int] = {}
                 blocked_surfaces: dict[str, int] = {}
                 readiness: dict[str, object] = {}
-                top_pending_domains: list[dict[str, object]] = []
-                top_blocked_domains: list[dict[str, object]] = []
-                top_slow_domains: list[dict[str, object]] = []
-                top_budget_domains: list[dict[str, object]] = []
+                top_pending_hosts: list[dict[str, object]] = []
+                top_blocked_hosts: list[dict[str, object]] = []
+                top_slow_hosts: list[dict[str, object]] = []
+                top_budget_hosts: list[dict[str, object]] = []
                 active_error_breakdown: dict[str, int] = {}
-                top_error_domains: list[dict[str, object]] = []
+                top_error_hosts: list[dict[str, object]] = []
                 runtime: dict[str, object] = {}
                 operator_summary: dict[str, object] = {}
                 effective_state_counts: dict[str, int] = {}
                 host_budget_summary: dict[str, object] = {}
                 pending_queue_sql = _pending_queue_sql()
-                blocked_queue_sql = f"""SELECT physical_queue, url, domain, next_fetch_at
-                    FROM public.{BLOCKED_DOMAIN_BACKOFF_TABLE}"""
+                blocked_queue_sql = f"""SELECT physical_queue, url, host, next_fetch_at
+                    FROM public.{BLOCKED_HOST_BACKOFF_TABLE}"""
                 cur.execute("SELECT to_regclass('public.crawler_runtime_stats')")
                 runtime_exists = cur.fetchone()[0] is not None
                 if runtime_exists:
@@ -458,7 +458,7 @@ class PgStorage:
                         physical_queue_tables=PHYSICAL_QUEUE_TABLES,
                         physical_queue_order=PHYSICAL_QUEUE_ORDER,
                         physical_queue_default_runnable_surface=PHYSICAL_QUEUE_DEFAULT_RUNNABLE_SURFACE,
-                        blocked_queue_table=BLOCKED_DOMAIN_BACKOFF_TABLE,
+                        blocked_queue_table=BLOCKED_HOST_BACKOFF_TABLE,
                         lease_table=LEASE_TABLE,
                     )
 
@@ -467,14 +467,14 @@ class PgStorage:
                     blocked_surfaces = dict(scheduler_status.get("blocked_surfaces", {}))
 
                     cur.execute(
-                        f"""SELECT domain, COUNT(*)
+                        f"""SELECT host, COUNT(*)
                            FROM ({pending_queue_sql}) AS pending_queue_rows
-                           GROUP BY domain
-                           ORDER BY COUNT(*) DESC, domain ASC
+                           GROUP BY host
+                           ORDER BY COUNT(*) DESC, host ASC
                            LIMIT 10"""
                     )
-                    top_pending_domains = [
-                        {"domain": domain, "count": count} for domain, count in cur.fetchall()
+                    top_pending_hosts = [
+                        {"host": host, "count": count} for host, count in cur.fetchall()
                     ]
 
                     now = time.time()
@@ -482,74 +482,78 @@ class PgStorage:
                     readiness = {
                         "pending": readiness_snapshot.pending,
                         "runnable": readiness_snapshot.runnable,
-                        "runnable_domains": readiness_snapshot.runnable_domains,
+                        "runnable_hosts": readiness_snapshot.runnable_hosts,
                         "next_runnable_delay": readiness_snapshot.next_runnable_delay,
                         "blocked": dict(readiness_snapshot.blocked),
                         "state_counts": dict(
-                            scheduler_status.get("readiness_state_counts", readiness_snapshot.state_counts)
+                            scheduler_status.get(
+                                "readiness_state_counts", readiness_snapshot.state_counts
+                            )
                         ),
                     }
-                    effective_state_counts = dict(scheduler_status.get("effective_state_counts", {}))
+                    effective_state_counts = dict(
+                        scheduler_status.get("effective_state_counts", {})
+                    )
 
                     cur.execute(
                         f"""WITH pending_entries AS (
-                                SELECT physical_queue, url, domain, next_fetch_at, FALSE AS forced_retry_quarantine
+                                SELECT physical_queue, url, host, next_fetch_at, FALSE AS forced_retry_quarantine
                                 FROM ({pending_queue_sql}) AS pending_queue_rows
                                 UNION ALL
-                                SELECT physical_queue, url, domain, next_fetch_at, TRUE AS forced_retry_quarantine
+                                SELECT physical_queue, url, host, next_fetch_at, TRUE AS forced_retry_quarantine
                                 FROM ({blocked_queue_sql}) AS blocked_queue_rows
                             )
                             SELECT
-                                pending_queue_rows.domain,
+                                pending_queue_rows.host,
                                 COUNT(*) AS pending_count,
                                 COUNT(*) FILTER (
                                     WHERE NOT pending_queue_rows.forced_retry_quarantine
-                                      AND COALESCE(domain_state.next_request_at, 0) > %(now)s
-                                      AND COALESCE(domain_state.backoff_until, 0) <= %(now)s
-                                ) AS blocked_domain_next_request,
+                                      AND COALESCE(host_state.next_request_at, 0) > %(now)s
+                                      AND COALESCE(host_state.backoff_until, 0) <= %(now)s
+                                ) AS blocked_host_next_request,
                                 COUNT(*) FILTER (
                                     WHERE NOT pending_queue_rows.forced_retry_quarantine
-                                      AND COALESCE(domain_state.backoff_until, 0) > %(now)s
+                                      AND COALESCE(host_state.backoff_until, 0) > %(now)s
                                 ) AS blocked_host_backoff,
                                 COUNT(*) FILTER (
                                     WHERE pending_queue_rows.forced_retry_quarantine
                                 ) AS retry_quarantine,
                                 GREATEST(
-                                    MAX(COALESCE(domain_state.next_request_at, 0)) - %(now)s,
+                                    MAX(COALESCE(host_state.next_request_at, 0)) - %(now)s,
                                     0
                                 ) AS next_request_wait_seconds,
                                 GREATEST(
-                                    MAX(COALESCE(domain_state.backoff_until, 0)) - %(now)s,
+                                    MAX(COALESCE(host_state.backoff_until, 0)) - %(now)s,
                                     0
                                 ) AS backoff_wait_seconds,
-                                COALESCE(MAX(domain_state.consecutive_failures), 0) AS consecutive_failures
+                                COALESCE(MAX(host_state.consecutive_failures), 0) AS consecutive_failures
                             FROM pending_entries AS pending_queue_rows
-                            LEFT JOIN public.domain_state ON domain_state.host_key = pending_queue_rows.domain
+                            LEFT JOIN public.host_state ON host_state.host_key = pending_queue_rows.host
                             WHERE pending_queue_rows.forced_retry_quarantine
-                               OR COALESCE(domain_state.next_request_at, 0) > %(now)s
-                               OR COALESCE(domain_state.backoff_until, 0) > %(now)s
-                            GROUP BY pending_queue_rows.domain
+                               OR COALESCE(host_state.next_request_at, 0) > %(now)s
+                               OR COALESCE(host_state.backoff_until, 0) > %(now)s
+                            GROUP BY pending_queue_rows.host
                             ORDER BY
                                 COUNT(*) FILTER (
                                     WHERE pending_queue_rows.forced_retry_quarantine
                                 ) DESC,
                                 COUNT(*) FILTER (
                                     WHERE NOT pending_queue_rows.forced_retry_quarantine
-                                      AND COALESCE(domain_state.backoff_until, 0) > %(now)s
+                                      AND COALESCE(host_state.backoff_until, 0) > %(now)s
                                 ) DESC,
                                 GREATEST(
-                                    MAX(COALESCE(domain_state.backoff_until, 0)) - %(now)s,
+                                    MAX(COALESCE(host_state.backoff_until, 0)) - %(now)s,
                                     0
                                 ) DESC,
                                 COUNT(*) DESC,
-                                pending_queue_rows.domain ASC
+                                pending_queue_rows.host ASC
                             LIMIT 10""",
                         {"now": now},
                     )
-                    top_blocked_domains = []
+                    top_blocked_hosts = []
                     for blocked_row in cur.fetchall():
                         (
-                            domain,
+                            host,
                             pending_count,
                             blocked_next_request_count,
                             blocked_host_backoff_count,
@@ -567,14 +571,14 @@ class PgStorage:
                             and blocked_host_backoff_count == 0
                             and blocked_next_request_count > 0
                         ):
-                            dominant_reason = "domain_next_request"
+                            dominant_reason = "host_next_request"
                             wait_seconds = next_request_wait_seconds
-                        top_blocked_domains.append(
+                        top_blocked_hosts.append(
                             {
-                                "domain": domain,
+                                "host": host,
                                 "pending_count": pending_count,
                                 "blocked_counts": {
-                                    "domain_next_request": blocked_next_request_count,
+                                    "host_next_request": blocked_next_request_count,
                                     "host_backoff": blocked_host_backoff_count,
                                     "retry_quarantine": retry_quarantine_count,
                                 },
@@ -586,81 +590,92 @@ class PgStorage:
 
                     cur.execute(
                         f"""WITH pending_entries AS (
-                                SELECT physical_queue, url, domain
+                                SELECT physical_queue, url, host
                                 FROM ({pending_queue_sql}) AS pending_queue_rows
                                 UNION ALL
-                                SELECT physical_queue, url, domain
+                                SELECT physical_queue, url, host
                                 FROM ({blocked_queue_sql}) AS blocked_queue_rows
                             )
                             SELECT
-                                pending_entries.domain,
+                                pending_entries.host,
                                 COUNT(*) AS pending_count,
-                                MAX(COALESCE(domain_state.latency_ewma_ms, 0)) AS latency_ewma_ms,
-                                COALESCE(MAX(domain_state.consecutive_failures), 0) AS consecutive_failures,
+                                MAX(COALESCE(host_state.latency_ewma_ms, 0)) AS latency_ewma_ms,
+                                COALESCE(MAX(host_state.consecutive_failures), 0) AS consecutive_failures,
                                 {_physical_queue_count_projection_sql("pending_entries.physical_queue")}
                             FROM pending_entries
-                            JOIN public.domain_state ON domain_state.host_key = pending_entries.domain
-                            WHERE COALESCE(domain_state.latency_ewma_ms, 0) > 0
-                            GROUP BY pending_entries.domain
+                            JOIN public.host_state ON host_state.host_key = pending_entries.host
+                            WHERE COALESCE(host_state.latency_ewma_ms, 0) > 0
+                            GROUP BY pending_entries.host
                             ORDER BY
-                                MAX(COALESCE(domain_state.latency_ewma_ms, 0)) DESC,
+                                MAX(COALESCE(host_state.latency_ewma_ms, 0)) DESC,
                                 COUNT(*) DESC,
-                                pending_entries.domain ASC
+                                pending_entries.host ASC
                             LIMIT 10"""
                     )
-                    top_slow_domains = []
+                    top_slow_hosts = []
                     for row in cur.fetchall():
-                        domain, pending_count, latency_ewma_ms, consecutive_failures, *queue_count_values = row
-                        top_slow_domains.append(
+                        (
+                            host,
+                            pending_count,
+                            latency_ewma_ms,
+                            consecutive_failures,
+                            *queue_count_values,
+                        ) = row
+                        top_slow_hosts.append(
                             {
-                                "domain": domain,
+                                "host": host,
                                 "pending_count": pending_count,
                                 "latency_ewma_ms": round(latency_ewma_ms, 1),
                                 "consecutive_failures": consecutive_failures,
-                                "surface_counts": _surface_counts_from_physical_queue_count_values(tuple(queue_count_values)),
+                                "surface_counts": _surface_counts_from_physical_queue_count_values(
+                                    tuple(queue_count_values)
+                                ),
                             }
                         )
-                    elevated_budget_domains = []
+                    elevated_budget_hosts = []
                     observed_hosts = 0
                     ineligible_due_to_failures = 0
                     ineligible_due_to_latency = 0
-                    for domain_entry in top_slow_domains:
+                    for host_entry in top_slow_hosts:
                         observed_hosts += 1
                         host_budget = compute_host_budget(
-                            latency_ewma_ms=float(domain_entry["latency_ewma_ms"]),
-                            consecutive_failures=int(domain_entry["consecutive_failures"]),
+                            latency_ewma_ms=float(host_entry["latency_ewma_ms"]),
+                            consecutive_failures=int(host_entry["consecutive_failures"]),
                             default_budget=settings.max_inflight_requests_per_host,
                         )
                         if host_budget <= settings.max_inflight_requests_per_host:
-                            if int(domain_entry["consecutive_failures"]) > 0:
+                            if int(host_entry["consecutive_failures"]) > 0:
                                 ineligible_due_to_failures += 1
                             else:
                                 ineligible_due_to_latency += 1
                             continue
-                        elevated_budget_domains.append(
+                        elevated_budget_hosts.append(
                             {
-                                **domain_entry,
+                                **host_entry,
                                 "host_budget": host_budget,
                             }
                         )
-                    top_budget_domains = elevated_budget_domains[:10]
+                    top_budget_hosts = elevated_budget_hosts[:10]
                     host_budget_summary = {
                         "observed_hosts": observed_hosts,
-                        "eligible_hosts": len(elevated_budget_domains),
+                        "eligible_hosts": len(elevated_budget_hosts),
                         "eligible_pending": sum(
-                            int(domain_entry["pending_count"])
-                            for domain_entry in elevated_budget_domains
+                            int(host_entry["pending_count"]) for host_entry in elevated_budget_hosts
                         ),
                         "ineligible_due_to_failures": ineligible_due_to_failures,
                         "ineligible_due_to_latency": ineligible_due_to_latency,
                         "max_budget": max(
-                            (int(domain_entry["host_budget"]) for domain_entry in elevated_budget_domains),
+                            (
+                                int(host_entry["host_budget"])
+                                for host_entry in elevated_budget_hosts
+                            ),
                             default=settings.max_inflight_requests_per_host,
                         ),
                     }
 
                     cur.execute(
-                        _retry_surface_sql() + """
+                        _retry_surface_sql()
+                        + """
                            SELECT url_ledger.last_error, COUNT(*)
                            FROM public.url_ledger AS url_ledger
                            LEFT JOIN retry_surface ON retry_surface.url = url_ledger.url
@@ -687,30 +702,29 @@ class PgStorage:
                     }
 
                     cur.execute(
-                        _retry_surface_sql() + """
-                           SELECT url_ledger.domain, COUNT(*)
+                        _retry_surface_sql()
+                        + """
+                           SELECT url_ledger.host, COUNT(*)
                            FROM public.url_ledger AS url_ledger
                            LEFT JOIN retry_surface ON retry_surface.url = url_ledger.url
                            WHERE url_ledger.last_error IS NOT NULL
                              AND (url_ledger.terminal_reason IS NOT NULL OR retry_surface.url IS NOT NULL)
-                           GROUP BY url_ledger.domain
-                           ORDER BY COUNT(*) DESC, url_ledger.domain ASC
+                           GROUP BY url_ledger.host
+                           ORDER BY COUNT(*) DESC, url_ledger.host ASC
                            LIMIT 10"""
                     )
-                    top_error_domains = [
-                        {"domain": domain, "count": count} for domain, count in cur.fetchall()
+                    top_error_hosts = [
+                        {"host": host, "count": count} for host, count in cur.fetchall()
                     ]
 
                 cur.execute(
-                    """SELECT domain, COUNT(*)
+                    """SELECT host, COUNT(*)
                        FROM pages
-                       GROUP BY domain
-                       ORDER BY COUNT(*) DESC, domain ASC
+                       GROUP BY host
+                       ORDER BY COUNT(*) DESC, host ASC
                        LIMIT 10"""
                 )
-                top_page_domains = [
-                    {"domain": domain, "count": count} for domain, count in cur.fetchall()
-                ]
+                top_page_hosts = [{"host": host, "count": count} for host, count in cur.fetchall()]
             self._finish_read()
         except Exception:
             self._conn.rollback()
@@ -732,7 +746,7 @@ class PgStorage:
         )
         return {
             "total_pages": page_stats_row[0],
-            "domains": page_stats_row[1],
+            "hosts": page_stats_row[1],
             "oldest_crawl": page_stats_row[2],
             "newest_crawl": page_stats_row[3],
             "total_bytes": page_stats_row[4],
@@ -746,13 +760,13 @@ class PgStorage:
             "pending_surfaces": pending_surfaces,
             "blocked_surfaces": blocked_surfaces,
             "readiness": readiness,
-            "top_page_domains": top_page_domains,
-            "top_pending_domains": top_pending_domains,
-            "top_blocked_domains": top_blocked_domains,
-            "top_slow_domains": top_slow_domains,
-            "top_budget_domains": top_budget_domains,
+            "top_page_hosts": top_page_hosts,
+            "top_pending_hosts": top_pending_hosts,
+            "top_blocked_hosts": top_blocked_hosts,
+            "top_slow_hosts": top_slow_hosts,
+            "top_budget_hosts": top_budget_hosts,
             "active_error_breakdown": active_error_breakdown,
-            "top_error_domains": top_error_domains,
+            "top_error_hosts": top_error_hosts,
             "runtime": runtime,
             "operator_summary": operator_summary,
         }
