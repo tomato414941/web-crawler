@@ -7,7 +7,6 @@ import concurrent.futures
 from collections import Counter
 from dataclasses import dataclass
 import logging
-import math
 import re
 import time
 from typing import TYPE_CHECKING
@@ -31,6 +30,7 @@ from .url_ledger import (
     LEASE_STRATEGY_URL_ORDER,
     RUNNABLE_SURFACE_DEFERRED,
     RUNNABLE_SURFACE_FRONTLINE,
+    RUNNABLE_SURFACE_NORMAL,
     RUNNABLE_SURFACE_REFRESH,
     UrlLedger,
 )
@@ -55,23 +55,12 @@ _META_ROBOTS_PATTERN = re.compile(
 )
 
 
-def _split_worker_pools(concurrency: int) -> tuple[int, int, int]:
-    """Split worker capacity into frontline, deferred, and refresh pools."""
+def _split_worker_pools(concurrency: int) -> tuple[int, int]:
+    """Split worker capacity into normal and refresh pools."""
     total = max(1, concurrency)
-    if total == 1:
-        return 1, 0, 0
-    if total == 2:
-        return 1, 0, 1
-    if total == 3:
-        return 2, 0, 1
-    frontline = max(2, math.ceil(total * 0.75))
-    frontline = min(frontline, total - 1)
-    deferred = 0
-    refresh = total - frontline
-    if refresh <= 0:
-        refresh = 1
-        frontline = total - deferred - refresh
-    return frontline, deferred, refresh
+    refresh = 1 if total >= 4 else 0
+    normal = total - refresh
+    return normal, refresh
 
 
 def _elapsed_ms(started_at: float) -> float:
@@ -210,11 +199,10 @@ class CrawlerEngine:
         self.pg_storage = pg_storage
         self.parser_workers = max(1, min(concurrency, 4))
         self.max_inflight_requests_per_host = max(1, settings.max_inflight_requests_per_host)
-        (
-            self.frontline_workers,
-            self.deferred_workers,
-            self.refresh_workers,
-        ) = _split_worker_pools(concurrency)
+        self.normal_workers, self.refresh_workers = _split_worker_pools(concurrency)
+        # Compatibility fields for older runtime consumers; execution uses normal_workers.
+        self.frontline_workers = self.normal_workers
+        self.deferred_workers = 0
         self._publisher_executor: concurrent.futures.ThreadPoolExecutor | None = None
         self._publisher_storage = None
         self._finalizer_executor: concurrent.futures.ThreadPoolExecutor | None = None
@@ -290,6 +278,7 @@ class CrawlerEngine:
             "max_pages": self.max_pages,
             "concurrency": self.concurrency,
             "parser_workers": self.parser_workers,
+            "normal_workers": self.normal_workers,
             "frontline_workers": self.frontline_workers,
             "deferred_workers": self.deferred_workers,
             "refresh_workers": self.refresh_workers,
@@ -1172,36 +1161,22 @@ class CrawlerEngine:
 
         workers: list[asyncio.Task] = []
         worker_id = 0
-        frontline_lane = _LeaseLane(
-            runnable_surface=RUNNABLE_SURFACE_FRONTLINE,
+        normal_lane = _LeaseLane(
+            runnable_surface=RUNNABLE_SURFACE_NORMAL,
             lease_strategy=LEASE_STRATEGY_HOST_FIRST,
             intent=INTENT_EXPLORE,
-        )
-        deferred_lane = _LeaseLane(
-            runnable_surface=RUNNABLE_SURFACE_DEFERRED,
-            lease_strategy=LEASE_STRATEGY_HOST_FIRST,
         )
         refresh_lane = _LeaseLane(
             runnable_surface=RUNNABLE_SURFACE_REFRESH,
             lease_strategy=LEASE_STRATEGY_URL_ORDER,
             intent=INTENT_REFRESH,
         )
-        for _ in range(self.frontline_workers):
+        for _ in range(self.normal_workers):
             workers.append(
                 asyncio.create_task(
                     self._worker(
                         worker_id,
-                        lease_lane=frontline_lane,
-                    )
-                )
-            )
-            worker_id += 1
-        for _ in range(self.deferred_workers):
-            workers.append(
-                asyncio.create_task(
-                    self._worker(
-                        worker_id,
-                        lease_lane=deferred_lane,
+                        lease_lane=normal_lane,
                     )
                 )
             )

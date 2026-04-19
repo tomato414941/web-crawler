@@ -1,34 +1,40 @@
 # web-crawler plan
 
-This migration is complete.
+## Current milestone: host-first execution thin slice
 
-The crawler now treats the scheduler model as:
+The current priority is to reduce the gap between the crawler concepts and runtime
+behavior while also improving crawl throughput.
 
-- `ledger`
-- `scheduler_state`
-- `intent`
-- `active_leases`
-- `host_state`
+The target model is:
 
-The completed end state is:
+- `ledger` keeps durable URL identity and history
+- `scheduler_state` is derived from queue membership, active leases, and host state
+- `intent` explains why a URL should be crawled
+- `active_leases` owns execution
+- `host_state` owns politeness, backoff, and host-level runtime budget
 
-- public and runtime-facing APIs are explained by `state` and `intent`
-- `retry` is modeled as an intent, not as a queue name
-- `blocked` is modeled as scheduler/host state, not as a queue flavor
-- `active_leases` remains execution state
-- `host_state` remains host state
-- queue tables are internal physical projections for leasing and maintenance
-- `scheduler_state_snapshot` is the primary runtime-facing scheduler state view
-- `queue_class` no longer defines crawler meaning
+## Active work
 
-Implementation notes:
+- Treat `frontline` and `deferred` as internal physical scheduler projections.
+- Run normal crawl workers against the combined `normal` runnable surface.
+- Lease normal work with host-first selection so deferred work does not need promotion
+  to frontline before it can run.
+- Keep refresh work separate with a small reserved worker budget when concurrency is high
+  enough.
+- Expose `normal_workers` in runtime stats while keeping legacy worker fields as
+  compatibility aliases.
 
-- `url_ledger` keeps durable URL identity/history plus `current_intent`
-- current scheduler state is derived from queue membership, active leases, and host state
-- operator-facing state is exposed through `scheduler_state_snapshot`,
-  `readiness_state_counts`, `effective_state_counts`, and `blocked_reason_counts`
-- compatibility aliases may remain in runtime payloads, but they are derived from the
-  snapshot view rather than acting as a separate source of truth
+## Not in this slice
 
-If future work starts from here, treat this file as a completion marker rather than as an
-active backlog.
+- No database schema migration.
+- No removal of `frontline` / `deferred` physical queue tables.
+- No immediate jump to 100 production concurrency.
+- No host-per-inflight increase beyond the existing adaptive budget rules.
+
+## Acceptance
+
+- Deferred-only normal crawl work can be processed by regular workers.
+- Runtime stats show `normal_workers`.
+- Existing host inflight limiting still prevents one host from consuming all workers.
+- Production can be tested first at about 24 concurrent workers before considering higher
+  concurrency.
