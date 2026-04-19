@@ -45,6 +45,7 @@ URL_LEDGER_STATS_REQUIRED_COLUMNS = {
     "current_intent",
     "last_error",
 }
+DIAGNOSTIC_STATS_STATEMENT_TIMEOUT_MS = 15000
 
 
 _TITLE_PATTERN = re.compile(r"<title[^>]*>(.*?)</title>", re.IGNORECASE | re.DOTALL)
@@ -543,6 +544,10 @@ class PgStorage:
         """Get crawl statistics."""
         try:
             with self._conn.cursor() as cur:
+                cur.execute(
+                    "SET LOCAL statement_timeout = %s",
+                    (DIAGNOSTIC_STATS_STATEMENT_TIMEOUT_MS,),
+                )
                 cur.execute(
                     """SELECT
                          count(*) as total_pages,
