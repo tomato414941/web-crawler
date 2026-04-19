@@ -25,6 +25,7 @@ class FakeLedger:
         self.failures: list[dict] = []
         self.added_batches: list[list[CrawlTask]] = []
         self.lease_calls: list[dict[str, object]] = []
+        self.rebuild_calls: list[dict[str, object]] = []
 
     def lease_next(
         self,
@@ -130,6 +131,10 @@ class FakeLedger:
         )
 
     def pending_count(self):
+        return len(self.tasks)
+
+    def rebuild_host_runnable_heads(self, **kwargs: object):
+        self.rebuild_calls.append(kwargs)
         return len(self.tasks)
 
 

@@ -94,19 +94,29 @@ Execution changes should preserve these constraints:
 
 ## Implementation Direction
 
-The current implementation direction is to optimize the existing host-first path before introducing
-a new durable projection.
+The current implementation direction is to keep queue membership as the scheduler source of truth,
+but move normal host-first candidate selection onto a loose read model.
 
-Recommended order:
+Implemented order:
 
 1. Replace correlated `host_state` subqueries in host-first candidate selection with a single join.
    This is now implemented in the URL ledger query builder.
 2. Evaluate setting PostgreSQL JIT off for crawler sessions or for the specific hot-path query.
 3. Recheck whether `COUNT(*) OVER (PARTITION BY host)` is still too expensive at production scale.
    Production measurement shows it remains the dominant cost.
-4. Add a loose host runnable-head projection and measure rebuild/read latency before switching the
-   lease path.
+4. Add a loose host runnable-head projection and measure rebuild/read latency.
+5. Use the host runnable-head read model as the first normal host-first lease candidate source.
 
-A host runnable capability projection would be a runtime read model. It would summarize which hosts
-currently have executable work and enough host capacity. It should not become a second source of
-truth for URL membership.
+The host runnable-head projection is a runtime read model. It summarizes which hosts currently have
+executable work and enough host capacity. It is not a second source of truth for URL membership.
+
+The lease path therefore uses a cheap-miss pattern:
+
+- read candidate host heads from `host_runnable_heads`
+- revalidate each candidate against queue membership, active leases, and `host_state`
+- delete stale read-model candidates after a miss so old heads do not keep blocking selection
+- fall back to the derived host-first query when the read model is empty, stale, or unavailable
+
+The read model is refreshed once at crawl-cycle start. It must not be fully rebuilt on every lease.
+If production still shows frequent fallback after this switch, the next step should be a small
+incremental refresh for the affected host or physical queue, not a hot-path global rebuild.
