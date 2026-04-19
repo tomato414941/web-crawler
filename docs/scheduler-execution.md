@@ -92,14 +92,15 @@ Execution changes should preserve these constraints:
 - keep `normal` as a runtime-facing view, not a durable URL state
 - avoid schema migrations unless the current query shape cannot be made cheap enough
 
-## Next Implementation Direction
+## Implementation Direction
 
-The next implementation work should optimize the existing host-first path before introducing a new
-durable projection.
+The current implementation direction is to optimize the existing host-first path before introducing
+a new durable projection.
 
 Recommended order:
 
 1. Replace correlated `host_state` subqueries in host-first candidate selection with a single join.
+   This is now implemented in the URL ledger query builder.
 2. Evaluate setting PostgreSQL JIT off for crawler sessions or for the specific hot-path query.
 3. Recheck whether `COUNT(*) OVER (PARTITION BY host)` is still too expensive at production scale.
 4. If the query still scans too much ready work per lease, design a host runnable capability

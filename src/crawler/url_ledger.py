@@ -201,6 +201,8 @@ class _RunnableSql:
     where: str
     params: tuple[object, ...]
     runnable_at: str
+    join_sql: str = ""
+    latency_ms_sql: str = "0"
 
 
 class UrlLedger:
@@ -415,32 +417,23 @@ class UrlLedger:
         """Build readiness SQL fragments for physical pending queue tables."""
         next_request_sql = "0"
         backoff_sql = "0"
+        join_sql = ""
+        latency_ms_sql = "0"
 
         conditions = [f"{alias}.next_fetch_at <= %s"]
         params: list[object] = [now]
 
         if self._host_store is not None:
-            next_request_sql = (
-                "COALESCE(("
-                "SELECT ds.next_request_at "
-                "FROM host_state AS ds "
-                f"WHERE ds.host_key = {alias}.host"
-                "), 0)"
+            host_state_alias = f"{alias}_host_state"
+            join_sql = (
+                f"LEFT JOIN host_state AS {host_state_alias} "
+                f"ON {host_state_alias}.host_key = {alias}.host"
             )
-            backoff_sql = (
-                "COALESCE(("
-                "SELECT ds.backoff_until "
-                "FROM host_state AS ds "
-                f"WHERE ds.host_key = {alias}.host"
-                "), 0)"
-            )
-            conditions.append(
-                "NOT EXISTS ("
-                "SELECT 1 FROM host_state AS gated "
-                f"WHERE gated.host_key = {alias}.host "
-                "AND (gated.next_request_at > %s OR gated.backoff_until > %s)"
-                ")"
-            )
+            next_request_sql = f"COALESCE({host_state_alias}.next_request_at, 0)"
+            backoff_sql = f"COALESCE({host_state_alias}.backoff_until, 0)"
+            latency_ms_sql = f"COALESCE({host_state_alias}.latency_ewma_ms, 0)"
+            conditions.append(f"{next_request_sql} <= %s")
+            conditions.append(f"{backoff_sql} <= %s")
             params.extend([now, now])
 
         if host:
@@ -455,6 +448,8 @@ class UrlLedger:
             where=" AND ".join(conditions),
             params=tuple(params),
             runnable_at=f"GREATEST({alias}.next_fetch_at, {next_request_sql}, {backoff_sql})",
+            join_sql=join_sql,
+            latency_ms_sql=latency_ms_sql,
         )
 
     def _recover_leased_locked(self, now: float, expired_only: bool) -> int:
@@ -655,9 +650,15 @@ class UrlLedger:
             raise ValueError(f"Unknown lease strategy: {lease_strategy}")
         return normalized
 
-    def _lease_order_by_sql(self, alias: str, lease_strategy: str) -> str:
+    def _lease_order_by_sql(
+        self,
+        alias: str,
+        lease_strategy: str,
+        *,
+        latency_ms_sql: str | None = None,
+    ) -> str:
         """Return the ORDER BY clause used for lease selection."""
-        latency_penalty = self._latency_penalty_sql(alias)
+        latency_penalty = self._latency_penalty_sql(alias, latency_ms_sql=latency_ms_sql)
         if lease_strategy == LEASE_STRATEGY_HOST_FIRST:
             return (
                 f"{alias}.next_fetch_at ASC, "
@@ -673,12 +674,9 @@ class UrlLedger:
             f"{alias}.added_at ASC"
         )
 
-    def _latency_penalty_sql(self, alias: str) -> str:
+    def _latency_penalty_sql(self, alias: str, *, latency_ms_sql: str | None = None) -> str:
         """Return a small host-latency bucket used as a lease tiebreaker."""
-        latency_ms = (
-            "COALESCE((SELECT ds.latency_ewma_ms "
-            f"FROM host_state AS ds WHERE ds.host_key = {alias}.host), 0)"
-        )
+        latency_ms = latency_ms_sql or "0"
         return (
             "CASE "
             f"WHEN {latency_ms} >= {LATENCY_BUCKET_VERY_SLOW_MS} THEN 3 "
@@ -687,9 +685,9 @@ class UrlLedger:
             "ELSE 0 END"
         )
 
-    def _host_head_order_by_sql(self, alias: str) -> str:
+    def _host_head_order_by_sql(self, alias: str, *, latency_ms_sql: str | None = None) -> str:
         """Return ORDER BY used to compare the best runnable URL for each host."""
-        latency_penalty = self._latency_penalty_sql(alias)
+        latency_penalty = self._latency_penalty_sql(alias, latency_ms_sql=latency_ms_sql)
         return (
             f"{alias}.next_fetch_at ASC, "
             f"{latency_penalty} ASC, "
@@ -706,7 +704,14 @@ class UrlLedger:
     ) -> tuple[str, tuple[object, ...]]:
         """Return SQL that derives one ready head URL per host."""
         table_name = self._queue_table_sql(physical_queue)
-        host_head_order = self._host_head_order_by_sql("candidate")
+        host_head_order = self._host_head_order_by_sql(
+            "candidate",
+            latency_ms_sql=runnable_sql.latency_ms_sql,
+        )
+        latency_penalty = self._latency_penalty_sql(
+            "candidate",
+            latency_ms_sql=runnable_sql.latency_ms_sql,
+        )
         sql = f"""SELECT selected.host,
                          selected.url,
                          selected.next_fetch_at,
@@ -721,9 +726,10 @@ class UrlLedger:
                           candidate.next_fetch_at,
                           candidate.added_at,
                           candidate.priority,
-                          {self._latency_penalty_sql("candidate")} AS latency_penalty,
+                          {latency_penalty} AS latency_penalty,
                           COUNT(*) OVER (PARTITION BY candidate.host) AS host_pending_count
                       FROM {table_name} AS candidate
+                      {runnable_sql.join_sql}
                       WHERE {runnable_sql.where}
                       ORDER BY candidate.host, {host_head_order}
                   ) AS selected
@@ -1433,8 +1439,14 @@ class UrlLedger:
             host=host,
             exclude_hosts=exclude_hosts,
         )
-        candidate_from = f"FROM {self._queue_table_sql(physical_queue)} AS candidate"
-        order_by = self._lease_order_by_sql("candidate", LEASE_STRATEGY_URL_ORDER)
+        candidate_from = (
+            f"FROM {self._queue_table_sql(physical_queue)} AS candidate {runnable_sql.join_sql}"
+        )
+        order_by = self._lease_order_by_sql(
+            "candidate",
+            LEASE_STRATEGY_URL_ORDER,
+            latency_ms_sql=runnable_sql.latency_ms_sql,
+        )
         with self._conn.cursor() as cur:
             cur.execute(
                 f"""SELECT candidate.url
@@ -1482,7 +1494,9 @@ class UrlLedger:
             host=host,
             exclude_hosts=exclude_hosts,
         )
-        candidate_from = f"FROM {self._queue_table_sql(physical_queue)} AS candidate"
+        candidate_from = (
+            f"FROM {self._queue_table_sql(physical_queue)} AS candidate {runnable_sql.join_sql}"
+        )
 
         try:
             with self._conn.cursor() as cur:
@@ -1577,19 +1591,30 @@ class UrlLedger:
         lease_token = uuid.uuid4().hex
         duration = self._lease_seconds if lease_seconds is None else lease_seconds
         lease_expires_at = now + duration
-        candidate_from_params: list[object] = []
         runnable_sql = self._queue_runnable_sql(
             alias="candidate",
             now=now,
             host=host,
             exclude_hosts=exclude_hosts,
         )
-        candidate_from = f"FROM {self._queue_table_sql(normalized_physical_queues[0])} AS candidate"
+        candidate_from = (
+            f"FROM {self._queue_table_sql(normalized_physical_queues[0])} AS candidate "
+            f"{runnable_sql.join_sql}"
+        )
         if normalized_lease_strategy == LEASE_STRATEGY_HOST_FIRST:
-            order_by = f"{self._lease_order_by_sql('candidate', normalized_lease_strategy)}, candidate.url ASC"
+            lease_order = self._lease_order_by_sql(
+                "candidate",
+                normalized_lease_strategy,
+                latency_ms_sql=runnable_sql.latency_ms_sql,
+            )
+            order_by = f"{lease_order}, candidate.url ASC"
         else:
-            order_by = self._lease_order_by_sql("candidate", normalized_lease_strategy)
-        params: list[object] = [*candidate_from_params, *runnable_sql.params, count]
+            order_by = self._lease_order_by_sql(
+                "candidate",
+                normalized_lease_strategy,
+                latency_ms_sql=runnable_sql.latency_ms_sql,
+            )
+        params: list[object] = [*runnable_sql.params, count]
 
         try:
             self._recover_leased_locked(now, expired_only=True)

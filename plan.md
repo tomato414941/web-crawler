@@ -1,10 +1,10 @@
 # web-crawler plan
 
-## Current milestone: host ledger foundation
+## Current milestone: host-first lease query optimization
 
-The current priority is to add the durable host identity/history layer that would have existed in a
-greenfield host-first crawler. This does not replace the lease hot-path work, but it clarifies host
-responsibilities before adding more scheduler read models.
+The current priority is to reduce the cost of the existing host-first lease path before adding a new
+runtime read model. The durable host ledger foundation is already in place; normal lease execution
+still depends on queue membership, active leases, and `host_state`, not on `host_ledger`.
 
 The documentation split is:
 
@@ -13,25 +13,30 @@ The documentation split is:
 - `scheduler-execution`: runtime lease strategy, read models, and hot-path constraints
 - `system-architecture`: project-wide subsystem boundaries
 
-## Active work
+## Completed in this slice
 
-- Add a new `host_ledger` table for durable host identity/history.
-- Keep `host_state` as runtime scheduling state, not host identity.
-- Record host discovery from URL ledger insertion.
-- Record host success/failure history from crawl completion.
-- Record robots check summary without putting robots parser details into the ledger.
+- Replaced repeated correlated `host_state` lookups in readiness and latency ordering with one
+  `LEFT JOIN host_state` per candidate query.
+- Preserved the existing host-first behavior and ordering.
+- Kept missing `host_state` rows runnable by treating host timing and latency as zero.
+- Kept URL membership and active leases as the execution source of truth.
 
 ## Not in this slice
 
-- No `host_state` rename.
-- No production configuration change.
+- No schema migration.
 - No `host_ready` execution read model.
-- No lease hot-path query rewrite.
+- No `host_ledger` dependency in the lease path.
+- No rewrite of the host pending count window yet.
 
 ## Acceptance
 
-- `host_ledger` exists on new and migrated databases.
-- URL discovery updates host first/last seen and known URL counts.
-- crawl success/failure updates host history counters.
-- robots checks update a compact host-level robots summary.
-- normal lease execution does not depend on `host_ledger`.
+- Host gating by `next_request_at` and `backoff_until` still works.
+- Host latency ordering still works.
+- The runnable host-head query no longer contains correlated `host_state` subqueries.
+- Related tests and lint pass.
+
+## Next checks
+
+- Measure the production host-first query again after deploy.
+- Evaluate disabling PostgreSQL JIT for crawler sessions if query planning/execution is still costly.
+- Recheck whether `COUNT(*) OVER (PARTITION BY host)` remains the dominant cost.

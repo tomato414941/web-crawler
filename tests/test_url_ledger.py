@@ -101,6 +101,22 @@ class TestCrawlTask:
         assert before <= task.added_at <= after
 
 
+class TestUrlLedgerSqlFragments:
+    def test_runnable_host_heads_uses_host_state_join(self):
+        ledger = UrlLedger.__new__(UrlLedger)
+        ledger._host_store = object()
+
+        runnable_sql = ledger._queue_runnable_sql(alias="candidate", now=1000.0)
+        sql, _params = ledger._runnable_host_heads_sql(
+            physical_queue=QUEUE_EXPLORATION,
+            runnable_sql=runnable_sql,
+        )
+
+        assert "LEFT JOIN host_state AS candidate_host_state" in sql
+        assert "host_state AS ds" not in sql
+        assert "NOT EXISTS" not in sql
+
+
 @requires_pg
 class TestUrlLedger:
     @pytest.fixture(autouse=True)
@@ -647,6 +663,38 @@ class TestUrlLedger:
         heads = ledger.runnable_host_heads(runnable_surface=RUNNABLE_SURFACE_FRONTLINE)
 
         assert [head.host_key for head in heads] == ["fast.com", "slow.com"]
+
+    def test_runnable_host_heads_skips_host_waiting_for_next_request(self, ledger):
+        now = 1000.0
+        ledger.place(CrawlTask(url="http://a.com/1", added_at=1000, next_fetch_at=now - 1))
+        ledger.place(CrawlTask(url="http://b.com/1", added_at=1001, next_fetch_at=now - 1))
+
+        self.host_store.reserve_request_slot(
+            "a.com",
+            crawl_delay_seconds=10.0,
+            now=now,
+        )
+
+        heads = ledger.runnable_host_heads(
+            runnable_surface=RUNNABLE_SURFACE_FRONTLINE,
+            now=now,
+        )
+
+        assert [(head.host_key, head.url) for head in heads] == [("b.com", "http://b.com/1")]
+
+    def test_runnable_host_heads_skips_host_under_backoff(self, ledger):
+        now = 1000.0
+        ledger.place(CrawlTask(url="http://a.com/1", added_at=1000, next_fetch_at=now - 1))
+        ledger.place(CrawlTask(url="http://b.com/1", added_at=1001, next_fetch_at=now - 1))
+
+        self.host_store.record_failure("a.com", backoff_seconds=30.0, now=now)
+
+        heads = ledger.runnable_host_heads(
+            runnable_surface=RUNNABLE_SURFACE_FRONTLINE,
+            now=now,
+        )
+
+        assert [(head.host_key, head.url) for head in heads] == [("b.com", "http://b.com/1")]
 
     def test_select_runnable_host_head_uses_same_host_first_order(self, ledger):
         ledger.place(
