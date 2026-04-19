@@ -40,15 +40,15 @@
 
 この分離がないと、queue 名が「いまどこにいるか」と「なぜ取りたいのか」の両方を背負ってしまう。
 
-## Why `exploration` Feels Off
+## Why `runnable surface` Feels Off
 
-`exploration` は state 名としては少し不自然である。
+`runnable surface` は state 名としては少し不自然である。
 
 理由:
 
-- `exploration` は行為や目的に近い語である
+- `runnable surface` は行為や目的に近い語である
 - live scheduler surface 名としては、現在位置より意図を強く表す
-- `backlog` との対概念として見ると、「探索する/しない」より「前面/後面」の差に見える
+- `scheduled` との対概念として見ると、「探索する/しない」より「前面/後面」の差に見える
 
 したがって理想形では、`explore` は intent として残し、surface 名は `scheduled` や `runnable` のような state 語に寄せる方が自然である。
 
@@ -80,4 +80,4 @@ runtime execution の設計は
 - `scheduled` / `runnable` / `leased` / `blocked` 系の名前は live state に使う
 - `explore` / `refresh` / `retry` は policy intent に使う
 
-つまり、`exploration` は最終的な理想名というより、intent と state がまだ分離されていない過渡的な名前として扱うのが妥当である。
+つまり、`runnable surface` は最終的な理想名というより、intent と state がまだ分離されていない過渡的な名前として扱うのが妥当である。

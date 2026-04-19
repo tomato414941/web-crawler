@@ -17,7 +17,7 @@ from .host_manager import compute_host_budget
 from .url_ledger import (
     BLOCKED_HOST_BACKOFF_TABLE,
     LEASE_TABLE,
-    PHYSICAL_QUEUE_DEFAULT_RUNNABLE_SURFACE,
+    PHYSICAL_QUEUE_DEFAULT_SCHEDULER_SURFACE,
     PHYSICAL_QUEUE_ORDER,
     PHYSICAL_QUEUE_TABLES,
     URL_LEDGER_TABLE,
@@ -92,7 +92,7 @@ def _surface_counts_from_physical_queue_count_values(
 ) -> dict[str, int]:
     surface_counts: dict[str, int] = {}
     for physical_queue, count in zip(PHYSICAL_QUEUE_ORDER, queue_count_values, strict=True):
-        surface = PHYSICAL_QUEUE_DEFAULT_RUNNABLE_SURFACE[physical_queue]
+        surface = PHYSICAL_QUEUE_DEFAULT_SCHEDULER_SURFACE[physical_queue]
         surface_counts[surface] = surface_counts.get(surface, 0) + int(count or 0)
     return surface_counts
 
@@ -603,7 +603,7 @@ class PgStorage:
                         self._conn,
                         physical_queue_tables=PHYSICAL_QUEUE_TABLES,
                         physical_queue_order=PHYSICAL_QUEUE_ORDER,
-                        physical_queue_default_runnable_surface=PHYSICAL_QUEUE_DEFAULT_RUNNABLE_SURFACE,
+                        physical_queue_default_runnable_surface=PHYSICAL_QUEUE_DEFAULT_SCHEDULER_SURFACE,
                         blocked_queue_table=BLOCKED_HOST_BACKOFF_TABLE,
                         lease_table=LEASE_TABLE,
                     )

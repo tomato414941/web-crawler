@@ -18,8 +18,8 @@ from crawler.url_ledger import (
     HOST_RUNNABLE_HEADS_TABLE,
     LEASE_TABLE,
     PHYSICAL_QUEUE_TABLES,
-    QUEUE_BACKLOG,
-    QUEUE_EXPLORATION,
+    QUEUE_SCHEDULED,
+    QUEUE_RUNNABLE,
     QUEUE_RECRAWL,
     URL_LEDGER_TABLE,
 )
@@ -31,8 +31,8 @@ pytestmark = pytest.mark.skipif(
 
 
 def _reset_schema(dsn: str) -> None:
-    frontline_table = PHYSICAL_QUEUE_TABLES[QUEUE_EXPLORATION]
-    deferred_table = PHYSICAL_QUEUE_TABLES[QUEUE_BACKLOG]
+    runnable_table = PHYSICAL_QUEUE_TABLES[QUEUE_RUNNABLE]
+    scheduled_table = PHYSICAL_QUEUE_TABLES[QUEUE_SCHEDULED]
     refresh_table = PHYSICAL_QUEUE_TABLES[QUEUE_RECRAWL]
     conn = psycopg2.connect(dsn)
     conn.autocommit = False
@@ -42,8 +42,8 @@ def _reset_schema(dsn: str) -> None:
             cur.execute(f"DROP TABLE IF EXISTS public.{HOST_RUNNABLE_HEADS_TABLE}")
             cur.execute("DROP TABLE IF EXISTS public.host_ledger")
             cur.execute("DROP TABLE IF EXISTS public.host_state")
-            cur.execute(f"DROP TABLE IF EXISTS public.{frontline_table}")
-            cur.execute(f"DROP TABLE IF EXISTS public.{deferred_table}")
+            cur.execute(f"DROP TABLE IF EXISTS public.{runnable_table}")
+            cur.execute(f"DROP TABLE IF EXISTS public.{scheduled_table}")
             cur.execute(f"DROP TABLE IF EXISTS public.{refresh_table}")
             cur.execute(f"DROP TABLE IF EXISTS public.{BLOCKED_HOST_BACKOFF_TABLE}")
             cur.execute("DROP TABLE IF EXISTS public.frontier_queue_exploration")
@@ -80,6 +80,7 @@ def test_apply_migrations_creates_expected_tables(migrated_dsn):
         "027_rename_domain_to_host.sql",
         "028_add_host_ledger.sql",
         "029_add_host_runnable_heads.sql",
+        "030_rename_scheduler_surfaces.sql",
     ]
 
     conn = psycopg2.connect(migrated_dsn)
@@ -93,8 +94,8 @@ def test_apply_migrations_creates_expected_tables(migrated_dsn):
                        to_regclass('public.host_state'),
                        to_regclass('public.schema_migrations'),
                        to_regclass('public.crawler_runtime_stats'),
-                       to_regclass('public.{PHYSICAL_QUEUE_TABLES[QUEUE_EXPLORATION]}'),
-                       to_regclass('public.{PHYSICAL_QUEUE_TABLES[QUEUE_BACKLOG]}'),
+                       to_regclass('public.{PHYSICAL_QUEUE_TABLES[QUEUE_RUNNABLE]}'),
+                       to_regclass('public.{PHYSICAL_QUEUE_TABLES[QUEUE_SCHEDULED]}'),
                        to_regclass('public.{PHYSICAL_QUEUE_TABLES[QUEUE_RECRAWL]}'),
                        to_regclass('public.{BLOCKED_HOST_BACKOFF_TABLE}'),
                        to_regclass('public.{LEASE_TABLE}'),
@@ -109,8 +110,8 @@ def test_apply_migrations_creates_expected_tables(migrated_dsn):
                 "host_state",
                 "schema_migrations",
                 "crawler_runtime_stats",
-                PHYSICAL_QUEUE_TABLES[QUEUE_EXPLORATION],
-                PHYSICAL_QUEUE_TABLES[QUEUE_BACKLOG],
+                PHYSICAL_QUEUE_TABLES[QUEUE_RUNNABLE],
+                PHYSICAL_QUEUE_TABLES[QUEUE_SCHEDULED],
                 PHYSICAL_QUEUE_TABLES[QUEUE_RECRAWL],
                 BLOCKED_HOST_BACKOFF_TABLE,
                 LEASE_TABLE,
@@ -199,6 +200,7 @@ def test_apply_migrations_skips_baseline_when_legacy_history_exists(migrated_dsn
         "027_rename_domain_to_host.sql",
         "028_add_host_ledger.sql",
         "029_add_host_runnable_heads.sql",
+        "030_rename_scheduler_surfaces.sql",
     ]
 
     conn = psycopg2.connect(migrated_dsn)
@@ -216,4 +218,5 @@ def test_apply_migrations_skips_baseline_when_legacy_history_exists(migrated_dsn
     assert "027_rename_domain_to_host.sql" in versions
     assert "028_add_host_ledger.sql" in versions
     assert "029_add_host_runnable_heads.sql" in versions
+    assert "030_rename_scheduler_surfaces.sql" in versions
     assert BASELINE_VERSION not in versions

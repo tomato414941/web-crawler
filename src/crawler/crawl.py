@@ -28,10 +28,10 @@ from .url_ledger import (
     INTENT_REFRESH,
     LEASE_STRATEGY_HOST_FIRST,
     LEASE_STRATEGY_URL_ORDER,
-    RUNNABLE_SURFACE_DEFERRED,
-    RUNNABLE_SURFACE_FRONTLINE,
-    RUNNABLE_SURFACE_NORMAL,
-    RUNNABLE_SURFACE_REFRESH,
+    SCHEDULER_SURFACE_SCHEDULED,
+    SCHEDULER_SURFACE_RUNNABLE,
+    SCHEDULER_SURFACE_NORMAL,
+    SCHEDULER_SURFACE_REFRESH,
     UrlLedger,
 )
 from .output import StreamingOutputWriter
@@ -201,8 +201,8 @@ class CrawlerEngine:
         self.max_inflight_requests_per_host = max(1, settings.max_inflight_requests_per_host)
         self.normal_workers, self.refresh_workers = _split_worker_pools(concurrency)
         # Compatibility fields for older runtime consumers; execution uses normal_workers.
-        self.frontline_workers = self.normal_workers
-        self.deferred_workers = 0
+        self.runnable_workers = self.normal_workers
+        self.scheduled_workers = 0
         self._publisher_executor: concurrent.futures.ThreadPoolExecutor | None = None
         self._publisher_storage = None
         self._finalizer_executor: concurrent.futures.ThreadPoolExecutor | None = None
@@ -285,8 +285,8 @@ class CrawlerEngine:
             "concurrency": self.concurrency,
             "parser_workers": self.parser_workers,
             "normal_workers": self.normal_workers,
-            "frontline_workers": self.frontline_workers,
-            "deferred_workers": self.deferred_workers,
+            "runnable_workers": self.runnable_workers,
+            "scheduled_workers": self.scheduled_workers,
             "refresh_workers": self.refresh_workers,
             "active_hosts": len(self._active_host_counts),
             "parse_queue_size": self._parse_queue.qsize() if self._parse_queue is not None else 0,
@@ -438,7 +438,7 @@ class CrawlerEngine:
         return CrawlTask(
             url=url,
             priority=decision.priority,
-            runnable_surface=RUNNABLE_SURFACE_FRONTLINE,
+            runnable_surface=SCHEDULER_SURFACE_RUNNABLE,
             intent=INTENT_EXPLORE,
         )
 
@@ -483,7 +483,7 @@ class CrawlerEngine:
                 CrawlTask(
                     url=link,
                     priority=decision.priority,
-                    runnable_surface=RUNNABLE_SURFACE_DEFERRED,
+                    runnable_surface=SCHEDULER_SURFACE_SCHEDULED,
                     intent=INTENT_EXPLORE,
                     source_url=parent_url,
                 )
@@ -1122,7 +1122,7 @@ class CrawlerEngine:
             return
         started_at = time.perf_counter()
         try:
-            rebuilt = rebuild(runnable_surface=RUNNABLE_SURFACE_NORMAL)
+            rebuilt = rebuild(runnable_surface=SCHEDULER_SURFACE_NORMAL)
         except Exception:
             logger.exception(
                 "Failed to refresh host runnable-head read model; using derived host-first fallback"
@@ -1189,12 +1189,12 @@ class CrawlerEngine:
         workers: list[asyncio.Task] = []
         worker_id = 0
         normal_lane = _LeaseLane(
-            runnable_surface=RUNNABLE_SURFACE_NORMAL,
+            runnable_surface=SCHEDULER_SURFACE_NORMAL,
             lease_strategy=LEASE_STRATEGY_HOST_FIRST,
             intent=INTENT_EXPLORE,
         )
         refresh_lane = _LeaseLane(
-            runnable_surface=RUNNABLE_SURFACE_REFRESH,
+            runnable_surface=SCHEDULER_SURFACE_REFRESH,
             lease_strategy=LEASE_STRATEGY_URL_ORDER,
             intent=INTENT_REFRESH,
         )

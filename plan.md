@@ -1,50 +1,40 @@
 # web-crawler plan
 
-## Current milestone: host runnable-head read model v2
+## Current milestone: scheduler responsibility split
 
-The current priority is to use the loose host-level read model on the normal host-first lease path.
-This read model is not source of truth; every candidate is still revalidated against queue
-membership, active leases, and `host_state` before it can become crawler work.
+The current priority is to keep the crawler fast while making scheduler ownership explicit.
+The URL ledger should own durable URL facts. Scheduler membership, host runnable-head read models,
+quarantine, and leases should be separate implementation units.
 
-The documentation split is:
+## Completed in this slice
 
-- `crawler-concepts`: abstract model and naming principles
-- `scheduler-state-model`: source-of-truth boundaries and invariants
-- `scheduler-execution`: runtime lease strategy, read models, and hot-path constraints
-- `system-architecture`: project-wide subsystem boundaries
+- Renamed the normal scheduler surfaces to `runnable` and `scheduled`.
+- Added migration support for existing databases that still have the previous scheduler table names
+  or queue values.
+- Moved scheduler membership table/surface operations into `SchedulerMembershipStore`.
+- Moved the `host_runnable_heads` projection into `HostRunnableHeadStore`.
+- Kept the existing host-first lease path behavior: read model first, source-of-truth revalidation,
+  stale candidate cleanup, and derived-query fallback.
 
-## Completed
+## Remaining near-term work
 
-- Added `host_runnable_heads` as a derived read model table.
-- Added rebuild support from scheduler queue membership and `host_state`.
-- Added a read API for ready host-head candidates from the read model.
-- Measured production rebuild/read latency and confirmed the read-model candidate query is much
-  cheaper than the current derived host-first query.
-
-## In this slice
-
-- Normal host-first lease reads candidate heads from `host_runnable_heads` first.
-- Candidate URLs are still leased through source-of-truth revalidation.
-- Stale read-model candidates are dropped when revalidation misses, so old heads do not keep
-  blocking newer candidates.
-- The crawler refreshes the read model once at crawl-cycle start, not on every lease.
-- If the read model is empty or unavailable, host-first lease falls back to the existing derived
-  query.
+- Move active lease insert/delete/recovery into a dedicated lease store.
+- Move the remaining admission/requeue methods out of `UrlLedger` and into scheduler membership.
+- Split heavy diagnostic stats out of `PgStorage` so normal storage and operator diagnostics have
+  separate ownership.
+- Re-measure production lease timings and crawler throughput after deploy.
 
 ## Acceptance
 
-- `host_runnable_heads` exists on new and migrated databases.
-- Rebuild creates one head row per host and physical queue.
-- Read model candidates respect `runnable_at <= now`, `limit`, and excluded hosts.
-- Normal host-first lease uses read-model candidates when available.
-- Stale read-model candidates do not permanently block the lease path.
-- Existing derived host-first behavior remains as a fallback.
-- Related tests and lint pass.
+- New databases use `scheduler_queue_runnable` and `scheduler_queue_scheduled`.
+- Existing databases migrate to the new scheduler queue names and queue values.
+- `/stats` reports scheduler surfaces as `runnable`, `scheduled`, and `refresh`.
+- Normal host-first leasing remains read-model-first and does not add hot-path global rebuilds.
+- Related tests and lint pass before deploy.
 
 ## Next checks after deploy
 
-- Confirm production logs show the crawl-cycle read-model refresh.
-- Compare production `lease=` timings before and after the read-model-first switch.
-- Check whether stale-candidate misses still force frequent fallback.
-- If fallback remains common, add a per-host or incremental head refresh instead of rebuilding the
-  whole read model on the hot path.
+- Confirm migration `030_rename_scheduler_surfaces.sql` is applied.
+- Confirm `/health` and `/stats` are healthy.
+- Check production logs for read-model refresh latency and `lease=` timings.
+- Compare pages/sec and PostgreSQL CPU against the previous deployment.
