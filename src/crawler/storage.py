@@ -215,6 +215,73 @@ def _scheduler_state_views(
     }
 
 
+def _runtime_payload_dict(runtime: Mapping[str, object]) -> dict[str, object]:
+    """Return the stored runtime payload when it has the expected shape."""
+    payload = runtime.get("payload")
+    return dict(payload) if isinstance(payload, Mapping) else {}
+
+
+def _runtime_readiness_from_payload(payload: Mapping[str, object]) -> dict[str, object]:
+    """Build a readiness view from persisted daemon runtime state."""
+    state_counts = payload.get("readiness_state_counts")
+    if not isinstance(state_counts, Mapping):
+        state_counts = payload.get("scheduler_readiness_states")
+    if not isinstance(state_counts, Mapping):
+        state_counts = {}
+
+    blocked = payload.get("blocked_reason_counts")
+    if not isinstance(blocked, Mapping):
+        blocked = payload.get("readiness_blocked")
+    if not isinstance(blocked, Mapping):
+        blocked = {}
+
+    return {
+        "pending": int(payload.get("pending", 0) or 0),
+        "runnable": int(payload.get("runnable", state_counts.get("runnable", 0)) or 0),
+        "runnable_hosts": int(payload.get("runnable_hosts", 0) or 0),
+        "next_runnable_delay": payload.get("next_runnable_delay"),
+        "blocked": dict(blocked),
+        "state_counts": dict(state_counts),
+    }
+
+
+def _runtime_scheduler_status_from_payload(payload: Mapping[str, object]) -> dict[str, object]:
+    """Build a scheduler status view without live scheduler aggregation."""
+    snapshot = payload.get("scheduler_state_snapshot")
+    if not isinstance(snapshot, Mapping):
+        snapshot = {}
+
+    readiness = _runtime_readiness_from_payload(payload)
+    state_counts = readiness["state_counts"]
+    pending = int(payload.get("pending", readiness.get("pending", 0)) or 0)
+    leased = int(payload.get("leased", 0) or 0)
+
+    return {
+        "leased": leased,
+        "done": int(payload.get("done", 0) or 0),
+        "failed": int(payload.get("failed", 0) or 0),
+        "intent_counts": dict(payload.get("intent_counts", {}))
+        if isinstance(payload.get("intent_counts"), Mapping)
+        else {},
+        "scheduler_state_snapshot": {key: dict(value) for key, value in snapshot.items()}
+        if snapshot
+        else {},
+        "readiness_state_counts": dict(state_counts),
+        "effective_state_counts": dict(payload.get("effective_scheduler_states", {}))
+        if isinstance(payload.get("effective_scheduler_states"), Mapping)
+        else {},
+        "blocked_reason_counts": dict(readiness["blocked"]),
+        "pending_surfaces": dict(payload.get("pending_surfaces", {}))
+        if isinstance(payload.get("pending_surfaces"), Mapping)
+        else {},
+        "blocked_surfaces": dict(payload.get("blocked_surfaces", {}))
+        if isinstance(payload.get("blocked_surfaces"), Mapping)
+        else {},
+        "pending": pending,
+        "total": int(payload.get("total", pending + leased) or 0),
+    }
+
+
 class PgStorage:
     """Store crawl results in Postgres."""
 
@@ -397,6 +464,80 @@ class PgStorage:
         except Exception:
             self._conn.rollback()
             raise
+
+    def get_runtime_stats_summary(self) -> dict:
+        """Get fast operator stats from the persisted runtime snapshot."""
+        try:
+            with self._conn.cursor() as cur:
+                cur.execute(
+                    """SELECT
+                         count(*) as total_pages,
+                         count(DISTINCT host) as hosts,
+                         min(crawled_at) as oldest,
+                         max(crawled_at) as newest,
+                         sum(content_length) as total_bytes
+                       FROM pages"""
+                )
+                page_stats_row = cur.fetchone()
+            self._finish_read()
+
+            runtime = self.get_runtime_stats("crawler")
+        except Exception:
+            self._conn.rollback()
+            raise
+
+        runtime_payload = _runtime_payload_dict(runtime)
+        scheduler_status = _runtime_scheduler_status_from_payload(runtime_payload)
+        readiness = _runtime_readiness_from_payload(runtime_payload)
+        effective_state_counts = dict(scheduler_status.get("effective_state_counts", {}))
+        active_error_breakdown = runtime_payload.get("errors")
+        if not isinstance(active_error_breakdown, Mapping):
+            active_error_breakdown = runtime_payload.get("failure_breakdown")
+        if not isinstance(active_error_breakdown, Mapping):
+            active_error_breakdown = {}
+
+        operator_summary = _build_operator_summary(
+            scheduler_status=scheduler_status,
+            readiness=readiness,
+            effective_state_counts=effective_state_counts,
+            runtime=runtime,
+            active_error_breakdown=active_error_breakdown,
+            host_budget_summary={},
+        )
+        scheduler_state_views = _scheduler_state_views(
+            scheduler_status=scheduler_status,
+            readiness=readiness,
+            effective_state_counts=effective_state_counts,
+        )
+
+        return {
+            "stats_source": "runtime_snapshot",
+            "diagnostics_endpoint": "/stats/diagnostics",
+            "total_pages": page_stats_row[0],
+            "hosts": page_stats_row[1],
+            "oldest_crawl": page_stats_row[2],
+            "newest_crawl": page_stats_row[3],
+            "total_bytes": page_stats_row[4],
+            "scheduler_status": scheduler_status,
+            "scheduler_state_snapshot": dict(scheduler_state_views["scheduler_state_snapshot"]),
+            "intent_counts": dict(scheduler_status.get("intent_counts", {})),
+            "durable_state_counts": dict(scheduler_state_views["durable_state_counts"]),
+            "readiness_state_counts": dict(scheduler_state_views["readiness_state_counts"]),
+            "effective_state_counts": dict(scheduler_state_views["effective_state_counts"]),
+            "blocked_reason_counts": dict(scheduler_state_views["blocked_reason_counts"]),
+            "pending_surfaces": dict(scheduler_status.get("pending_surfaces", {})),
+            "blocked_surfaces": dict(scheduler_status.get("blocked_surfaces", {})),
+            "readiness": readiness,
+            "top_page_hosts": [],
+            "top_pending_hosts": [],
+            "top_blocked_hosts": [],
+            "top_slow_hosts": [],
+            "top_budget_hosts": [],
+            "active_error_breakdown": dict(active_error_breakdown),
+            "top_error_hosts": [],
+            "runtime": runtime,
+            "operator_summary": operator_summary,
+        }
 
     def get_stats(self) -> dict:
         """Get crawl statistics."""

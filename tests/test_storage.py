@@ -473,6 +473,102 @@ def test_get_stats_includes_runtime_snapshot(pg_storage):
     }
 
 
+def test_get_runtime_stats_summary_uses_persisted_snapshot(pg_storage):
+    pg_storage.save(
+        {
+            "url": "https://example.com/page1",
+            "status": 200,
+            "content_length": 100,
+            "timestamp": 1710000000.0,
+            "content": "<html><title>Example</title></html>",
+            "outlinks": [],
+        }
+    )
+    pg_storage.upsert_runtime_stats(
+        "crawler",
+        {
+            "running": True,
+            "pending": 20,
+            "runnable": 12,
+            "active_hosts": 4,
+            "pages_per_second": 3.5,
+            "errors": {"timeout": 2},
+            "scheduler_state_snapshot": {
+                "durable_state_counts": {
+                    "discovered": 1,
+                    "scheduled": 20,
+                    "leased": 0,
+                    "blocked": 0,
+                    "terminal": 10,
+                },
+                "readiness_state_counts": {
+                    "runnable": 12,
+                    "scheduled": 8,
+                    "blocked_host_next_request": 0,
+                    "blocked_host_backoff": 0,
+                    "retry_quarantine": 0,
+                },
+                "effective_state_counts": {
+                    "discovered": 1,
+                    "scheduled": 8,
+                    "runnable": 12,
+                    "blocked": 0,
+                    "leased": 0,
+                    "terminal": 10,
+                },
+                "blocked_reason_counts": {
+                    "next_fetch_at": 8,
+                    "host_next_request": 0,
+                    "host_backoff": 0,
+                    "retry_quarantine": 0,
+                },
+            },
+            "readiness_state_counts": {
+                "runnable": 12,
+                "scheduled": 8,
+                "blocked_host_next_request": 0,
+                "blocked_host_backoff": 0,
+                "retry_quarantine": 0,
+            },
+            "blocked_reason_counts": {
+                "next_fetch_at": 8,
+                "host_next_request": 0,
+                "host_backoff": 0,
+                "retry_quarantine": 0,
+            },
+        },
+    )
+
+    stats = pg_storage.get_runtime_stats_summary()
+
+    assert stats["stats_source"] == "runtime_snapshot"
+    assert stats["diagnostics_endpoint"] == "/stats/diagnostics"
+    assert stats["total_pages"] == 1
+    assert stats["readiness"]["pending"] == 20
+    assert stats["readiness"]["runnable"] == 12
+    assert stats["readiness_state_counts"]["scheduled"] == 8
+    assert stats["durable_state_counts"]["scheduled"] == 20
+    assert stats["active_error_breakdown"] == {"timeout": 2}
+    assert stats["top_pending_hosts"] == []
+    assert stats["operator_summary"]["throughput"]["pages_per_second"] == 3.5
+
+
+def test_get_runtime_stats_summary_handles_missing_runtime_snapshot(pg_storage):
+    stats = pg_storage.get_runtime_stats_summary()
+
+    assert stats["stats_source"] == "runtime_snapshot"
+    assert stats["runtime"] == {}
+    assert stats["readiness"] == {
+        "pending": 0,
+        "runnable": 0,
+        "runnable_hosts": 0,
+        "next_runnable_delay": None,
+        "blocked": {},
+        "state_counts": {},
+    }
+    assert stats["operator_summary"]["scheduler_readiness_states"]["pending"] == 0
+
+
 def test_get_stats_includes_readiness_breakdown(pg_storage):
     now = time.time()
 
@@ -952,4 +1048,7 @@ def test_read_methods_leave_connection_idle(pg_storage):
     assert pg_storage._conn.info.transaction_status == TRANSACTION_STATUS_IDLE
 
     pg_storage.get_stats()
+    assert pg_storage._conn.info.transaction_status == TRANSACTION_STATUS_IDLE
+
+    pg_storage.get_runtime_stats_summary()
     assert pg_storage._conn.info.transaction_status == TRANSACTION_STATUS_IDLE
