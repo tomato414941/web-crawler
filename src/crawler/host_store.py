@@ -5,11 +5,11 @@ from __future__ import annotations
 import logging
 import time
 
-from .domain_state import PersistedDomainState
+from .host_state import PersistedHostState
 from .schema import assert_public_table_columns
 
 logger = logging.getLogger(__name__)
-DOMAIN_STATE_REQUIRED_COLUMNS = {
+HOST_STATE_REQUIRED_COLUMNS = {
     "host_key",
     "crawl_delay_seconds",
     "next_request_at",
@@ -23,16 +23,16 @@ DOMAIN_STATE_REQUIRED_COLUMNS = {
 _LATENCY_EWMA_ALPHA = 0.2
 
 
-class DomainStore:
+class HostStore:
     """Postgres-backed storage for host scheduling state."""
 
     def __init__(self, conn, default_delay: float = 1.0):
         self._conn = conn
         self._default_delay = default_delay
-        assert_public_table_columns(self._conn, "domain_state", DOMAIN_STATE_REQUIRED_COLUMNS)
+        assert_public_table_columns(self._conn, "host_state", HOST_STATE_REQUIRED_COLUMNS)
 
-    def _row_to_state(self, row: tuple) -> PersistedDomainState:
-        return PersistedDomainState(
+    def _row_to_state(self, row: tuple) -> PersistedHostState:
+        return PersistedHostState(
             host_key=row[0],
             crawl_delay_seconds=row[1],
             next_request_at=row[2],
@@ -43,12 +43,12 @@ class DomainStore:
             updated_at=row[7],
         )
 
-    def get_or_create(self, host_key: str) -> PersistedDomainState:
+    def get_or_create(self, host_key: str) -> PersistedHostState:
         """Return the persistent state for a host key, creating it if needed."""
         now = time.time()
         with self._conn.cursor() as cur:
             cur.execute(
-                """INSERT INTO domain_state (host_key, crawl_delay_seconds, updated_at)
+                """INSERT INTO host_state (host_key, crawl_delay_seconds, updated_at)
                    VALUES (%s, %s, %s)
                    ON CONFLICT (host_key) DO NOTHING""",
                 (host_key, self._default_delay, now),
@@ -63,7 +63,7 @@ class DomainStore:
                        latency_ewma_ms,
                        robots_checked_at,
                        updated_at
-                   FROM domain_state
+                   FROM host_state
                    WHERE host_key = %s""",
                 (host_key,),
             )
@@ -77,12 +77,12 @@ class DomainStore:
         *,
         crawl_delay_seconds: float,
         checked_at: float | None = None,
-    ) -> PersistedDomainState:
+    ) -> PersistedHostState:
         """Persist the latest robots check time and crawl delay."""
         checked_at = time.time() if checked_at is None else checked_at
         with self._conn.cursor() as cur:
             cur.execute(
-                """INSERT INTO domain_state (
+                """INSERT INTO host_state (
                        host_key,
                        crawl_delay_seconds,
                        robots_checked_at,
@@ -114,12 +114,12 @@ class DomainStore:
         *,
         crawl_delay_seconds: float,
         now: float | None = None,
-    ) -> tuple[float, PersistedDomainState]:
+    ) -> tuple[float, PersistedHostState]:
         """Reserve the next request slot and return the required wait time."""
         now = time.time() if now is None else now
         with self._conn.cursor() as cur:
             cur.execute(
-                """INSERT INTO domain_state (host_key, crawl_delay_seconds, updated_at)
+                """INSERT INTO host_state (host_key, crawl_delay_seconds, updated_at)
                    VALUES (%s, %s, %s)
                    ON CONFLICT (host_key) DO NOTHING""",
                 (host_key, crawl_delay_seconds, now),
@@ -132,7 +132,7 @@ class DomainStore:
                        consecutive_failures,
                        latency_ewma_ms,
                        robots_checked_at
-                   FROM domain_state
+                   FROM host_state
                    WHERE host_key = %s
                    FOR UPDATE""",
                 (host_key,),
@@ -142,7 +142,7 @@ class DomainStore:
             wait_seconds = max(0.0, ready_at - now)
             next_request_at = max(now, ready_at) + crawl_delay_seconds
             cur.execute(
-                """UPDATE domain_state
+                """UPDATE host_state
                    SET crawl_delay_seconds = %s,
                        next_request_at = %s,
                        updated_at = %s
@@ -168,18 +168,18 @@ class DomainStore:
         *,
         now: float | None = None,
         request_latency_ms: float | None = None,
-    ) -> PersistedDomainState:
+    ) -> PersistedHostState:
         """Reset failure-related state after a successful request."""
         now = time.time() if now is None else now
         with self._conn.cursor() as cur:
             cur.execute(
-                """INSERT INTO domain_state (host_key, crawl_delay_seconds, updated_at)
+                """INSERT INTO host_state (host_key, crawl_delay_seconds, updated_at)
                    VALUES (%s, %s, %s)
                    ON CONFLICT (host_key) DO NOTHING""",
                 (host_key, self._default_delay, now),
             )
             cur.execute(
-                """UPDATE domain_state
+                """UPDATE host_state
                    SET consecutive_failures = 0,
                        backoff_until = 0,
                        latency_ewma_ms = CASE
@@ -217,19 +217,19 @@ class DomainStore:
         *,
         backoff_seconds: float,
         now: float | None = None,
-    ) -> PersistedDomainState:
+    ) -> PersistedHostState:
         """Advance failure streak and cooldown after a failed request."""
         now = time.time() if now is None else now
         with self._conn.cursor() as cur:
             cur.execute(
-                """INSERT INTO domain_state (host_key, crawl_delay_seconds, updated_at)
+                """INSERT INTO host_state (host_key, crawl_delay_seconds, updated_at)
                    VALUES (%s, %s, %s)
                    ON CONFLICT (host_key) DO NOTHING""",
                 (host_key, self._default_delay, now),
             )
             cur.execute(
                 """SELECT backoff_until, consecutive_failures
-                   FROM domain_state
+                   FROM host_state
                    WHERE host_key = %s
                    FOR UPDATE""",
                 (host_key,),
@@ -237,7 +237,7 @@ class DomainStore:
             backoff_until, consecutive_failures = cur.fetchone()
             next_backoff_until = max(backoff_until, now + max(backoff_seconds, 0.0))
             cur.execute(
-                """UPDATE domain_state
+                """UPDATE host_state
                    SET consecutive_failures = %s,
                        backoff_until = %s,
                        updated_at = %s

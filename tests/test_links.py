@@ -78,10 +78,10 @@ class TestExtractLinksFromHtml:
 
     def test_extracts_multiple_links(self):
         """Should extract multiple links."""
-        html = '''
+        html = """
         <a href="/page1">Link 1</a>
         <a href="/page2">Link 2</a>
-        '''
+        """
         links = extract_links_from_html(html, "http://example.com")
         assert len(links) == 2
 
@@ -94,18 +94,18 @@ class TestExtractLinksFromHtml:
 
     def test_handles_unquoted_href(self):
         """Should handle unquoted href attributes."""
-        html = '<a href=/page>Text</a>'
+        html = "<a href=/page>Text</a>"
         links = extract_links_from_html(html, "http://example.com")
         assert len(links) == 1
         assert links[0].url == "http://example.com/page"
 
     def test_only_http_https_urls(self):
         """Should only return http/https URLs."""
-        html = '''
+        html = """
         <a href="http://example.com">HTTP</a>
         <a href="https://example.com">HTTPS</a>
         <a href="ftp://example.com">FTP</a>
-        '''
+        """
         links = extract_links_from_html(html, "http://example.com")
         urls = [link.url for link in links]
         assert "http://example.com/" in urls

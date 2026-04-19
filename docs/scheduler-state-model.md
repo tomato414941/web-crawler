@@ -29,7 +29,7 @@ The URL ledger answers: do we know this URL, and what is the latest durable fact
 Fields that belong here:
 
 - normalized URL
-- domain / host key
+- host key
 - discovery metadata
 - first seen timestamp
 - last success timestamp
@@ -90,9 +90,9 @@ These values are useful, but they are not primary state.
 - `runnable` (in readiness / operator views)
 - `pending_total`
 - `blocked_host_backoff`
-- `blocked_domain_next_request`
+- `blocked_host_next_request`
 - `pages_per_second`
-- top pending / blocked domain tables
+- top pending / blocked host tables
 
 The operator-facing `runnable` view is derived from:
 
@@ -154,7 +154,7 @@ Current concepts should converge toward this meaning:
 - `exploration` => frontline runnable surface
 - `backlog` => deferred scheduled surface
 - `active_leases` => lease state
-- blocked-domain-backoff queue => quarantine pool
+- blocked-host-backoff queue => quarantine pool
 - host scheduler tables => host state
 
 This is a convergence target, not a claim about current implementation quality.

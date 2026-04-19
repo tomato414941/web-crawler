@@ -3,7 +3,7 @@
 ## What This Project Is
 A broad-WWW async web crawler service. Crawls autonomously, stores results in PostgreSQL, and serves them via REST API. Designed to be consumed by other services (e.g., search engines) but has no knowledge of its consumers.
 
-The target is the public web as a whole, not any specific topic, standards body, or ecosystem. If existing seeds, pending queues, or stored pages are biased toward one domain community, treat that as an implementation artifact to correct rather than as the intended product scope.
+The target is the public web as a whole, not any specific topic, standards body, or ecosystem. If existing seeds, pending queues, or stored pages are biased toward one topic community, treat that as an implementation artifact to correct rather than as the intended product scope.
 
 ## Project Structure
 Single Python package with CLI entry point:
@@ -12,9 +12,9 @@ Single Python package with CLI entry point:
   - `api.py` — FastAPI REST server
   - `crawl.py` — crawler engine (worker pool, link extraction)
   - `url_ledger.py` — scheduler facade and durable URL state
-  - `domain_manager.py` — robots.txt and runtime host scheduling state
-  - `domain_store.py` — durable host scheduling state in Postgres
-  - `domain_state.py` — runtime / persisted host state models
+  - `host_manager.py` — robots.txt and runtime host scheduling state
+  - `host_store.py` — durable host scheduling state in Postgres
+  - `host_state.py` — runtime / persisted host state models
   - `storage.py` — PostgreSQL storage
   - `output.py` — JSONL streaming output
   - `result.py` — typed result models
@@ -65,7 +65,7 @@ docker compose up -d
 - Treat broad WWW crawling as the highest-level product constraint
 - Do not infer product scope from the current corpus, pending queue, or existing seed list
 - Prefer host diversity over same-host branch coverage when choosing bootstrap seeds
-- If a design choice improves one domain ecosystem at the expense of broad-web coverage, reject it unless explicitly requested
+- If a design choice improves one topic ecosystem at the expense of broad-web coverage, reject it unless explicitly requested
 
 ## Key Design Decisions
 - **Frontier uses Postgres** — Postgres stores URL state, lease timing, and retry metadata

@@ -19,7 +19,7 @@ from .schema import assert_public_table_columns
 from .urls import normalize_url, url_branch_key
 
 if TYPE_CHECKING:
-    from .domain_store import DomainStore
+    from .host_store import HostStore
 
 logger = logging.getLogger(__name__)
 
@@ -47,7 +47,7 @@ LATENCY_BUCKET_SLOW_MS = 400.0
 LATENCY_BUCKET_VERY_SLOW_MS = 1000.0
 URL_LEDGER_REQUIRED_COLUMNS = {
     "url",
-    "domain",
+    "host",
     "priority",
     "source_url",
     "added_at",
@@ -70,7 +70,7 @@ PHYSICAL_QUEUE_TABLES = {
     QUEUE_RECRAWL: "scheduler_queue_refresh",
 }
 QUEUE_TABLES = tuple(PHYSICAL_QUEUE_TABLES.values())
-BLOCKED_DOMAIN_BACKOFF_TABLE = "scheduler_queue_retry_quarantine"
+BLOCKED_HOST_BACKOFF_TABLE = "scheduler_queue_retry_quarantine"
 PHYSICAL_QUEUE_ORDER = (
     QUEUE_EXPLORATION,
     QUEUE_BACKLOG,
@@ -78,7 +78,7 @@ PHYSICAL_QUEUE_ORDER = (
 )
 QUEUE_REQUIRED_COLUMNS = {
     "url",
-    "domain",
+    "host",
     "priority",
     "next_fetch_at",
     "added_at",
@@ -87,14 +87,14 @@ QUEUE_REQUIRED_COLUMNS = {
 LEASE_TABLE = "active_leases"
 LEASE_REQUIRED_COLUMNS = {
     "url",
-    "domain",
+    "host",
     "physical_queue",
     "lease_token",
     "lease_expires_at",
 }
 BLOCKED_QUEUE_REQUIRED_COLUMNS = {
     "url",
-    "domain",
+    "host",
     "physical_queue",
     "priority",
     "next_fetch_at",
@@ -133,6 +133,7 @@ INTENT_DEFAULT_RUNNABLE_SURFACE = {
     INTENT_RETRY: RUNNABLE_SURFACE_DEFERRED,
 }
 HOST_HEAD_LOOKAHEAD = 32
+
 
 @dataclass(init=False)
 class CrawlTask:
@@ -212,22 +213,26 @@ class UrlLedger:
         max_retry_backoff_seconds: float | None = None,
     ):
         self._conn = conn
-        self._lease_seconds = settings.scheduler_lease_seconds if lease_seconds is None else lease_seconds
+        self._lease_seconds = (
+            settings.scheduler_lease_seconds if lease_seconds is None else lease_seconds
+        )
         self._retry_backoff_seconds = (
             settings.scheduler_retry_backoff_seconds
-            if retry_backoff_seconds is None else retry_backoff_seconds
+            if retry_backoff_seconds is None
+            else retry_backoff_seconds
         )
         self._max_retry_backoff_seconds = (
             settings.scheduler_max_retry_backoff_seconds
-            if max_retry_backoff_seconds is None else max_retry_backoff_seconds
+            if max_retry_backoff_seconds is None
+            else max_retry_backoff_seconds
         )
-        self._domain_store: DomainStore | None = None
+        self._host_store: HostStore | None = None
         self._observability = SchedulerObservability(
             conn,
             physical_queue_tables=PHYSICAL_QUEUE_TABLES,
             physical_queue_order=PHYSICAL_QUEUE_ORDER,
             physical_queue_default_runnable_surface=PHYSICAL_QUEUE_DEFAULT_RUNNABLE_SURFACE,
-            blocked_queue_table=BLOCKED_DOMAIN_BACKOFF_TABLE,
+            blocked_queue_table=BLOCKED_HOST_BACKOFF_TABLE,
             lease_table=LEASE_TABLE,
         )
         self._quarantine = SchedulerQuarantine(
@@ -235,17 +240,17 @@ class UrlLedger:
             queue_frontline=self._single_physical_queue_for_surface(RUNNABLE_SURFACE_FRONTLINE),
             queue_deferred=self._single_physical_queue_for_surface(RUNNABLE_SURFACE_DEFERRED),
             queue_refresh=self._single_physical_queue_for_surface(RUNNABLE_SURFACE_REFRESH),
-            blocked_queue_table=BLOCKED_DOMAIN_BACKOFF_TABLE,
+            blocked_queue_table=BLOCKED_HOST_BACKOFF_TABLE,
             queue_table_sql=self._queue_table_sql,
             delete_queue_entries=self._delete_queue_entries,
-            insert_blocked_rows=self._insert_blocked_domain_backoff_rows,
+            insert_blocked_rows=self._insert_blocked_host_backoff_rows,
             insert_pending_rows=self._insert_pending_queue_rows,
         )
         self._assert_current_schema()
 
-    def attach_domain_store(self, domain_store: "DomainStore | None") -> None:
+    def attach_host_store(self, host_store: "HostStore | None") -> None:
         """Attach the persistent host scheduler used for lease selection."""
-        self._domain_store = domain_store
+        self._host_store = host_store
 
     def _compute_retry_backoff(self, fail_streak: int) -> float:
         """Compute exponential retry backoff for a failed URL."""
@@ -259,7 +264,7 @@ class UrlLedger:
         """Lower retry priority so repeatedly failing URLs do not dominate the queue."""
         if fail_streak <= 0:
             return priority
-        return max(MIN_RETRY_PRIORITY, round(priority * (RETRY_PRIORITY_DECAY ** fail_streak), 2))
+        return max(MIN_RETRY_PRIORITY, round(priority * (RETRY_PRIORITY_DECAY**fail_streak), 2))
 
     def _lease_match_sql(self, table_alias: str, lease_token: str | None) -> tuple[str, tuple]:
         """Build an optional lease-table predicate for completion updates."""
@@ -292,8 +297,14 @@ class UrlLedger:
     def _normalized_physical_queues(self, physical_queues: list[str] | None) -> list[str]:
         """Return physical queues in stable scheduler order."""
         if physical_queues:
-            allowed = {self._normalize_physical_queue(physical_queue) for physical_queue in physical_queues}
-            return [physical_queue for physical_queue in self._physical_queues() if physical_queue in allowed]
+            allowed = {
+                self._normalize_physical_queue(physical_queue) for physical_queue in physical_queues
+            }
+            return [
+                physical_queue
+                for physical_queue in self._physical_queues()
+                if physical_queue in allowed
+            ]
         return self._physical_queues()
 
     def _normalized_surface_queues(
@@ -320,7 +331,9 @@ class UrlLedger:
             physical_queues=None,
         )
         if len(physical_queues) != 1:
-            raise ValueError(f"Runnable surface must resolve to one physical queue: {runnable_surface}")
+            raise ValueError(
+                f"Runnable surface must resolve to one physical queue: {runnable_surface}"
+            )
         return physical_queues[0]
 
     def _pending_rows_for_physical_queue(
@@ -330,8 +343,8 @@ class UrlLedger:
     ) -> list[tuple[str, str, float, float, float, str]]:
         """Project ledger rows into one pending physical queue."""
         return [
-            (url, domain, priority, next_fetch_at, added_at, physical_queue)
-            for url, domain, priority, next_fetch_at, added_at in rows
+            (url, host, priority, next_fetch_at, added_at, physical_queue)
+            for url, host, priority, next_fetch_at, added_at in rows
         ]
 
     def _normalize_intent(self, intent: str | None) -> str | None:
@@ -343,7 +356,9 @@ class UrlLedger:
             raise ValueError(f"Unknown intent: {intent}")
         return normalized
 
-    def _default_runnable_surface_for_physical_queue(self, physical_queue: str | None) -> str | None:
+    def _default_runnable_surface_for_physical_queue(
+        self, physical_queue: str | None
+    ) -> str | None:
         """Map one physical queue back to its conceptual runnable surface."""
         if physical_queue is None:
             return None
@@ -377,7 +392,9 @@ class UrlLedger:
             physical_queues=None,
         )
         if len(physical_queues) != 1:
-            raise ValueError(f"Admission surface must resolve to one physical queue: {resolved_surface}")
+            raise ValueError(
+                f"Admission surface must resolve to one physical queue: {resolved_surface}"
+            )
         return physical_queues[0]
 
     def _queue_runnable_sql(
@@ -385,8 +402,8 @@ class UrlLedger:
         *,
         alias: str,
         now: float,
-        domain: str | None = None,
-        exclude_domains: list[str] | None = None,
+        host: str | None = None,
+        exclude_hosts: list[str] | None = None,
     ) -> _RunnableSql:
         """Build readiness SQL fragments for physical pending queue tables."""
         next_request_sql = "0"
@@ -395,37 +412,37 @@ class UrlLedger:
         conditions = [f"{alias}.next_fetch_at <= %s"]
         params: list[object] = [now]
 
-        if self._domain_store is not None:
+        if self._host_store is not None:
             next_request_sql = (
                 "COALESCE(("
                 "SELECT ds.next_request_at "
-                "FROM domain_state AS ds "
-                f"WHERE ds.host_key = {alias}.domain"
+                "FROM host_state AS ds "
+                f"WHERE ds.host_key = {alias}.host"
                 "), 0)"
             )
             backoff_sql = (
                 "COALESCE(("
                 "SELECT ds.backoff_until "
-                "FROM domain_state AS ds "
-                f"WHERE ds.host_key = {alias}.domain"
+                "FROM host_state AS ds "
+                f"WHERE ds.host_key = {alias}.host"
                 "), 0)"
             )
             conditions.append(
                 "NOT EXISTS ("
-                "SELECT 1 FROM domain_state AS gated "
-                f"WHERE gated.host_key = {alias}.domain "
+                "SELECT 1 FROM host_state AS gated "
+                f"WHERE gated.host_key = {alias}.host "
                 "AND (gated.next_request_at > %s OR gated.backoff_until > %s)"
                 ")"
             )
             params.extend([now, now])
 
-        if domain:
-            conditions.append(f"{alias}.domain = %s")
-            params.append(domain)
+        if host:
+            conditions.append(f"{alias}.host = %s")
+            params.append(host)
 
-        if exclude_domains:
-            conditions.append(f"NOT ({alias}.domain = ANY(%s))")
-            params.append(exclude_domains)
+        if exclude_hosts:
+            conditions.append(f"NOT ({alias}.host = ANY(%s))")
+            params.append(exclude_hosts)
 
         return _RunnableSql(
             where=" AND ".join(conditions),
@@ -447,10 +464,10 @@ class UrlLedger:
                 f"""WITH recovered AS (
                         DELETE FROM {LEASE_TABLE}
                         WHERE {where}
-                        RETURNING url, domain, physical_queue
+                        RETURNING url, host, physical_queue
                     )
                     SELECT ledger.url,
-                           ledger.domain,
+                           ledger.host,
                            ledger.priority,
                            ledger.next_fetch_at,
                            ledger.added_at,
@@ -472,14 +489,14 @@ class UrlLedger:
                 if cur.fetchone()[0] is None:
                     raise RuntimeError(f"missing scheduler queue table: {table_name}")
                 assert_public_table_columns(self._conn, table_name, QUEUE_REQUIRED_COLUMNS)
-            cur.execute("SELECT to_regclass(%s)", (f"public.{BLOCKED_DOMAIN_BACKOFF_TABLE}",))
+            cur.execute("SELECT to_regclass(%s)", (f"public.{BLOCKED_HOST_BACKOFF_TABLE}",))
             if cur.fetchone()[0] is None:
                 raise RuntimeError(
-                    f"missing scheduler blocked queue table: {BLOCKED_DOMAIN_BACKOFF_TABLE}"
+                    f"missing scheduler blocked queue table: {BLOCKED_HOST_BACKOFF_TABLE}"
                 )
             assert_public_table_columns(
                 self._conn,
-                BLOCKED_DOMAIN_BACKOFF_TABLE,
+                BLOCKED_HOST_BACKOFF_TABLE,
                 BLOCKED_QUEUE_REQUIRED_COLUMNS,
             )
             cur.execute("SELECT to_regclass(%s)", (f"public.{LEASE_TABLE}",))
@@ -524,7 +541,10 @@ class UrlLedger:
         """Prefer the more urgent runnable surface when duplicate URLs merge."""
         current_surface = self._task_runnable_surface(current)
         candidate_surface = self._task_runnable_surface(candidate)
-        if RUNNABLE_SURFACE_PRIORITY[current_surface] <= RUNNABLE_SURFACE_PRIORITY[candidate_surface]:
+        if (
+            RUNNABLE_SURFACE_PRIORITY[current_surface]
+            <= RUNNABLE_SURFACE_PRIORITY[candidate_surface]
+        ):
             return current_surface
         return candidate_surface
 
@@ -546,13 +566,14 @@ class UrlLedger:
             next_fetch_at=min(current.next_fetch_at, candidate.next_fetch_at),
         )
 
-    def _normalize_task_metadata(self, task: CrawlTask, *, normalized_url: str | None = None) -> CrawlTask:
+    def _normalize_task_metadata(
+        self, task: CrawlTask, *, normalized_url: str | None = None
+    ) -> CrawlTask:
         """Project one task into the surface-and-intent model."""
         resolved_surface = self._task_runnable_surface(task)
-        resolved_intent = (
-            self._normalize_intent(task.intent)
-            or RUNNABLE_SURFACE_DEFAULT_INTENT.get(resolved_surface)
-        )
+        resolved_intent = self._normalize_intent(
+            task.intent
+        ) or RUNNABLE_SURFACE_DEFAULT_INTENT.get(resolved_surface)
         return CrawlTask(
             url=normalized_url or task.url,
             priority=task.priority,
@@ -649,7 +670,7 @@ class UrlLedger:
         """Return a small host-latency bucket used as a lease tiebreaker."""
         latency_ms = (
             "COALESCE((SELECT ds.latency_ewma_ms "
-            f"FROM domain_state AS ds WHERE ds.host_key = {alias}.domain), 0)"
+            f"FROM host_state AS ds WHERE ds.host_key = {alias}.host), 0)"
         )
         return (
             "CASE "
@@ -679,7 +700,7 @@ class UrlLedger:
         """Return SQL that derives one ready head URL per host."""
         table_name = self._queue_table_sql(physical_queue)
         host_head_order = self._host_head_order_by_sql("candidate")
-        sql = f"""SELECT selected.domain,
+        sql = f"""SELECT selected.host,
                          selected.url,
                          selected.next_fetch_at,
                          selected.added_at,
@@ -687,17 +708,17 @@ class UrlLedger:
                          selected.latency_penalty,
                          selected.host_pending_count
                   FROM (
-                      SELECT DISTINCT ON (candidate.domain)
-                          candidate.domain,
+                      SELECT DISTINCT ON (candidate.host)
+                          candidate.host,
                           candidate.url,
                           candidate.next_fetch_at,
                           candidate.added_at,
                           candidate.priority,
                           {self._latency_penalty_sql("candidate")} AS latency_penalty,
-                          COUNT(*) OVER (PARTITION BY candidate.domain) AS host_pending_count
+                          COUNT(*) OVER (PARTITION BY candidate.host) AS host_pending_count
                       FROM {table_name} AS candidate
                       WHERE {runnable_sql.where}
-                      ORDER BY candidate.domain, {host_head_order}
+                      ORDER BY candidate.host, {host_head_order}
                   ) AS selected
                   ORDER BY
                       selected.host_pending_count ASC,
@@ -708,7 +729,9 @@ class UrlLedger:
                       selected.url ASC"""
         return sql, runnable_sql.params
 
-    def _runnable_host_head_sort_key(self, head: RunnableHostHead) -> tuple[int, int, float, float, float, str]:
+    def _runnable_host_head_sort_key(
+        self, head: RunnableHostHead
+    ) -> tuple[int, int, float, float, float, str]:
         """Return the canonical host-first comparison key for runnable host heads."""
         return (
             head.host_pending_count,
@@ -723,8 +746,8 @@ class UrlLedger:
         self,
         *,
         limit: int = HOST_HEAD_LOOKAHEAD,
-        domain: str | None = None,
-        exclude_domains: list[str] | None = None,
+        host: str | None = None,
+        exclude_hosts: list[str] | None = None,
         runnable_surface: str | None = None,
         physical_queues: list[str] | None = None,
         now: float | None = None,
@@ -745,8 +768,8 @@ class UrlLedger:
                 runnable_sql = self._queue_runnable_sql(
                     alias="candidate",
                     now=runnable_at,
-                    domain=domain,
-                    exclude_domains=exclude_domains,
+                    host=host,
+                    exclude_hosts=exclude_hosts,
                 )
                 sql, params = self._runnable_host_heads_sql(
                     physical_queue=physical_queue,
@@ -780,8 +803,8 @@ class UrlLedger:
     def select_runnable_host_head(
         self,
         *,
-        domain: str | None = None,
-        exclude_domains: list[str] | None = None,
+        host: str | None = None,
+        exclude_hosts: list[str] | None = None,
         runnable_surface: str | None = None,
         physical_queues: list[str] | None = None,
         now: float | None = None,
@@ -789,8 +812,8 @@ class UrlLedger:
         """Return the next host-level runnable head for host-first leasing."""
         heads = self.runnable_host_heads(
             limit=HOST_HEAD_LOOKAHEAD,
-            domain=domain,
-            exclude_domains=exclude_domains,
+            host=host,
+            exclude_hosts=exclude_hosts,
             runnable_surface=runnable_surface,
             physical_queues=physical_queues,
             now=now,
@@ -809,7 +832,7 @@ class UrlLedger:
             return
         for table_name in QUEUE_TABLES:
             cur.execute(f"DELETE FROM {table_name} WHERE url = ANY(%s)", (urls,))
-        cur.execute(f"DELETE FROM {BLOCKED_DOMAIN_BACKOFF_TABLE} WHERE url = ANY(%s)", (urls,))
+        cur.execute(f"DELETE FROM {BLOCKED_HOST_BACKOFF_TABLE} WHERE url = ANY(%s)", (urls,))
 
     def _insert_pending_queue_rows(
         self,
@@ -820,10 +843,17 @@ class UrlLedger:
         grouped: dict[str, list[tuple[str, str, float, float, float, str]]] = {
             physical_queue: [] for physical_queue in PHYSICAL_QUEUE_NAMES
         }
-        for url, domain, priority, next_fetch_at, added_at, physical_queue in rows:
+        for url, host, priority, next_fetch_at, added_at, physical_queue in rows:
             normalized_url = normalize_url(url)
             grouped[self._normalize_physical_queue(physical_queue)].append(
-                (normalized_url, domain, priority, next_fetch_at, added_at, url_branch_key(normalized_url))
+                (
+                    normalized_url,
+                    host,
+                    priority,
+                    next_fetch_at,
+                    added_at,
+                    url_branch_key(normalized_url),
+                )
             )
 
         for physical_queue, pending_rows in grouped.items():
@@ -832,10 +862,10 @@ class UrlLedger:
             psycopg2.extras.execute_values(
                 cur,
                 f"""INSERT INTO {self._queue_table_sql(physical_queue)}
-                        (url, domain, priority, next_fetch_at, added_at, branch_key)
+                        (url, host, priority, next_fetch_at, added_at, branch_key)
                     VALUES %s
                     ON CONFLICT (url) DO UPDATE
-                    SET domain = EXCLUDED.domain,
+                    SET host = EXCLUDED.host,
                         priority = EXCLUDED.priority,
                         next_fetch_at = EXCLUDED.next_fetch_at,
                         added_at = EXCLUDED.added_at,
@@ -843,19 +873,20 @@ class UrlLedger:
                 pending_rows,
                 page_size=200,
             )
-    def _insert_blocked_domain_backoff_rows(
+
+    def _insert_blocked_host_backoff_rows(
         self,
         cur,
         rows: list[tuple[str, str, float, float, float, str]],
         *,
         quarantined_at: float | None = None,
     ) -> None:
-        """Insert URLs into the blocked-domain-backoff physical queue."""
+        """Insert URLs into the blocked-host-backoff physical queue."""
         now = time.time() if quarantined_at is None else quarantined_at
         blocked_rows = [
             (
                 normalize_url(url),
-                domain,
+                host,
                 self._normalize_physical_queue(physical_queue),
                 priority,
                 next_fetch_at,
@@ -863,17 +894,17 @@ class UrlLedger:
                 now,
                 url_branch_key(normalize_url(url)),
             )
-            for url, domain, priority, next_fetch_at, added_at, physical_queue in rows
+            for url, host, priority, next_fetch_at, added_at, physical_queue in rows
         ]
         if not blocked_rows:
             return
         psycopg2.extras.execute_values(
             cur,
-            f"""INSERT INTO {BLOCKED_DOMAIN_BACKOFF_TABLE}
-                    (url, domain, physical_queue, priority, next_fetch_at, added_at, quarantined_at, branch_key)
+            f"""INSERT INTO {BLOCKED_HOST_BACKOFF_TABLE}
+                    (url, host, physical_queue, priority, next_fetch_at, added_at, quarantined_at, branch_key)
                 VALUES %s
                 ON CONFLICT (url) DO UPDATE
-                SET domain = EXCLUDED.domain,
+                SET host = EXCLUDED.host,
                     physical_queue = EXCLUDED.physical_queue,
                     priority = EXCLUDED.priority,
                     next_fetch_at = EXCLUDED.next_fetch_at,
@@ -883,6 +914,7 @@ class UrlLedger:
             blocked_rows,
             page_size=200,
         )
+
     def _delete_active_leases(self, cur, urls: list[str]) -> None:
         """Remove URLs from the physical active lease table."""
         if not urls:
@@ -902,25 +934,26 @@ class UrlLedger:
         psycopg2.extras.execute_values(
             cur,
             f"""INSERT INTO {LEASE_TABLE}
-                    (url, domain, physical_queue, lease_token, lease_expires_at)
+                    (url, host, physical_queue, lease_token, lease_expires_at)
                 VALUES %s
                 ON CONFLICT (url) DO UPDATE
-                SET domain = EXCLUDED.domain,
+                SET host = EXCLUDED.host,
                     physical_queue = EXCLUDED.physical_queue,
                     lease_token = EXCLUDED.lease_token,
                     lease_expires_at = EXCLUDED.lease_expires_at""",
             [
                 (
                     normalize_url(url),
-                    domain,
+                    host,
                     self._normalize_physical_queue(physical_queue),
                     lease_token,
                     lease_expires_at,
                 )
-                for url, domain, physical_queue, lease_token, lease_expires_at in rows
+                for url, host, physical_queue, lease_token, lease_expires_at in rows
             ],
             page_size=200,
         )
+
     def _replace_pending_queue_rows(
         self,
         cur,
@@ -967,16 +1000,23 @@ class UrlLedger:
             for url, task in ((task.url, task) for task in prepared_tasks)
         }
         cur.execute(
-            f"""SELECT url, domain, priority, next_fetch_at, added_at
+            f"""SELECT url, host, priority, next_fetch_at, added_at
                 FROM {URL_LEDGER_TABLE}
                 WHERE url = ANY(%s)""",
             (normalized_urls,),
         )
         pending_rows: list[tuple[str, str, float, float, float, str]] = []
-        for url, domain, priority, next_fetch_at, added_at in cur.fetchall():
+        for url, host, priority, next_fetch_at, added_at in cur.fetchall():
             physical_queue = physical_queue_by_url.get(url, self._default_deferred_physical_queue())
             pending_rows.append(
-                (url, domain, priority, next_fetch_at, added_at, self._normalize_physical_queue(physical_queue))
+                (
+                    url,
+                    host,
+                    priority,
+                    next_fetch_at,
+                    added_at,
+                    self._normalize_physical_queue(physical_queue),
+                )
             )
         return pending_rows
 
@@ -1013,7 +1053,7 @@ class UrlLedger:
                             terminal_reason = NULL,
                             terminalized_at = NULL
                         WHERE url = ANY(%s)
-                        RETURNING url, domain, priority, next_fetch_at, added_at""",
+                        RETURNING url, host, priority, next_fetch_at, added_at""",
                     (scheduled_at, normalized_intent, normalized_urls),
                 )
             else:
@@ -1024,13 +1064,13 @@ class UrlLedger:
                             terminal_reason = NULL,
                             terminalized_at = NULL
                         WHERE url = ANY(%s)
-                        RETURNING url, domain, priority, next_fetch_at, added_at""",
+                        RETURNING url, host, priority, next_fetch_at, added_at""",
                     (scheduled_at, normalized_intent, normalized_urls),
                 )
             rows = cur.fetchall()
             pending_rows = [
-                (url, domain, priority, next_fetch_at, added_at, normalized_physical_queue)
-                for url, domain, priority, next_fetch_at, added_at in rows
+                (url, host, priority, next_fetch_at, added_at, normalized_physical_queue)
+                for url, host, priority, next_fetch_at, added_at in rows
             ]
             self._replace_pending_queue_rows(cur, pending_rows)
             self._delete_active_leases(cur, [row[0] for row in pending_rows])
@@ -1063,12 +1103,12 @@ class UrlLedger:
         prepared_tasks = self._prepare_tasks(tasks)
         rows = []
         for task in prepared_tasks:
-            domain = urlparse(task.url).netloc
+            host = urlparse(task.url).netloc
             next_fetch_at = task.next_fetch_at or task.added_at or time.time()
             rows.append(
                 (
                     task.url,
-                    domain,
+                    host,
                     task.priority,
                     task.source_url,
                     task.added_at,
@@ -1081,8 +1121,8 @@ class UrlLedger:
             with self._conn.cursor() as cur:
                 psycopg2.extras.execute_values(
                     cur,
-                   f"""INSERT INTO {URL_LEDGER_TABLE} (
-                           url, domain, priority, source_url, added_at, next_fetch_at, current_intent
+                    f"""INSERT INTO {URL_LEDGER_TABLE} (
+                           url, host, priority, source_url, added_at, next_fetch_at, current_intent
                        )
                        VALUES %s
                        ON CONFLICT (url) DO UPDATE SET
@@ -1178,13 +1218,13 @@ class UrlLedger:
         queue_joins, queue_absence = self._queue_membership_join_sql(ledger_alias="ledger")
         cur.execute(
             f"""SELECT ledger.url,
-                       ledger.domain,
+                       ledger.host,
                        ledger.priority,
                        ledger.next_fetch_at,
                        ledger.added_at
                 FROM {URL_LEDGER_TABLE} AS ledger
                 {queue_joins}
-                LEFT JOIN {BLOCKED_DOMAIN_BACKOFF_TABLE} AS blocked
+                LEFT JOIN {BLOCKED_HOST_BACKOFF_TABLE} AS blocked
                     ON blocked.url = ledger.url
                 LEFT JOIN {LEASE_TABLE} AS lease
                     ON lease.url = ledger.url
@@ -1234,8 +1274,8 @@ class UrlLedger:
                         (resolved_intent, [row[0] for row in candidate_rows]),
                     )
                 pending_rows = [
-                    (url, domain, priority, next_fetch_at, added_at, normalized_physical_queue)
-                    for url, domain, priority, next_fetch_at, added_at in candidate_rows
+                    (url, host, priority, next_fetch_at, added_at, normalized_physical_queue)
+                    for url, host, priority, next_fetch_at, added_at in candidate_rows
                 ]
                 self._replace_pending_queue_rows(cur, pending_rows)
                 count = len(pending_rows)
@@ -1267,13 +1307,13 @@ class UrlLedger:
 
     def lease_next(
         self,
-        domain: str | None = None,
+        host: str | None = None,
         lease_seconds: float | None = None,
         lease_strategy: str | None = None,
-        exclude_domains: list[str] | None = None,
+        exclude_hosts: list[str] | None = None,
         runnable_surface: str | None = None,
     ) -> CrawlTask | None:
-        """Lease the next runnable URL, optionally filtered by domain."""
+        """Lease the next runnable URL, optionally filtered by host."""
         normalized_physical_queues = self._normalized_surface_queues(
             runnable_surface=runnable_surface,
             physical_queues=None,
@@ -1283,16 +1323,16 @@ class UrlLedger:
             for physical_queue in normalized_physical_queues:
                 if normalized_lease_strategy == LEASE_STRATEGY_HOST_FIRST:
                     task = self._lease_next_host_first(
-                        domain=domain,
+                        host=host,
                         lease_seconds=lease_seconds,
-                        exclude_domains=exclude_domains,
+                        exclude_hosts=exclude_hosts,
                         physical_queue=physical_queue,
                     )
                 else:
                     task = self._lease_next_url_order(
-                        domain=domain,
+                        host=host,
                         lease_seconds=lease_seconds,
-                        exclude_domains=exclude_domains,
+                        exclude_hosts=exclude_hosts,
                         physical_queue=physical_queue,
                     )
                 if task is not None:
@@ -1302,25 +1342,25 @@ class UrlLedger:
         physical_queue = normalized_physical_queues[0]
         if normalized_lease_strategy == LEASE_STRATEGY_HOST_FIRST:
             return self._lease_next_host_first(
-                domain=domain,
+                host=host,
                 lease_seconds=lease_seconds,
-                exclude_domains=exclude_domains,
+                exclude_hosts=exclude_hosts,
                 physical_queue=physical_queue,
             )
 
         return self._lease_next_url_order(
-            domain=domain,
+            host=host,
             lease_seconds=lease_seconds,
-            exclude_domains=exclude_domains,
+            exclude_hosts=exclude_hosts,
             physical_queue=physical_queue,
         )
 
     def _lease_next_host_first(
         self,
         *,
-        domain: str | None,
+        host: str | None,
         lease_seconds: float | None,
-        exclude_domains: list[str] | None,
+        exclude_hosts: list[str] | None,
         physical_queue: str,
     ) -> CrawlTask | None:
         """Lease from the next selected runnable host head."""
@@ -1332,8 +1372,8 @@ class UrlLedger:
             head.url
             for head in self.runnable_host_heads(
                 limit=HOST_HEAD_LOOKAHEAD,
-                domain=domain,
-                exclude_domains=exclude_domains,
+                host=host,
+                exclude_hosts=exclude_hosts,
                 physical_queues=[physical_queue],
                 now=now,
             )
@@ -1343,8 +1383,8 @@ class UrlLedger:
                 candidate_url=candidate_url,
                 physical_queue=physical_queue,
                 lease_seconds=lease_seconds,
-                domain=domain,
-                exclude_domains=exclude_domains,
+                host=host,
+                exclude_hosts=exclude_hosts,
                 now=now,
             )
             if task is not None:
@@ -1354,9 +1394,9 @@ class UrlLedger:
     def _lease_next_url_order(
         self,
         *,
-        domain: str | None,
+        host: str | None,
         lease_seconds: float | None,
-        exclude_domains: list[str] | None,
+        exclude_hosts: list[str] | None,
         physical_queue: str,
     ) -> CrawlTask | None:
         """Lease using URL-order selection from one physical queue."""
@@ -1364,8 +1404,8 @@ class UrlLedger:
         runnable_sql = self._queue_runnable_sql(
             alias="candidate",
             now=now,
-            domain=domain,
-            exclude_domains=exclude_domains,
+            host=host,
+            exclude_hosts=exclude_hosts,
         )
         candidate_from = f"FROM {self._queue_table_sql(physical_queue)} AS candidate"
         order_by = self._lease_order_by_sql("candidate", LEASE_STRATEGY_URL_ORDER)
@@ -1391,8 +1431,8 @@ class UrlLedger:
             candidate_url=row[0],
             physical_queue=physical_queue,
             lease_seconds=lease_seconds,
-            domain=domain,
-            exclude_domains=exclude_domains,
+            host=host,
+            exclude_hosts=exclude_hosts,
             now=now,
         )
 
@@ -1402,8 +1442,8 @@ class UrlLedger:
         candidate_url: str,
         physical_queue: str,
         lease_seconds: float | None,
-        domain: str | None,
-        exclude_domains: list[str] | None,
+        host: str | None,
+        exclude_hosts: list[str] | None,
         now: float,
     ) -> CrawlTask | None:
         """Lease one concrete candidate URL when it is still runnable and unlocked."""
@@ -1413,8 +1453,8 @@ class UrlLedger:
         runnable_sql = self._queue_runnable_sql(
             alias="candidate",
             now=now,
-            domain=domain,
-            exclude_domains=exclude_domains,
+            host=host,
+            exclude_hosts=exclude_hosts,
         )
         candidate_from = f"FROM {self._queue_table_sql(physical_queue)} AS candidate"
 
@@ -1427,7 +1467,7 @@ class UrlLedger:
                             ledger.source_url,
                             candidate.added_at,
                             candidate.next_fetch_at,
-                            candidate.domain
+                            candidate.host
                         {candidate_from}
                         JOIN {URL_LEDGER_TABLE} AS ledger ON ledger.url = candidate.url
                         WHERE candidate.url = %s
@@ -1451,7 +1491,7 @@ class UrlLedger:
         if row is None:
             return None
 
-        url, priority, source_url, added_at, next_fetch_at, _domain = row
+        url, priority, source_url, added_at, next_fetch_at, _host = row
         return CrawlTask(
             url=url,
             priority=priority,
@@ -1465,10 +1505,10 @@ class UrlLedger:
     def lease_batch(
         self,
         count: int = 10,
-        domain: str | None = None,
+        host: str | None = None,
         lease_seconds: float | None = None,
         lease_strategy: str | None = None,
-        exclude_domains: list[str] | None = None,
+        exclude_hosts: list[str] | None = None,
         runnable_surface: str | None = None,
     ) -> list[CrawlTask]:
         """Lease a batch of runnable URLs."""
@@ -1481,10 +1521,10 @@ class UrlLedger:
             tasks: list[CrawlTask] = []
             while len(tasks) < count:
                 task = self.lease_next(
-                    domain=domain,
+                    host=host,
                     lease_seconds=lease_seconds,
                     lease_strategy=normalized_lease_strategy,
-                    exclude_domains=exclude_domains,
+                    exclude_hosts=exclude_hosts,
                     runnable_surface=runnable_surface,
                 )
                 if task is None:
@@ -1496,10 +1536,10 @@ class UrlLedger:
             tasks: list[CrawlTask] = []
             while len(tasks) < count:
                 task = self.lease_next(
-                    domain=domain,
+                    host=host,
                     lease_seconds=lease_seconds,
                     lease_strategy=normalized_lease_strategy,
-                    exclude_domains=exclude_domains,
+                    exclude_hosts=exclude_hosts,
                     runnable_surface=runnable_surface,
                 )
                 if task is None:
@@ -1515,8 +1555,8 @@ class UrlLedger:
         runnable_sql = self._queue_runnable_sql(
             alias="candidate",
             now=now,
-            domain=domain,
-            exclude_domains=exclude_domains,
+            host=host,
+            exclude_hosts=exclude_hosts,
         )
         candidate_from = f"FROM {self._queue_table_sql(normalized_physical_queues[0])} AS candidate"
         if normalized_lease_strategy == LEASE_STRATEGY_HOST_FIRST:
@@ -1535,7 +1575,7 @@ class UrlLedger:
                             ledger.source_url,
                             candidate.added_at,
                             candidate.next_fetch_at,
-                            candidate.domain
+                            candidate.host
                         {candidate_from}
                         JOIN {URL_LEDGER_TABLE} AS ledger ON ledger.url = candidate.url
                         WHERE candidate.url IN (
@@ -1555,7 +1595,16 @@ class UrlLedger:
                     self._delete_queue_entries(cur, [row[0] for row in rows])
                     self._upsert_active_leases(
                         cur,
-                        [(row[0], row[5], normalized_physical_queues[0], lease_token, lease_expires_at) for row in rows],
+                        [
+                            (
+                                row[0],
+                                row[5],
+                                normalized_physical_queues[0],
+                                lease_token,
+                                lease_expires_at,
+                            )
+                            for row in rows
+                        ],
                     )
             self._conn.commit()
         except Exception:
@@ -1579,7 +1628,7 @@ class UrlLedger:
                 source_url,
                 added_at,
                 next_fetch_at,
-                _domain,
+                _host,
             ) in rows
         ]
 
@@ -1651,7 +1700,7 @@ class UrlLedger:
                             terminal_reason = NULL,
                             terminalized_at = NULL
                         WHERE url = %s{lease_sql}
-                        RETURNING url, domain, priority, next_fetch_at, added_at""",
+                        RETURNING url, host, priority, next_fetch_at, added_at""",
                     (
                         next_fetch_at,
                         INTENT_RETRY,
@@ -1712,7 +1761,7 @@ class UrlLedger:
                        terminal_reason = NULL,
                        terminalized_at = NULL
                    WHERE terminal_reason IS NOT NULL
-                   RETURNING url, domain, priority, next_fetch_at, added_at""",
+                   RETURNING url, host, priority, next_fetch_at, added_at""",
                 (now, INTENT_RETRY),
             )
             rows = cur.fetchall()
@@ -1726,11 +1775,11 @@ class UrlLedger:
         self._conn.commit()
         return count
 
-    def rebalance_blocked_domain_backoff(self, now: float | None = None) -> tuple[int, int]:
+    def rebalance_blocked_host_backoff(self, now: float | None = None) -> tuple[int, int]:
         """Move backoff-blocked URLs out of the normal scheduler queues."""
         return self._quarantine.rebalance(now=now)
 
-    def retire_blocked_domain_backoff(
+    def retire_blocked_host_backoff(
         self,
         *,
         min_consecutive_failures: int,
@@ -1746,28 +1795,28 @@ class UrlLedger:
             now=now,
         )
 
-    def restore_recovered_blocked_domain_backoff(
+    def restore_recovered_blocked_host_backoff(
         self,
         *,
         limit: int,
-        per_domain: int,
+        per_host: int,
         now: float | None = None,
     ) -> int:
-        """Restore blocked URLs whose domains have already recovered."""
-        return self._quarantine.restore_recovered(limit=limit, per_domain=per_domain, now=now)
+        """Restore blocked URLs whose hosts have already recovered."""
+        return self._quarantine.restore_recovered(limit=limit, per_host=per_host, now=now)
 
-    def promote_blocked_domain_backoff(
+    def promote_blocked_host_backoff(
         self,
         limit: int,
         *,
-        per_domain: int = 1,
+        per_host: int = 1,
         max_consecutive_failures: int | None = None,
         now: float | None = None,
     ) -> int:
         """Promote a small cooled-down subset from blocked queue back into normal queues."""
         return self._quarantine.promote(
             limit,
-            per_domain=per_domain,
+            per_host=per_host,
             max_consecutive_failures=max_consecutive_failures,
             now=now,
         )
@@ -1781,12 +1830,12 @@ class UrlLedger:
     def defer_overcrowded_deferred_surface(
         self,
         *,
-        keep_runnable_per_domain: int = 128,
+        keep_runnable_per_host: int = 128,
         keep_runnable_per_branch: int = 16,
         defer_seconds: float = 1800.0,
     ) -> int:
         """Delay excess runnable work on the deferred surface so one host or branch cannot dominate."""
-        if keep_runnable_per_domain <= 0 or keep_runnable_per_branch <= 0:
+        if keep_runnable_per_host <= 0 or keep_runnable_per_branch <= 0:
             return 0
 
         now = time.time()
@@ -1797,11 +1846,11 @@ class UrlLedger:
                         SELECT
                             queue.url,
                             ROW_NUMBER() OVER (
-                                PARTITION BY queue.domain
+                                PARTITION BY queue.host
                                 ORDER BY queue.priority DESC, queue.next_fetch_at ASC, queue.added_at ASC, queue.url ASC
-                            ) AS domain_rownum,
+                            ) AS host_rownum,
                             ROW_NUMBER() OVER (
-                                PARTITION BY queue.domain, queue.branch_key
+                                PARTITION BY queue.host, queue.branch_key
                                 ORDER BY queue.priority DESC, queue.next_fetch_at ASC, queue.added_at ASC, queue.url ASC
                             ) AS branch_rownum
                         FROM {self._queue_table_sql(self._single_physical_queue_for_surface(RUNNABLE_SURFACE_DEFERRED))} AS queue
@@ -1809,16 +1858,16 @@ class UrlLedger:
                     ), deferred AS (
                         SELECT ranked.url
                         FROM ranked
-                        WHERE ranked.domain_rownum > %s
+                        WHERE ranked.host_rownum > %s
                            OR ranked.branch_rownum > %s
                     )
                     UPDATE {URL_LEDGER_TABLE}
                     SET next_fetch_at = GREATEST(next_fetch_at, %s)
                     WHERE url IN (SELECT url FROM deferred)
-                    RETURNING url, domain, priority, next_fetch_at, added_at""",
+                    RETURNING url, host, priority, next_fetch_at, added_at""",
                 (
                     now,
-                    keep_runnable_per_domain,
+                    keep_runnable_per_host,
                     keep_runnable_per_branch,
                     deferred_until,
                 ),
@@ -1837,11 +1886,11 @@ class UrlLedger:
         self,
         target_pending: int,
         *,
-        per_domain: int = 1,
+        per_host: int = 1,
         candidate_limit: int = 200,
     ) -> int:
         """Promote one deferred-surface head per host into the frontline surface."""
-        if target_pending <= 0 or per_domain <= 0 or candidate_limit <= 0:
+        if target_pending <= 0 or per_host <= 0 or candidate_limit <= 0:
             return 0
 
         current_frontline = self.pending_count(runnable_surface=RUNNABLE_SURFACE_FRONTLINE)
@@ -1851,13 +1900,13 @@ class UrlLedger:
 
         with self._conn.cursor() as cur:
             cur.execute(
-                f"""SELECT DISTINCT domain
+                f"""SELECT DISTINCT host
                     FROM {self._queue_table_sql(self._single_physical_queue_for_surface(RUNNABLE_SURFACE_FRONTLINE))}"""
             )
-            existing_domains = {domain for (domain,) in cur.fetchall()}
+            existing_hosts = {host for (host,) in cur.fetchall()}
 
             cur.execute(
-                f"""SELECT url, domain
+                f"""SELECT url, host
                     FROM {self._queue_table_sql(self._single_physical_queue_for_surface(RUNNABLE_SURFACE_DEFERRED))}
                     ORDER BY priority DESC, added_at ASC, url ASC
                     LIMIT %s""",
@@ -1866,15 +1915,15 @@ class UrlLedger:
             candidates = cur.fetchall()
 
             promoted_urls: list[str] = []
-            domain_counts: Counter[str] = Counter()
-            for url, domain in candidates:
-                if domain in existing_domains:
+            host_counts: Counter[str] = Counter()
+            for url, host in candidates:
+                if host in existing_hosts:
                     continue
-                if domain_counts[domain] >= per_domain:
+                if host_counts[host] >= per_host:
                     continue
                 promoted_urls.append(normalize_url(url))
-                existing_domains.add(domain)
-                domain_counts[domain] += 1
+                existing_hosts.add(host)
+                host_counts[host] += 1
                 if len(promoted_urls) >= needed:
                     break
 
@@ -1882,7 +1931,7 @@ class UrlLedger:
                 return 0
 
             cur.execute(
-                f"""SELECT url, domain, priority, next_fetch_at, added_at
+                f"""SELECT url, host, priority, next_fetch_at, added_at
                     FROM {self._queue_table_sql(self._single_physical_queue_for_surface(RUNNABLE_SURFACE_DEFERRED))}
                     WHERE url = ANY(%s)""",
                 (promoted_urls,),
@@ -1907,20 +1956,22 @@ class UrlLedger:
         now = time.time()
         for url in urls:
             normalized = normalize_url(url)
-            domain = urlparse(normalized).netloc
-            rows.append((
-                normalized,
-                domain,
-                priority,
-                now,
-                now,
-            ))
+            host = urlparse(normalized).netloc
+            rows.append(
+                (
+                    normalized,
+                    host,
+                    priority,
+                    now,
+                    now,
+                )
+            )
 
         with self._conn.cursor() as cur:
             psycopg2.extras.execute_values(
                 cur,
                 f"""INSERT INTO {URL_LEDGER_TABLE} (
-                       url, domain, priority, source_url, added_at, next_fetch_at, current_intent
+                       url, host, priority, source_url, added_at, next_fetch_at, current_intent
                    )
                    VALUES %s
                    ON CONFLICT (url) DO UPDATE SET
@@ -1932,7 +1983,7 @@ class UrlLedger:
                        last_error = NULL,
                        terminal_reason = NULL,
                        terminalized_at = NULL
-                   RETURNING url, domain, priority, next_fetch_at, added_at""",
+                   RETURNING url, host, priority, next_fetch_at, added_at""",
                 rows,
                 template=f"(%s, %s, %s, NULL, %s, %s, '{INTENT_EXPLORE}')",
                 page_size=200,
@@ -2000,27 +2051,27 @@ class UrlLedger:
         """Get count of pending URLs, optionally filtered by runnable surface."""
         return self._observability.pending_count(runnable_surface=runnable_surface)
 
-    def pending_domain_count(
+    def pending_host_count(
         self,
         *,
         runnable_surface: str | None = None,
     ) -> int:
-        """Get count of distinct pending domains, optionally filtered by runnable surface."""
-        return self._observability.pending_domain_count(runnable_surface=runnable_surface)
+        """Get count of distinct pending hosts, optionally filtered by runnable surface."""
+        return self._observability.pending_host_count(runnable_surface=runnable_surface)
 
-    def runnable_domain_count(
+    def runnable_host_count(
         self,
         now: float | None = None,
         *,
         runnable_surface: str | None = None,
     ) -> int:
-        """Get count of distinct domains that are runnable right now."""
-        return self._observability.runnable_domain_count(
+        """Get count of distinct hosts that are runnable right now."""
+        return self._observability.runnable_host_count(
             now=now,
             runnable_surface=runnable_surface,
         )
 
-    def blocked_domain_backoff_count(self) -> int:
+    def blocked_host_backoff_count(self) -> int:
         """Return count of URLs isolated due to host backoff."""
         return self._observability.blocked_count()
 

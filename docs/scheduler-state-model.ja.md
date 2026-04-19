@@ -29,7 +29,7 @@ URL ledger は「この URL を知っているか」「この URL について�
 ここに属するもの:
 
 - normalized URL
-- domain / host key
+- host key
 - discovery metadata
 - first seen timestamp
 - last success timestamp
@@ -90,9 +90,9 @@ host scheduler は「この host に今触れてよいか」「どの程度の a
 - `runnable`（readiness / operator view 上の派生値）
 - `pending_total`
 - `blocked_host_backoff`
-- `blocked_domain_next_request`
+- `blocked_host_next_request`
 - `pages_per_second`
-- top pending / blocked domain tables
+- top pending / blocked host tables
 
 operator-facing な `runnable` view は次から導出される:
 
@@ -153,7 +153,7 @@ seed は bootstrap 用の input set にすぎない。
 - `exploration` => frontline runnable surface
 - `backlog` => deferred scheduled surface
 - `active_leases` => lease state
-- blocked-domain-backoff queue => quarantine pool
+- blocked-host-backoff queue => quarantine pool
 - host scheduler tables => host state
 
 これは convergence target であり、現在の実装がすでにそうなっているという意味ではない。

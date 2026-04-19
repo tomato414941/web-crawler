@@ -67,14 +67,14 @@ class Extractor:
         result = re.sub(r'\[@(\w+)="([^"]+)"\]', r'[\1="\2"]', result)
 
         # Convert [@attr] to [attr]
-        result = re.sub(r'\[@(\w+)\]', r'[\1]', result)
+        result = re.sub(r"\[@(\w+)\]", r"[\1]", result)
 
         # Convert / to >
         result = result.replace("/", " > ")
 
         # Clean up
         result = result.strip()
-        result = re.sub(r'\s+', ' ', result)
+        result = re.sub(r"\s+", " ", result)
 
         return result if result else None
 
@@ -136,6 +136,7 @@ async def extract_data(
     """Fetch URL and extract data."""
     if use_browser:
         from .core import get_browser_fetcher
+
         fetcher = get_browser_fetcher()(timeout=30.0)
     else:
         fetcher = HttpFetcher(timeout=settings.timeout)
@@ -151,7 +152,7 @@ async def extract_data(
             items = extractor.xpath(xpath, attribute)
         else:
             links = extractor.get_links()
-            items = [f"{link['text']} -> {link['href']}" for link in links if link['href']]
+            items = [f"{link['text']} -> {link['href']}" for link in links if link["href"]]
 
         return ExtractResult(
             url=response.url,

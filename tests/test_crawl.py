@@ -82,22 +82,22 @@ class TestExtractLinks:
 
     def test_removes_duplicates(self):
         """Should remove duplicate links."""
-        html = '''
+        html = """
         <a href="/page1">Link 1</a>
         <a href="/page1">Link 1 Again</a>
         <a href="/page1#section">Link 1 With Fragment</a>
-        '''
+        """
         links = extract_links(html, "http://example.com")
         # All three should normalize to the same URL
         assert len(links) == 1
 
     def test_extracts_multiple_links(self):
         """Should extract multiple distinct links."""
-        html = '''
+        html = """
         <a href="/page1">Link 1</a>
         <a href="/page2">Link 2</a>
         <a href="/page3">Link 3</a>
-        '''
+        """
         links = extract_links(html, "http://example.com")
         assert len(links) == 3
 
@@ -115,10 +115,10 @@ class TestExtractLinks:
 
     def test_handles_mixed_quotes(self):
         """Should handle mixed quote styles."""
-        html = '''
+        html = """
         <a href="/page1">Link 1</a>
         <a href='/page2'>Link 2</a>
-        '''
+        """
         links = extract_links(html, "http://example.com")
         assert len(links) == 2
 

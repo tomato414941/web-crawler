@@ -2,22 +2,22 @@
 
 Async web crawler with adaptive rendering, AI agent, and REST API.
 
-This project targets the broad public web as a whole. It is not a domain-specific crawler.
+This project targets the broad public web as a whole. It is not a site-specific crawler.
 Current crawl coverage may be biased by implementation limits or temporary seed choices; that
 bias is an artifact to correct, not the intended scope of the project. Seed URLs are bootstrap
-entry points for discovery, not an allowlist and not a statement of the crawler's target domain.
+entry points for discovery, not an allowlist and not a statement of the crawler's target scope.
 
 ## Features
 
 - **Adaptive Fetching** — HTTP first, auto-switches to browser rendering for JS-heavy sites
 - **AI Agent** — Claude-powered autonomous browsing for complex tasks
-- **Web-scale Discovery** — Seed URLs start the crawl, but discovered external domains are valid crawl targets
+- **Web-scale Discovery** — Seed URLs start the crawl, but discovered external hosts are valid crawl targets
 - **Postgres-backed Scheduler** — Persistent crawl scheduler with URL leasing and retry backoff
 - **Physical Scheduler Queues** — Exploration / backlog / recrawl queues plus retry quarantine
 - **Host Scheduling State** — Durable per-host crawl delay and cooldown tracking in PostgreSQL
 - **REST API** — Serve crawled pages via `/pages`, `/stats` endpoints
 - **JSONL Export** — Optional streaming output alongside Postgres storage
-- **robots.txt** — Per-domain rate limiting and access control
+- **robots.txt** — Per-host rate limiting and access control
 - **Link Checker** — Detect broken links on any page
 - **Data Extraction** — CSS selectors and XPath
 - **Daemon Mode** — Continuous crawl loop with stale-page requeueing
@@ -92,9 +92,9 @@ crawler crawl <url> [options]
 Options:
   -n, --max-pages     Max pages to crawl (default: 100)
   -c, --concurrency   Concurrent workers (default: 5)
-  --delay             Per-domain delay in seconds (default: 1.0)
-  --same-domain       Stay on the same domain (default)
-  --any-domain        Follow links to other domains
+  --delay             Per-host delay in seconds (default: 1.0)
+  --same-host         Stay on the same host (default)
+  --any-host          Follow links to other hosts
   --js                Use browser rendering for all pages
   -o, --output        Stream results to JSONL file
   --postgres DSN      Required: store scheduler state and pages in PostgreSQL
@@ -135,9 +135,9 @@ crawler serve --port 8080 --postgres postgresql://user:pass@localhost/db
 | Endpoint | Description |
 |---|---|
 | `GET /health` | Health check |
-| `GET /pages` | List pages (`?since=`, `?limit=`, `?domain=`) |
+| `GET /pages` | List pages (`?since=`, `?limit=`, `?host=`) |
 | `GET /pages/{url_hash}` | Get page details with content |
-| `GET /stats` | Crawl statistics, including scheduler error breakdown and top error domains |
+| `GET /stats` | Crawl statistics, including scheduler error breakdown and top error hosts |
 
 Daemon logs also emit a per-cycle `errors=...` summary using the same categories as `/stats`.
 
@@ -171,9 +171,9 @@ crawler/
 ├── scheduler_observability.py # Read-only scheduler snapshots
 ├── scheduler_quarantine.py    # Retry quarantine state transitions
 ├── daemon_policy.py    # Pre-cycle scheduler policy
-├── domain_manager.py   # robots.txt, runtime host state
-├── domain_store.py     # Persistent host scheduling state
-├── domain_state.py     # Runtime / persisted host state models
+├── host_manager.py   # robots.txt, runtime host state
+├── host_store.py     # Persistent host scheduling state
+├── host_state.py     # Runtime / persisted host state models
 ├── storage.py          # PostgreSQL storage
 ├── output.py           # JSONL streaming output
 ├── result.py           # Typed crawl success/failure results
@@ -217,7 +217,7 @@ Two layers:
 
 Two persistent schedulers work together:
 1. **URL scheduler** — controls retry timing, leasing, and recrawl eligibility
-2. **Host state** — controls per-host crawl delay and cooldown via `domain_state`
+2. **Host state** — controls per-host crawl delay and cooldown via `host_state`
 
 Current scheduler state is split across explicit physical tables:
 
@@ -246,7 +246,7 @@ For actual scheduler state, prefer `readiness`:
 
 - `runnable` — runnable now
 - `scheduled` — waiting on `next_fetch_at`
-- `blocked_domain_next_request` — waiting on per-host request slot timing
+- `blocked_host_next_request` — waiting on per-host request slot timing
 - `blocked_host_backoff` — still in host cooldown while in normal queues
 - `retry_quarantine` — already isolated from normal queues and only restored through retry budget
 
@@ -266,8 +266,8 @@ are the rules `web-crawler` should preserve even if tables, workers, or queue
 names change later.
 
 In daemon mode, seeds are starting points for graph expansion. The crawler is expected to
-discover and follow links onto other domains unless a specific crawl run is configured to stay
-on the same domain.
+discover and follow links onto other hosts unless a specific crawl run is configured to stay
+on the same host.
 
 Discovery priority is now based on generic URL structure rather than site-specific rules.
 Redirect-like paths, document-like paths, and bulk/listing paths are classified from reusable
@@ -334,13 +334,13 @@ CRAWLER_FRONTIER_MAX_RETRY_BACKOFF_SECONDS=1800
 CRAWLER_ROBOTS_CACHE_TTL=3600
 CRAWLER_HOST_BACKOFF_SECONDS=30
 CRAWLER_MAX_HOST_BACKOFF_SECONDS=600
-CRAWLER_DAEMON_KEEP_READY_PER_DOMAIN=128
+CRAWLER_DAEMON_KEEP_READY_PER_HOST=128
 CRAWLER_DAEMON_BACKLOG_LOW_PRIORITY=0.75
 CRAWLER_DAEMON_BACKLOG_DEFER_SECONDS=1800
 CRAWLER_DAEMON_MIN_READY_SLEEP=0.5
 CRAWLER_DAEMON_MIN_EXPLORATION_READY=20
 CRAWLER_DAEMON_BLOCKED_RETRY_BUDGET=8
-CRAWLER_DAEMON_BLOCKED_RETRY_PER_DOMAIN=1
+CRAWLER_DAEMON_BLOCKED_RETRY_PER_HOST=1
 CRAWLER_DAEMON_BLOCKED_RETRY_MAX_CONSECUTIVE_FAILURES=8
 CRAWLER_DAEMON_QUARANTINE_RETIRE_MIN_CONSECUTIVE_FAILURES=64
 CRAWLER_DAEMON_QUARANTINE_RETIRE_AFTER_SECONDS=86400

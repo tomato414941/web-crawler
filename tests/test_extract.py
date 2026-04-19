@@ -128,10 +128,12 @@ class TestExtractorExtractAll:
         """extract_all should extract multiple selectors."""
         html = "<h1>Title</h1><p>Para 1</p><p>Para 2</p>"
         extractor = Extractor(html)
-        result = extractor.extract_all({
-            "title": "h1",
-            "paragraphs": "p",
-        })
+        result = extractor.extract_all(
+            {
+                "title": "h1",
+                "paragraphs": "p",
+            }
+        )
         assert result["title"] == ["Title"]
         assert result["paragraphs"] == ["Para 1", "Para 2"]
 

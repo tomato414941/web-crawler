@@ -36,7 +36,7 @@ def test_rank_seed_url_returns_seed_priority():
 
 def test_rank_discovered_url_prefers_same_host():
     result = rank_discovered_url(
-        parent_url="https://example.com/domains",
+        parent_url="https://example.com/hosts",
         url="https://example.com/protocols",
         seed_hosts={"example.com"},
     )
@@ -46,7 +46,7 @@ def test_rank_discovered_url_prefers_same_host():
 
 def test_rank_discovered_url_prefers_seed_host_over_external():
     result = rank_discovered_url(
-        parent_url="https://example.com/domains",
+        parent_url="https://example.com/hosts",
         url="https://docs.example.com/guide/",
         seed_hosts={"example.com", "docs.example.com"},
     )
@@ -56,7 +56,7 @@ def test_rank_discovered_url_prefers_seed_host_over_external():
 
 def test_rank_discovered_url_marks_other_hosts_external():
     result = rank_discovered_url(
-        parent_url="https://example.com/domains",
+        parent_url="https://example.com/hosts",
         url="https://external.example.net/project",
         seed_hosts={"example.com", "docs.example.com"},
     )
@@ -70,7 +70,9 @@ def test_classify_url_archetype_detects_redirect_hubs():
 
 def test_classify_url_archetype_detects_registry_listings():
     assert (
-        classify_url_archetype("https://example.com/assignments/tls-extensiontype-values/tls-extensiontype-values.xhtml")
+        classify_url_archetype(
+            "https://example.com/assignments/tls-extensiontype-values/tls-extensiontype-values.xhtml"
+        )
         == ARCHETYPE_REGISTRY_LISTING
     )
 
@@ -124,12 +126,15 @@ def test_rank_discovered_url_uses_parent_page_signals():
 
     assert result.priority < EXTERNAL_PRIORITY
     assert result.priority >= 0.25
-    assert classify_parent_archetype(
-        "https://example.com/archive/",
-        PageSignals(
-            content_type="text/html; charset=utf-8",
-            content_length=900_000,
-            title="Archive Table Index",
-            meta_robots="nofollow",
-        ),
-    ) == ARCHETYPE_REGISTRY_LISTING
+    assert (
+        classify_parent_archetype(
+            "https://example.com/archive/",
+            PageSignals(
+                content_type="text/html; charset=utf-8",
+                content_length=900_000,
+                title="Archive Table Index",
+                meta_robots="nofollow",
+            ),
+        )
+        == ARCHETYPE_REGISTRY_LISTING
+    )

@@ -9,7 +9,7 @@ import pytest
 
 from crawler.daemon import CrawlDaemon, _format_error_breakdown
 from crawler.url_ledger import (
-    BLOCKED_DOMAIN_BACKOFF_TABLE,
+    BLOCKED_HOST_BACKOFF_TABLE,
     CrawlTask,
     LEASE_TABLE,
     PHYSICAL_QUEUE_TABLES,
@@ -34,14 +34,14 @@ def _reset_schema(dsn: str) -> None:
     try:
         with conn.cursor() as cur:
             cur.execute("DROP TABLE IF EXISTS public.schema_migrations")
-            cur.execute("DROP TABLE IF EXISTS public.domain_state")
+            cur.execute("DROP TABLE IF EXISTS public.host_state")
             cur.execute(f"DROP TABLE IF EXISTS public.{PHYSICAL_QUEUE_TABLES[QUEUE_EXPLORATION]}")
             cur.execute(f"DROP TABLE IF EXISTS public.{PHYSICAL_QUEUE_TABLES[QUEUE_BACKLOG]}")
             cur.execute(f"DROP TABLE IF EXISTS public.{PHYSICAL_QUEUE_TABLES[QUEUE_RECRAWL]}")
-            cur.execute(f"DROP TABLE IF EXISTS public.{BLOCKED_DOMAIN_BACKOFF_TABLE}")
+            cur.execute(f"DROP TABLE IF EXISTS public.{BLOCKED_HOST_BACKOFF_TABLE}")
             cur.execute(f"DROP TABLE IF EXISTS public.{LEASE_TABLE}")
             cur.execute("DROP TABLE IF EXISTS public.frontier_queue_recrawl")
-            cur.execute("DROP TABLE IF EXISTS public.frontier_queue_blocked_domain_backoff")
+            cur.execute("DROP TABLE IF EXISTS public.frontier_queue_blocked_host_backoff")
             cur.execute("DROP TABLE IF EXISTS public.frontier_lease_active")
             cur.execute(f"DROP TABLE IF EXISTS public.{URL_LEDGER_TABLE} CASCADE")
             cur.execute("DROP TABLE IF EXISTS public.crawler_runtime_stats")
@@ -85,9 +85,7 @@ def test_refresh_stale_skips_when_pending_queue_is_full(pg_resources):
     now = time.time()
 
     for idx in range(3):
-        ledger.place(
-            CrawlTask(url=f"https://example.com/pending-{idx}", added_at=now + idx)
-        )
+        ledger.place(CrawlTask(url=f"https://example.com/pending-{idx}", added_at=now + idx))
 
     stale_url = "https://example.com/stale"
     ledger.place(CrawlTask(url=stale_url, added_at=now - 100))
@@ -244,9 +242,7 @@ def test_bootstrap_scheduler_inserts_seeds_only_when_empty():
     skipped = daemon._bootstrap_scheduler(populated_ledger)
 
     assert inserted == 2
-    assert empty_ledger.upsert_calls == [
-        (["https://example.com/", "https://example.org/"], 2.0)
-    ]
+    assert empty_ledger.upsert_calls == [(["https://example.com/", "https://example.org/"], 2.0)]
     assert skipped == 0
     assert populated_ledger.upsert_calls == []
 
@@ -350,7 +346,7 @@ async def test_daemon_uses_configured_backlog_controls():
         postgres_dsn="postgresql://unused",
         cycle_pages=10,
         refresh_ttl=3600,
-        deferred_runnable_per_domain=7,
+        deferred_runnable_per_host=7,
         deferred_runnable_per_branch=2,
         deferred_surface_defer_seconds=12.0,
     )
@@ -373,7 +369,7 @@ async def test_daemon_uses_configured_backlog_controls():
     await daemon.run()
 
     assert ledger.defer_args == {
-        "keep_runnable_per_domain": 7,
+        "keep_runnable_per_host": 7,
         "keep_runnable_per_branch": 2,
         "defer_seconds": 12.0,
     }
@@ -398,7 +394,7 @@ async def test_daemon_persists_readiness_breakdown_while_waiting_for_ready():
         def runnable_count(self, runnable_surface=None, now=None):
             return 0
 
-        def runnable_domain_count(self, runnable_surface=None, now=None):
+        def runnable_host_count(self, runnable_surface=None, now=None):
             return 0
 
         def readiness(self):
@@ -408,14 +404,14 @@ async def test_daemon_persists_readiness_breakdown_while_waiting_for_ready():
                 next_runnable_delay=12.0,
                 blocked={
                     "next_fetch_at": 2,
-                    "domain_next_request": 1,
+                    "host_next_request": 1,
                     "host_backoff": 0,
                     "retry_quarantine": 2,
                 },
                 state_counts={
                     "runnable": 0,
                     "scheduled": 0,
-                    "blocked_domain_next_request": 1,
+                    "blocked_host_next_request": 1,
                     "blocked_host_backoff": 0,
                     "retry_quarantine": 2,
                 },
@@ -463,40 +459,40 @@ async def test_daemon_persists_readiness_breakdown_while_waiting_for_ready():
     assert storage.payloads[-1][1]["next_runnable_delay"] == 12.0
     assert storage.payloads[-1][1]["readiness_blocked"] == {
         "next_fetch_at": 2,
-        "domain_next_request": 1,
+        "host_next_request": 1,
         "host_backoff": 0,
         "retry_quarantine": 2,
     }
     assert storage.payloads[-1][1]["readiness_blocked_reasons"] == {
         "next_fetch_at": 2,
-        "domain_next_request": 1,
+        "host_next_request": 1,
         "host_backoff": 0,
         "retry_quarantine": 2,
     }
     assert storage.payloads[-1][1]["scheduler_state"] == {
         "runnable": 0,
         "scheduled": 0,
-        "blocked_domain_next_request": 1,
+        "blocked_host_next_request": 1,
         "blocked_host_backoff": 0,
         "retry_quarantine": 2,
     }
     assert storage.payloads[-1][1]["scheduler_readiness_states"] == {
         "runnable": 0,
         "scheduled": 0,
-        "blocked_domain_next_request": 1,
+        "blocked_host_next_request": 1,
         "blocked_host_backoff": 0,
         "retry_quarantine": 2,
     }
     assert storage.payloads[-1][1]["readiness_state_counts"] == {
         "runnable": 0,
         "scheduled": 0,
-        "blocked_domain_next_request": 1,
+        "blocked_host_next_request": 1,
         "blocked_host_backoff": 0,
         "retry_quarantine": 2,
     }
     assert storage.payloads[-1][1]["blocked_reason_counts"] == {
         "next_fetch_at": 2,
-        "domain_next_request": 1,
+        "host_next_request": 1,
         "host_backoff": 0,
         "retry_quarantine": 2,
     }
@@ -504,7 +500,7 @@ async def test_daemon_persists_readiness_breakdown_while_waiting_for_ready():
         "readiness_state_counts": {
             "runnable": 0,
             "scheduled": 0,
-            "blocked_domain_next_request": 1,
+            "blocked_host_next_request": 1,
             "blocked_host_backoff": 0,
             "retry_quarantine": 2,
         },
@@ -515,7 +511,7 @@ async def test_daemon_persists_readiness_breakdown_while_waiting_for_ready():
         },
         "blocked_reason_counts": {
             "next_fetch_at": 2,
-            "domain_next_request": 1,
+            "host_next_request": 1,
             "host_backoff": 0,
             "retry_quarantine": 2,
         },
@@ -546,7 +542,7 @@ async def test_daemon_persists_scheduler_views_after_cycle():
         def runnable_count(self, runnable_surface=None, now=None):
             return 1
 
-        def runnable_domain_count(self, runnable_surface=None, now=None):
+        def runnable_host_count(self, runnable_surface=None, now=None):
             return 1
 
         def readiness(self):
@@ -556,14 +552,14 @@ async def test_daemon_persists_scheduler_views_after_cycle():
                 next_runnable_delay=0.0,
                 blocked={
                     "next_fetch_at": 0,
-                    "domain_next_request": 1,
+                    "host_next_request": 1,
                     "host_backoff": 0,
                     "retry_quarantine": 0,
                 },
                 state_counts={
                     "runnable": 1,
                     "scheduled": 0,
-                    "blocked_domain_next_request": 1,
+                    "blocked_host_next_request": 1,
                     "blocked_host_backoff": 0,
                     "retry_quarantine": 0,
                 },
@@ -612,27 +608,27 @@ async def test_daemon_persists_scheduler_views_after_cycle():
     assert storage.payloads[-1][1]["state"] == "cycle_complete"
     assert storage.payloads[-1][1]["blocked_reason_counts"] == {
         "next_fetch_at": 0,
-        "domain_next_request": 1,
+        "host_next_request": 1,
         "host_backoff": 0,
         "retry_quarantine": 0,
     }
     assert storage.payloads[-1][1]["readiness_blocked_reasons"] == {
         "next_fetch_at": 0,
-        "domain_next_request": 1,
+        "host_next_request": 1,
         "host_backoff": 0,
         "retry_quarantine": 0,
     }
     assert storage.payloads[-1][1]["scheduler_state"] == {
         "runnable": 1,
         "scheduled": 0,
-        "blocked_domain_next_request": 1,
+        "blocked_host_next_request": 1,
         "blocked_host_backoff": 0,
         "retry_quarantine": 0,
     }
     assert storage.payloads[-1][1]["scheduler_readiness_states"] == {
         "runnable": 1,
         "scheduled": 0,
-        "blocked_domain_next_request": 1,
+        "blocked_host_next_request": 1,
         "blocked_host_backoff": 0,
         "retry_quarantine": 0,
     }
@@ -640,7 +636,7 @@ async def test_daemon_persists_scheduler_views_after_cycle():
         "readiness_state_counts": {
             "runnable": 1,
             "scheduled": 0,
-            "blocked_domain_next_request": 1,
+            "blocked_host_next_request": 1,
             "blocked_host_backoff": 0,
             "retry_quarantine": 0,
         },
@@ -651,7 +647,7 @@ async def test_daemon_persists_scheduler_views_after_cycle():
         },
         "blocked_reason_counts": {
             "next_fetch_at": 0,
-            "domain_next_request": 1,
+            "host_next_request": 1,
             "host_backoff": 0,
             "retry_quarantine": 0,
         },
@@ -678,18 +674,18 @@ def test_ensure_frontline_supply_tops_up_when_frontline_surface_is_starved():
             assert runnable_surface == "frontline"
             return 1
 
-        def pending_domain_count(self, runnable_surface=None):
+        def pending_host_count(self, runnable_surface=None):
             if runnable_surface == "frontline":
                 return 1
             return 10
 
-        def runnable_domain_count(self, runnable_surface=None, now=None):
+        def runnable_host_count(self, runnable_surface=None, now=None):
             if runnable_surface == "frontline":
                 return 1
             return 10
 
-        def promote_deferred_host_heads(self, target_pending, per_domain=1):
-            self.host_promote_calls.append((target_pending, per_domain))
+        def promote_deferred_host_heads(self, target_pending, per_host=1):
+            self.host_promote_calls.append((target_pending, per_host))
             return 2
 
         def upsert_seeds(self, urls, priority=2.0):
@@ -779,12 +775,12 @@ def test_ensure_frontline_supply_does_not_bootstrap_empty_ledger():
             assert runnable_surface == "frontline"
             return 0
 
-        def runnable_domain_count(self, runnable_surface=None, now=None):
+        def runnable_host_count(self, runnable_surface=None, now=None):
             assert runnable_surface == "frontline"
             return 0
 
-        def promote_deferred_host_heads(self, target_pending, per_domain=1):
-            self.host_promote_calls.append((target_pending, per_domain))
+        def promote_deferred_host_heads(self, target_pending, per_host=1):
+            self.host_promote_calls.append((target_pending, per_host))
             return 0
 
         def upsert_seeds(self, urls, priority=2.0):
@@ -824,18 +820,18 @@ def test_ensure_frontline_supply_stays_idle_when_host_promotion_is_insufficient(
             assert runnable_surface == "frontline"
             return 1
 
-        def pending_domain_count(self, runnable_surface=None):
+        def pending_host_count(self, runnable_surface=None):
             if runnable_surface == "frontline":
                 return 1
             return 10
 
-        def runnable_domain_count(self, runnable_surface=None, now=None):
+        def runnable_host_count(self, runnable_surface=None, now=None):
             if runnable_surface == "frontline":
                 return 1
             return 10
 
-        def promote_deferred_host_heads(self, target_pending, per_domain=1):
-            self.host_promote_calls.append((target_pending, per_domain))
+        def promote_deferred_host_heads(self, target_pending, per_host=1):
+            self.host_promote_calls.append((target_pending, per_host))
             return 0
 
         def upsert_seeds(self, urls, priority=2.0):
@@ -874,12 +870,12 @@ def test_ensure_frontline_supply_does_not_top_up_when_frontline_surface_is_healt
             assert runnable_surface == "frontline"
             return 3
 
-        def pending_domain_count(self, runnable_surface=None):
+        def pending_host_count(self, runnable_surface=None):
             if runnable_surface == "frontline":
                 return 3
             return 10
 
-        def runnable_domain_count(self, runnable_surface=None, now=None):
+        def runnable_host_count(self, runnable_surface=None, now=None):
             if runnable_surface == "frontline":
                 return 3
             return 10
@@ -920,18 +916,18 @@ def test_ensure_frontline_supply_does_not_reinsert_when_frontline_pending_is_hig
             assert runnable_surface == "frontline"
             return 0
 
-        def pending_domain_count(self, runnable_surface=None):
+        def pending_host_count(self, runnable_surface=None):
             if runnable_surface == "frontline":
                 return 2
             return 12
 
-        def runnable_domain_count(self, runnable_surface=None, now=None):
+        def runnable_host_count(self, runnable_surface=None, now=None):
             if runnable_surface == "frontline":
                 return 0
             return 12
 
-        def promote_deferred_host_heads(self, target_pending, per_domain=1):
-            self.host_promote_calls.append((target_pending, per_domain))
+        def promote_deferred_host_heads(self, target_pending, per_host=1):
+            self.host_promote_calls.append((target_pending, per_host))
             return 0
 
         def upsert_seeds(self, urls, priority=2.0):
@@ -972,18 +968,18 @@ def test_ensure_frontline_supply_tops_up_when_frontline_host_diversity_is_low():
             assert runnable_surface == "frontline"
             return 3
 
-        def pending_domain_count(self, runnable_surface=None):
+        def pending_host_count(self, runnable_surface=None):
             if runnable_surface == "frontline":
                 return 1
             return 10
 
-        def runnable_domain_count(self, runnable_surface=None, now=None):
+        def runnable_host_count(self, runnable_surface=None, now=None):
             if runnable_surface == "frontline":
                 return 1
             return 10
 
-        def promote_deferred_host_heads(self, target_pending, per_domain=1):
-            self.host_promote_calls.append((target_pending, per_domain))
+        def promote_deferred_host_heads(self, target_pending, per_host=1):
+            self.host_promote_calls.append((target_pending, per_host))
             return 1
 
         def upsert_seeds(self, urls, priority=2.0):
@@ -1022,13 +1018,13 @@ def test_ensure_frontline_supply_stays_idle_when_only_runnable_depth_is_low():
             assert runnable_surface == "frontline"
             return 1
 
-        def runnable_domain_count(self, runnable_surface=None, now=None):
+        def runnable_host_count(self, runnable_surface=None, now=None):
             if runnable_surface == "frontline":
                 return 3
             return 10
 
-        def promote_deferred_host_heads(self, target_pending, per_domain=1):
-            self.host_promote_calls.append((target_pending, per_domain))
+        def promote_deferred_host_heads(self, target_pending, per_host=1):
+            self.host_promote_calls.append((target_pending, per_host))
             return 1
 
     daemon = CrawlDaemon(
@@ -1056,24 +1052,24 @@ def test_promote_blocked_retry_restores_small_subset_when_ready_is_thin():
         def runnable_count(self, runnable_surface=None, now=None):
             return 2
 
-        def pending_domain_count(self, runnable_surface=None):
+        def pending_host_count(self, runnable_surface=None):
             assert runnable_surface == "frontline"
             return 3
 
-        def runnable_domain_count(self, runnable_surface=None, now=None):
+        def runnable_host_count(self, runnable_surface=None, now=None):
             assert runnable_surface == "frontline"
             return 3
 
         def blocked_reason_counts(self):
             return {
                 "next_fetch_at": 0,
-                "domain_next_request": 0,
+                "host_next_request": 0,
                 "host_backoff": 0,
                 "retry_quarantine": 12,
             }
 
-        def promote_blocked_domain_backoff(self, limit, per_domain=1, max_consecutive_failures=None):
-            self.calls.append((limit, per_domain, max_consecutive_failures))
+        def promote_blocked_host_backoff(self, limit, per_host=1, max_consecutive_failures=None):
+            self.calls.append((limit, per_host, max_consecutive_failures))
             return 2
 
     daemon = CrawlDaemon(
@@ -1102,24 +1098,24 @@ def test_promote_blocked_retry_surges_when_runnable_is_zero():
         def runnable_count(self, runnable_surface=None, now=None):
             return 0
 
-        def pending_domain_count(self, runnable_surface=None):
+        def pending_host_count(self, runnable_surface=None):
             assert runnable_surface == "frontline"
             return 3
 
-        def runnable_domain_count(self, runnable_surface=None, now=None):
+        def runnable_host_count(self, runnable_surface=None, now=None):
             assert runnable_surface == "frontline"
             return 3
 
         def blocked_reason_counts(self):
             return {
                 "next_fetch_at": 0,
-                "domain_next_request": 0,
+                "host_next_request": 0,
                 "host_backoff": 0,
                 "retry_quarantine": 20,
             }
 
-        def promote_blocked_domain_backoff(self, limit, per_domain=1, max_consecutive_failures=None):
-            self.calls.append((limit, per_domain, max_consecutive_failures))
+        def promote_blocked_host_backoff(self, limit, per_host=1, max_consecutive_failures=None):
+            self.calls.append((limit, per_host, max_consecutive_failures))
             return 5
 
     daemon = CrawlDaemon(
@@ -1148,24 +1144,24 @@ def test_promote_blocked_retry_skips_when_runnable_is_healthy():
         def runnable_count(self, runnable_surface=None, now=None):
             return 20
 
-        def pending_domain_count(self, runnable_surface=None):
+        def pending_host_count(self, runnable_surface=None):
             assert runnable_surface == "frontline"
             return 3
 
-        def runnable_domain_count(self, runnable_surface=None, now=None):
+        def runnable_host_count(self, runnable_surface=None, now=None):
             assert runnable_surface == "frontline"
             return 3
 
         def blocked_reason_counts(self):
             return {
                 "next_fetch_at": 0,
-                "domain_next_request": 0,
+                "host_next_request": 0,
                 "host_backoff": 0,
                 "retry_quarantine": 5,
             }
 
-        def promote_blocked_domain_backoff(self, limit, per_domain=1, max_consecutive_failures=None):
-            self.calls.append((limit, per_domain, max_consecutive_failures))
+        def promote_blocked_host_backoff(self, limit, per_host=1, max_consecutive_failures=None):
+            self.calls.append((limit, per_host, max_consecutive_failures))
             return 1
 
     daemon = CrawlDaemon(
@@ -1194,24 +1190,24 @@ def test_promote_blocked_retry_runs_when_runnable_is_healthy_but_host_diversity_
         def runnable_count(self, runnable_surface=None, now=None):
             return 20
 
-        def pending_domain_count(self, runnable_surface=None):
+        def pending_host_count(self, runnable_surface=None):
             assert runnable_surface == "frontline"
             return 1
 
-        def runnable_domain_count(self, runnable_surface=None, now=None):
+        def runnable_host_count(self, runnable_surface=None, now=None):
             assert runnable_surface == "frontline"
             return 1
 
         def blocked_reason_counts(self):
             return {
                 "next_fetch_at": 0,
-                "domain_next_request": 0,
+                "host_next_request": 0,
                 "host_backoff": 0,
                 "retry_quarantine": 12,
             }
 
-        def promote_blocked_domain_backoff(self, limit, per_domain=1, max_consecutive_failures=None):
-            self.calls.append((limit, per_domain, max_consecutive_failures))
+        def promote_blocked_host_backoff(self, limit, per_host=1, max_consecutive_failures=None):
+            self.calls.append((limit, per_host, max_consecutive_failures))
             return 3
 
     daemon = CrawlDaemon(
@@ -1240,20 +1236,20 @@ def test_promote_blocked_retry_skips_when_no_retry_quarantine_is_present():
         def runnable_count(self, runnable_surface=None, now=None):
             return 0
 
-        def runnable_domain_count(self, runnable_surface=None, now=None):
+        def runnable_host_count(self, runnable_surface=None, now=None):
             assert runnable_surface == "frontline"
             return 1
 
         def blocked_reason_counts(self):
             return {
                 "next_fetch_at": 0,
-                "domain_next_request": 2,
+                "host_next_request": 2,
                 "host_backoff": 0,
                 "retry_quarantine": 0,
             }
 
-        def promote_blocked_domain_backoff(self, limit, per_domain=1, max_consecutive_failures=None):
-            self.calls.append((limit, per_domain, max_consecutive_failures))
+        def promote_blocked_host_backoff(self, limit, per_host=1, max_consecutive_failures=None):
+            self.calls.append((limit, per_host, max_consecutive_failures))
             return 99
 
     daemon = CrawlDaemon(
@@ -1282,20 +1278,20 @@ def test_promote_blocked_retry_caps_budget_to_retry_quarantine_count():
         def runnable_count(self, runnable_surface=None, now=None):
             return 0
 
-        def runnable_domain_count(self, runnable_surface=None, now=None):
+        def runnable_host_count(self, runnable_surface=None, now=None):
             assert runnable_surface == "frontline"
             return 1
 
         def blocked_reason_counts(self):
             return {
                 "next_fetch_at": 0,
-                "domain_next_request": 0,
+                "host_next_request": 0,
                 "host_backoff": 0,
                 "retry_quarantine": 3,
             }
 
-        def promote_blocked_domain_backoff(self, limit, per_domain=1, max_consecutive_failures=None):
-            self.calls.append((limit, per_domain, max_consecutive_failures))
+        def promote_blocked_host_backoff(self, limit, per_host=1, max_consecutive_failures=None):
+            self.calls.append((limit, per_host, max_consecutive_failures))
             return limit
 
     daemon = CrawlDaemon(
@@ -1321,7 +1317,7 @@ def test_retire_blocked_retry_uses_configured_thresholds():
         def __init__(self):
             self.calls = []
 
-        def retire_blocked_domain_backoff(self, *, min_consecutive_failures, min_quarantine_seconds):
+        def retire_blocked_host_backoff(self, *, min_consecutive_failures, min_quarantine_seconds):
             self.calls.append((min_consecutive_failures, min_quarantine_seconds))
             return 3
 
@@ -1351,12 +1347,12 @@ def test_retire_blocked_retry_skips_when_no_retry_quarantine_is_present():
         def blocked_reason_counts(self):
             return {
                 "next_fetch_at": 0,
-                "domain_next_request": 1,
+                "host_next_request": 1,
                 "host_backoff": 0,
                 "retry_quarantine": 0,
             }
 
-        def retire_blocked_domain_backoff(self, *, min_consecutive_failures, min_quarantine_seconds):
+        def retire_blocked_host_backoff(self, *, min_consecutive_failures, min_quarantine_seconds):
             self.calls.append((min_consecutive_failures, min_quarantine_seconds))
             return 9
 
@@ -1383,8 +1379,8 @@ def test_restore_recovered_blocked_retry_uses_cycle_sized_budget():
         def __init__(self):
             self.calls = []
 
-        def restore_recovered_blocked_domain_backoff(self, *, limit, per_domain):
-            self.calls.append((limit, per_domain))
+        def restore_recovered_blocked_host_backoff(self, *, limit, per_host):
+            self.calls.append((limit, per_host))
             return 7
 
     daemon = CrawlDaemon(
@@ -1413,13 +1409,13 @@ def test_restore_recovered_blocked_retry_skips_when_no_retry_quarantine_is_prese
         def blocked_reason_counts(self):
             return {
                 "next_fetch_at": 0,
-                "domain_next_request": 0,
+                "host_next_request": 0,
                 "host_backoff": 2,
                 "retry_quarantine": 0,
             }
 
-        def restore_recovered_blocked_domain_backoff(self, *, limit, per_domain):
-            self.calls.append((limit, per_domain))
+        def restore_recovered_blocked_host_backoff(self, *, limit, per_host):
+            self.calls.append((limit, per_host))
             return 11
 
     daemon = CrawlDaemon(

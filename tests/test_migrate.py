@@ -7,9 +7,14 @@ import pytest
 
 from importlib import resources
 
-from crawler.migrate import BASELINE_VERSION, MIGRATIONS_PACKAGE, SCHEMA_MIGRATIONS_SQL, apply_migrations
+from crawler.migrate import (
+    BASELINE_VERSION,
+    MIGRATIONS_PACKAGE,
+    SCHEMA_MIGRATIONS_SQL,
+    apply_migrations,
+)
 from crawler.url_ledger import (
-    BLOCKED_DOMAIN_BACKOFF_TABLE,
+    BLOCKED_HOST_BACKOFF_TABLE,
     LEASE_TABLE,
     PHYSICAL_QUEUE_TABLES,
     QUEUE_BACKLOG,
@@ -33,15 +38,16 @@ def _reset_schema(dsn: str) -> None:
     try:
         with conn.cursor() as cur:
             cur.execute("DROP TABLE IF EXISTS public.schema_migrations")
-            cur.execute("DROP TABLE IF EXISTS public.domain_state")
+            cur.execute("DROP TABLE IF EXISTS public.host_state")
             cur.execute(f"DROP TABLE IF EXISTS public.{frontline_table}")
             cur.execute(f"DROP TABLE IF EXISTS public.{deferred_table}")
             cur.execute(f"DROP TABLE IF EXISTS public.{refresh_table}")
-            cur.execute(f"DROP TABLE IF EXISTS public.{BLOCKED_DOMAIN_BACKOFF_TABLE}")
+            cur.execute(f"DROP TABLE IF EXISTS public.{BLOCKED_HOST_BACKOFF_TABLE}")
             cur.execute("DROP TABLE IF EXISTS public.frontier_queue_exploration")
             cur.execute("DROP TABLE IF EXISTS public.frontier_queue_backlog")
             cur.execute("DROP TABLE IF EXISTS public.frontier_queue_recrawl")
             cur.execute("DROP TABLE IF EXISTS public.frontier_queue_blocked_domain_backoff")
+            cur.execute("DROP TABLE IF EXISTS public.frontier_queue_blocked_host_backoff")
             cur.execute(f"DROP TABLE IF EXISTS public.{LEASE_TABLE}")
             cur.execute("DROP TABLE IF EXISTS public.frontier_lease_active")
             cur.execute(f"DROP TABLE IF EXISTS public.{URL_LEDGER_TABLE} CASCADE")
@@ -68,6 +74,7 @@ def test_apply_migrations_creates_expected_tables(migrated_dsn):
         "024_normalize_constraint_names.sql",
         "025_rename_physical_queue_columns.sql",
         "026_add_current_intent.sql",
+        "027_rename_domain_to_host.sql",
     ]
 
     conn = psycopg2.connect(migrated_dsn)
@@ -77,26 +84,26 @@ def test_apply_migrations_creates_expected_tables(migrated_dsn):
                 f"""
                 SELECT to_regclass('public.pages'),
                        to_regclass('public.url_ledger'),
-                       to_regclass('public.domain_state'),
+                       to_regclass('public.host_state'),
                        to_regclass('public.schema_migrations'),
                        to_regclass('public.crawler_runtime_stats'),
                        to_regclass('public.{PHYSICAL_QUEUE_TABLES[QUEUE_EXPLORATION]}'),
                        to_regclass('public.{PHYSICAL_QUEUE_TABLES[QUEUE_BACKLOG]}'),
                        to_regclass('public.{PHYSICAL_QUEUE_TABLES[QUEUE_RECRAWL]}'),
-                       to_regclass('public.{BLOCKED_DOMAIN_BACKOFF_TABLE}'),
+                       to_regclass('public.{BLOCKED_HOST_BACKOFF_TABLE}'),
                        to_regclass('public.{LEASE_TABLE}')
                 """
             )
             assert cur.fetchone() == (
                 "pages",
                 "url_ledger",
-                "domain_state",
+                "host_state",
                 "schema_migrations",
                 "crawler_runtime_stats",
                 PHYSICAL_QUEUE_TABLES[QUEUE_EXPLORATION],
                 PHYSICAL_QUEUE_TABLES[QUEUE_BACKLOG],
                 PHYSICAL_QUEUE_TABLES[QUEUE_RECRAWL],
-                BLOCKED_DOMAIN_BACKOFF_TABLE,
+                BLOCKED_HOST_BACKOFF_TABLE,
                 LEASE_TABLE,
             )
     finally:
@@ -178,6 +185,7 @@ def test_apply_migrations_skips_baseline_when_legacy_history_exists(migrated_dsn
         "024_normalize_constraint_names.sql",
         "025_rename_physical_queue_columns.sql",
         "026_add_current_intent.sql",
+        "027_rename_domain_to_host.sql",
     ]
 
     conn = psycopg2.connect(migrated_dsn)
@@ -192,4 +200,5 @@ def test_apply_migrations_skips_baseline_when_legacy_history_exists(migrated_dsn
     assert "024_normalize_constraint_names.sql" in versions
     assert "025_rename_physical_queue_columns.sql" in versions
     assert "026_add_current_intent.sql" in versions
+    assert "027_rename_domain_to_host.sql" in versions
     assert BASELINE_VERSION not in versions

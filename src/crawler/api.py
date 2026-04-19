@@ -32,11 +32,11 @@ def list_pages(
     since: float = Query(0, description="Unix timestamp, return pages crawled after this time"),
     limit: int = Query(100, ge=1, le=1000),
     offset: int = Query(0, ge=0),
-    domain: str | None = Query(None),
+    host: str | None = Query(None),
 ):
     """List crawled pages."""
     storage = get_storage()
-    pages = storage.list_pages(since=since, limit=limit, offset=offset, domain=domain)
+    pages = storage.list_pages(since=since, limit=limit, offset=offset, host=host)
     for page in pages:
         if page.get("outlinks") is None:
             page["outlinks"] = []

@@ -142,7 +142,7 @@ operator view は primary state から導出されるべきであり、scheduler
 
 - `/stats`
 - queue/readiness summary
-- top-domain table
+- top-host table
 - error breakdown
 - runtime snapshot
 
@@ -169,7 +169,7 @@ URL が crawler の内部に入った後まで、通常の scheduler treatment �
 - `scheduler_queue_*` => scheduler membership surfaces
 - worker lane / queue ごとの worker pool => model truth ではなく operational execution surface
 - `active_leases` => execution ownership
-- `domain_state` => host state
+- `host_state` => host state
 - `fetch -> parse -> finalize -> persist` => crawl pipeline
 - `/stats` と runtime payload => read models
 - seed catalog と bootstrap path => bootstrap layer

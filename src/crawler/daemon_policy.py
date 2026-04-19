@@ -17,11 +17,11 @@ class DaemonSchedulerPolicy:
         min_frontline_runnable: int,
         min_frontline_hosts: int,
         blocked_retry_budget: int,
-        blocked_retry_per_domain: int,
+        blocked_retry_per_host: int,
         blocked_retry_max_consecutive_failures: int,
         quarantine_retire_min_consecutive_failures: int,
         quarantine_retire_after_seconds: float,
-        deferred_runnable_per_domain: int,
+        deferred_runnable_per_host: int,
         deferred_runnable_per_branch: int,
         deferred_surface_defer_seconds: float,
     ):
@@ -29,15 +29,19 @@ class DaemonSchedulerPolicy:
         self._min_frontline_runnable = min_frontline_runnable
         self._min_frontline_hosts = min_frontline_hosts
         self._blocked_retry_budget = blocked_retry_budget
-        self._blocked_retry_per_domain = blocked_retry_per_domain
+        self._blocked_retry_per_host = blocked_retry_per_host
         self._blocked_retry_max_consecutive_failures = blocked_retry_max_consecutive_failures
-        self._quarantine_retire_min_consecutive_failures = quarantine_retire_min_consecutive_failures
+        self._quarantine_retire_min_consecutive_failures = (
+            quarantine_retire_min_consecutive_failures
+        )
         self._quarantine_retire_after_seconds = quarantine_retire_after_seconds
-        self._deferred_runnable_per_domain = deferred_runnable_per_domain
+        self._deferred_runnable_per_host = deferred_runnable_per_host
         self._deferred_runnable_per_branch = deferred_runnable_per_branch
         self._deferred_surface_defer_seconds = deferred_surface_defer_seconds
 
-    def prepare_scheduler(self, scheduler, *, refresh_stale: Callable[[], None] | None = None) -> dict[str, int]:
+    def prepare_scheduler(
+        self, scheduler, *, refresh_stale: Callable[[], None] | None = None
+    ) -> dict[str, int]:
         """Apply queue maintenance before deciding whether a crawl cycle can run."""
         metrics = {
             "admitted": 0,
@@ -55,7 +59,7 @@ class DaemonSchedulerPolicy:
         if refresh_stale is not None:
             refresh_stale()
         metrics["deferred"] = scheduler.defer_overcrowded_deferred_surface(
-            keep_runnable_per_domain=self._deferred_runnable_per_domain,
+            keep_runnable_per_host=self._deferred_runnable_per_host,
             keep_runnable_per_branch=self._deferred_runnable_per_branch,
             defer_seconds=self._deferred_surface_defer_seconds,
         )
@@ -70,7 +74,7 @@ class DaemonSchedulerPolicy:
         admitted = self.admit_discovered(scheduler)
         rebalanced = self._rebalance_blocked(scheduler)
         deferred = scheduler.defer_overcrowded_deferred_surface(
-            keep_runnable_per_domain=self._deferred_runnable_per_domain,
+            keep_runnable_per_host=self._deferred_runnable_per_host,
             keep_runnable_per_branch=self._deferred_runnable_per_branch,
             defer_seconds=self._deferred_surface_defer_seconds,
         )
@@ -110,16 +114,20 @@ class DaemonSchedulerPolicy:
                     frontline_pending + max(needed_hosts, 0),
                     self._min_frontline_hosts,
                 ),
-                per_domain=1,
+                per_host=1,
             )
 
     def promote_blocked_retry(self, scheduler) -> int:
         """Restore a small cooled-down subset from blocked retry queue when runnable work is thin."""
-        if not hasattr(scheduler, "promote_blocked_domain_backoff"):
+        if not hasattr(scheduler, "promote_blocked_host_backoff"):
             return 0
         if self._blocked_retry_budget <= 0:
             return 0
-        runnable_count = scheduler.runnable_count() if hasattr(scheduler, "runnable_count") else scheduler.runnable_count()
+        runnable_count = (
+            scheduler.runnable_count()
+            if hasattr(scheduler, "runnable_count")
+            else scheduler.runnable_count()
+        )
         runnable_deficit = max(0, self._min_frontline_runnable - runnable_count)
         frontline_hosts = self._frontline_runnable_hosts(scheduler)
         host_deficit = max(0, self._min_frontline_hosts - frontline_hosts)
@@ -134,35 +142,35 @@ class DaemonSchedulerPolicy:
         limit = max(self._blocked_retry_budget, deficit)
         if retry_quarantine is not None:
             limit = min(limit, retry_quarantine)
-        per_domain = self._blocked_retry_per_domain if runnable_count > 0 else limit
-        return scheduler.promote_blocked_domain_backoff(
+        per_host = self._blocked_retry_per_host if runnable_count > 0 else limit
+        return scheduler.promote_blocked_host_backoff(
             limit,
-            per_domain=per_domain,
+            per_host=per_host,
             max_consecutive_failures=self._blocked_retry_max_consecutive_failures,
         )
 
     def retire_blocked_retry(self, scheduler) -> int:
         """Retire long-stuck blocked retry URLs out of pending scheduler state."""
-        if not hasattr(scheduler, "retire_blocked_domain_backoff"):
+        if not hasattr(scheduler, "retire_blocked_host_backoff"):
             return 0
         retry_quarantine = self._retry_quarantine_count(scheduler)
         if retry_quarantine is not None and retry_quarantine <= 0:
             return 0
-        return scheduler.retire_blocked_domain_backoff(
+        return scheduler.retire_blocked_host_backoff(
             min_consecutive_failures=self._quarantine_retire_min_consecutive_failures,
             min_quarantine_seconds=self._quarantine_retire_after_seconds,
         )
 
     def restore_recovered_blocked_retry(self, scheduler) -> int:
-        """Restore healthy blocked retry domains before using bounded retry promotion."""
-        if not hasattr(scheduler, "restore_recovered_blocked_domain_backoff"):
+        """Restore healthy blocked retry hosts before using bounded retry promotion."""
+        if not hasattr(scheduler, "restore_recovered_blocked_host_backoff"):
             return 0
         retry_quarantine = self._retry_quarantine_count(scheduler)
         if retry_quarantine is not None and retry_quarantine <= 0:
             return 0
-        return scheduler.restore_recovered_blocked_domain_backoff(
+        return scheduler.restore_recovered_blocked_host_backoff(
             limit=max(self._cycle_pages, self._min_frontline_runnable),
-            per_domain=max(self._blocked_retry_budget, self._min_frontline_runnable),
+            per_host=max(self._blocked_retry_budget, self._min_frontline_runnable),
         )
 
     def _retry_quarantine_count(self, scheduler) -> int | None:
@@ -172,19 +180,19 @@ class DaemonSchedulerPolicy:
         return int(blocked_reason_counts.get("retry_quarantine", 0) or 0)
 
     def _rebalance_blocked(self, scheduler) -> int:
-        if not hasattr(scheduler, "rebalance_blocked_domain_backoff"):
+        if not hasattr(scheduler, "rebalance_blocked_host_backoff"):
             return 0
-        quarantined, _restored = scheduler.rebalance_blocked_domain_backoff()
+        quarantined, _restored = scheduler.rebalance_blocked_host_backoff()
         return quarantined
 
     def _frontline_runnable_hosts(self, scheduler) -> int:
-        if hasattr(scheduler, "runnable_domain_count"):
-            return scheduler.runnable_domain_count(runnable_surface=RUNNABLE_SURFACE_FRONTLINE)
-        if hasattr(scheduler, "ready_domain_count"):
-            return scheduler.ready_domain_count(runnable_surface=RUNNABLE_SURFACE_FRONTLINE)
-        if hasattr(scheduler, "pending_domain_count"):
-            return scheduler.pending_domain_count(runnable_surface=RUNNABLE_SURFACE_FRONTLINE)
+        if hasattr(scheduler, "runnable_host_count"):
+            return scheduler.runnable_host_count(runnable_surface=RUNNABLE_SURFACE_FRONTLINE)
+        if hasattr(scheduler, "ready_host_count"):
+            return scheduler.ready_host_count(runnable_surface=RUNNABLE_SURFACE_FRONTLINE)
+        if hasattr(scheduler, "pending_host_count"):
+            return scheduler.pending_host_count(runnable_surface=RUNNABLE_SURFACE_FRONTLINE)
         if hasattr(scheduler, "runnable_count"):
             return scheduler.runnable_count(runnable_surface=RUNNABLE_SURFACE_FRONTLINE)
         readiness = scheduler.readiness() if hasattr(scheduler, "readiness") else None
-        return int(getattr(readiness, "runnable_domains", 0) or 0)
+        return int(getattr(readiness, "runnable_hosts", 0) or 0)

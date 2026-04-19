@@ -20,9 +20,7 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
 def _migration_names() -> list[str]:
     root = resources.files(MIGRATIONS_PACKAGE)
     return sorted(
-        entry.name
-        for entry in root.iterdir()
-        if entry.is_file() and entry.name.endswith(".sql")
+        entry.name for entry in root.iterdir() if entry.is_file() and entry.name.endswith(".sql")
     )
 
 

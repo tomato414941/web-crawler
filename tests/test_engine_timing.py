@@ -42,7 +42,7 @@ class _FakeLedger:
         return 0
 
 
-class _FakeDomainManager:
+class _FakeHostManager:
     async def is_allowed(self, url):
         return True
 
@@ -90,7 +90,7 @@ async def test_crawler_engine_records_stage_timings():
         start_url="https://example.com/",
         max_pages=1,
         url_ledger=ledger,
-        domain_manager=_FakeDomainManager(),
+        host_manager=_FakeHostManager(),
     )
     engine.fetcher = _FakeFetcher()
     storage = _FakeStorage()
@@ -134,7 +134,7 @@ async def test_parse_scheduler_delay_does_not_extend_fetch_slot():
         start_url="https://example.com/",
         max_pages=1,
         url_ledger=ledger,
-        domain_manager=_FakeDomainManager(),
+        host_manager=_FakeHostManager(),
     )
     engine.fetcher = _FakeFetcher()
     storage = _FakeStorage()
@@ -160,7 +160,7 @@ async def test_queue_wait_metrics_record_backpressure():
         start_url="https://example.com/",
         max_pages=1,
         url_ledger=ledger,
-        domain_manager=_FakeDomainManager(),
+        host_manager=_FakeHostManager(),
     )
     engine.fetcher = _FakeFetcher()
     storage = _SlowStorage()

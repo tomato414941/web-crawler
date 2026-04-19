@@ -144,7 +144,7 @@ This layer includes:
 
 - `/stats`
 - queue/readiness summaries
-- top-domain tables
+- top-host tables
 - error breakdowns
 - runtime snapshots
 
@@ -171,7 +171,7 @@ Current implementation concepts should converge toward the following meaning:
 - `scheduler_queue_*` => scheduler membership surfaces
 - worker lanes / queue-specific worker pools => operational execution surfaces, not model truth
 - `active_leases` => execution ownership
-- `domain_state` => host state
+- `host_state` => host state
 - `fetch -> parse -> finalize -> persist` => crawl pipeline
 - `/stats` and runtime payloads => read models
 - seed catalog and bootstrap paths => bootstrap layer

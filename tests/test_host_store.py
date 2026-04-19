@@ -1,4 +1,4 @@
-"""Tests for persistent domain state storage."""
+"""Tests for persistent host state storage."""
 
 import os
 import time
@@ -6,7 +6,7 @@ import time
 import psycopg2
 import pytest
 
-from crawler.domain_store import DomainStore
+from crawler.host_store import HostStore
 from crawler.migrate import apply_migrations
 from crawler.url_ledger import URL_LEDGER_TABLE
 
@@ -26,14 +26,14 @@ requires_pg = pytest.mark.skipif(not _pg_available(), reason="Postgres not avail
 
 
 @requires_pg
-class TestDomainStore:
+class TestHostStore:
     @pytest.fixture(autouse=True)
     def store(self):
         conn = psycopg2.connect(PG_DSN)
         conn.autocommit = False
         with conn.cursor() as cur:
             cur.execute("DROP TABLE IF EXISTS schema_migrations")
-            cur.execute("DROP TABLE IF EXISTS domain_state")
+            cur.execute("DROP TABLE IF EXISTS host_state")
             cur.execute(f"DROP TABLE IF EXISTS {URL_LEDGER_TABLE} CASCADE")
             cur.execute("DROP TABLE IF EXISTS pages")
         conn.commit()
@@ -41,7 +41,7 @@ class TestDomainStore:
         apply_migrations(PG_DSN)
         conn = psycopg2.connect(PG_DSN)
         conn.autocommit = False
-        store = DomainStore(conn, default_delay=1.5)
+        store = HostStore(conn, default_delay=1.5)
         yield store
         conn.close()
 
