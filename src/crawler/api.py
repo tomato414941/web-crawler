@@ -13,13 +13,17 @@ _storage: PgStorage | None = None
 
 
 def get_storage() -> PgStorage:
-    global _storage
-    if _storage is None:
-        dsn = os.environ.get("CRAWLER_POSTGRES_DSN")
-        if not dsn:
-            raise RuntimeError("CRAWLER_POSTGRES_DSN is required")
-        _storage = PgStorage(dsn)
-    return _storage
+    if _storage is not None:
+        return _storage
+    dsn = os.environ.get("CRAWLER_POSTGRES_DSN")
+    if not dsn:
+        raise RuntimeError("CRAWLER_POSTGRES_DSN is required")
+    return PgStorage(dsn)
+
+
+def close_storage(storage: PgStorage) -> None:
+    if storage is not _storage:
+        storage.close()
 
 
 @app.get("/health")
@@ -36,7 +40,10 @@ def list_pages(
 ):
     """List crawled pages."""
     storage = get_storage()
-    pages = storage.list_pages(since=since, limit=limit, offset=offset, host=host)
+    try:
+        pages = storage.list_pages(since=since, limit=limit, offset=offset, host=host)
+    finally:
+        close_storage(storage)
     for page in pages:
         if page.get("outlinks") is None:
             page["outlinks"] = []
@@ -47,7 +54,10 @@ def list_pages(
 def get_page(url_hash: str):
     """Get a single page with full content."""
     storage = get_storage()
-    page = storage.get_page(url_hash)
+    try:
+        page = storage.get_page(url_hash)
+    finally:
+        close_storage(storage)
     if not page:
         return JSONResponse(status_code=404, content={"error": "not found"})
     if page.get("outlinks") is None:
@@ -59,11 +69,17 @@ def get_page(url_hash: str):
 def stats():
     """Fast runtime crawl statistics."""
     storage = get_storage()
-    return storage.get_runtime_stats_summary()
+    try:
+        return storage.get_runtime_stats_summary()
+    finally:
+        close_storage(storage)
 
 
 @app.get("/stats/diagnostics")
 def diagnostic_stats():
     """Full live crawl diagnostics."""
     storage = get_storage()
-    return storage.get_stats()
+    try:
+        return storage.get_stats()
+    finally:
+        close_storage(storage)
