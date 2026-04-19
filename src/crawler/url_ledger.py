@@ -86,12 +86,25 @@ QUEUE_REQUIRED_COLUMNS = {
     "branch_key",
 }
 LEASE_TABLE = "active_leases"
+HOST_RUNNABLE_HEADS_TABLE = "host_runnable_heads"
 LEASE_REQUIRED_COLUMNS = {
     "url",
     "host",
     "physical_queue",
     "lease_token",
     "lease_expires_at",
+}
+HOST_RUNNABLE_HEADS_REQUIRED_COLUMNS = {
+    "physical_queue",
+    "host",
+    "head_url",
+    "head_next_fetch_at",
+    "head_added_at",
+    "head_priority",
+    "runnable_url_count",
+    "latency_penalty",
+    "runnable_at",
+    "refreshed_at",
 }
 BLOCKED_QUEUE_REQUIRED_COLUMNS = {
     "url",
@@ -192,6 +205,22 @@ class RunnableHostHead:
     priority: float
     latency_penalty: int
     host_pending_count: int
+
+
+@dataclass(frozen=True)
+class HostRunnableHead:
+    """Loose host-head read model row used for host-first performance evaluation."""
+
+    physical_queue: str
+    host_key: str
+    url: str
+    next_fetch_at: float
+    added_at: float
+    priority: float
+    runnable_url_count: int
+    latency_penalty: int
+    runnable_at: float
+    refreshed_at: float
 
 
 @dataclass(frozen=True)
@@ -505,6 +534,16 @@ class UrlLedger:
             if cur.fetchone()[0] is None:
                 raise RuntimeError(f"missing scheduler lease table: {LEASE_TABLE}")
             assert_public_table_columns(self._conn, LEASE_TABLE, LEASE_REQUIRED_COLUMNS)
+            cur.execute("SELECT to_regclass(%s)", (f"public.{HOST_RUNNABLE_HEADS_TABLE}",))
+            if cur.fetchone()[0] is None:
+                raise RuntimeError(
+                    f"missing scheduler host runnable-head table: {HOST_RUNNABLE_HEADS_TABLE}"
+                )
+            assert_public_table_columns(
+                self._conn,
+                HOST_RUNNABLE_HEADS_TABLE,
+                HOST_RUNNABLE_HEADS_REQUIRED_COLUMNS,
+            )
 
     def _normalize_physical_queue(self, physical_queue: str | None) -> str:
         """Return a supported scheduler physical queue."""
@@ -834,6 +873,208 @@ class UrlLedger:
         if not heads:
             return None
         return min(heads, key=self._runnable_host_head_sort_key)
+
+    def rebuild_host_runnable_heads(
+        self,
+        *,
+        runnable_surface: str | None = None,
+        physical_queues: list[str] | None = None,
+        now: float | None = None,
+    ) -> int:
+        """Rebuild the loose host-head read model from scheduler queue membership."""
+        refreshed_at = time.time() if now is None else now
+        normalized_physical_queues = self._normalized_surface_queues(
+            runnable_surface=runnable_surface,
+            physical_queues=physical_queues,
+        )
+        rebuilt = 0
+
+        try:
+            with self._conn.cursor() as cur:
+                for physical_queue in normalized_physical_queues:
+                    rebuilt += self._rebuild_host_runnable_heads_for_queue(
+                        cur,
+                        physical_queue=physical_queue,
+                        refreshed_at=refreshed_at,
+                    )
+            self._conn.commit()
+        except Exception:
+            self._conn.rollback()
+            logger.exception("Failed to rebuild host runnable heads")
+            raise
+        return rebuilt
+
+    def _rebuild_host_runnable_heads_for_queue(
+        self,
+        cur,
+        *,
+        physical_queue: str,
+        refreshed_at: float,
+    ) -> int:
+        """Replace read-model rows for one physical queue."""
+        normalized_physical_queue = self._normalize_physical_queue(physical_queue)
+        table_name = self._queue_table_sql(normalized_physical_queue)
+        latency_penalty = self._latency_penalty_sql(
+            "candidate",
+            latency_ms_sql="COALESCE(candidate_host_state.latency_ewma_ms, 0)",
+        )
+        runnable_at = (
+            "GREATEST("
+            "candidate.next_fetch_at, "
+            "COALESCE(candidate_host_state.next_request_at, 0), "
+            "COALESCE(candidate_host_state.backoff_until, 0)"
+            ")"
+        )
+
+        cur.execute(
+            f"DELETE FROM {HOST_RUNNABLE_HEADS_TABLE} WHERE physical_queue = %s",
+            (normalized_physical_queue,),
+        )
+        cur.execute(
+            f"""WITH candidate_rows AS (
+                    SELECT
+                        candidate.host,
+                        candidate.url,
+                        candidate.next_fetch_at,
+                        candidate.added_at,
+                        candidate.priority,
+                        COUNT(*) OVER (PARTITION BY candidate.host) AS runnable_url_count,
+                        {latency_penalty} AS latency_penalty,
+                        {runnable_at} AS runnable_at
+                    FROM {table_name} AS candidate
+                    LEFT JOIN host_state AS candidate_host_state
+                        ON candidate_host_state.host_key = candidate.host
+                ),
+                selected AS (
+                    SELECT DISTINCT ON (host)
+                        host,
+                        url,
+                        next_fetch_at,
+                        added_at,
+                        priority,
+                        runnable_url_count,
+                        latency_penalty,
+                        runnable_at
+                    FROM candidate_rows
+                    ORDER BY
+                        host,
+                        runnable_at ASC,
+                        latency_penalty ASC,
+                        added_at ASC,
+                        priority DESC,
+                        url ASC
+                )
+                INSERT INTO {HOST_RUNNABLE_HEADS_TABLE} (
+                    physical_queue,
+                    host,
+                    head_url,
+                    head_next_fetch_at,
+                    head_added_at,
+                    head_priority,
+                    runnable_url_count,
+                    latency_penalty,
+                    runnable_at,
+                    refreshed_at
+                )
+                SELECT
+                    %s,
+                    host,
+                    url,
+                    next_fetch_at,
+                    added_at,
+                    priority,
+                    runnable_url_count,
+                    latency_penalty,
+                    runnable_at,
+                    %s
+                FROM selected""",
+            (normalized_physical_queue, refreshed_at),
+        )
+        return cur.rowcount
+
+    def host_runnable_heads_from_read_model(
+        self,
+        *,
+        limit: int = HOST_HEAD_LOOKAHEAD,
+        host: str | None = None,
+        exclude_hosts: list[str] | None = None,
+        runnable_surface: str | None = None,
+        physical_queues: list[str] | None = None,
+        now: float | None = None,
+    ) -> list[HostRunnableHead]:
+        """Read ready host-head candidates from the loose read model."""
+        if limit <= 0:
+            return []
+
+        runnable_at = time.time() if now is None else now
+        normalized_physical_queues = self._normalized_surface_queues(
+            runnable_surface=runnable_surface,
+            physical_queues=physical_queues,
+        )
+        conditions = ["physical_queue = ANY(%s)", "runnable_at <= %s"]
+        params: list[object] = [normalized_physical_queues, runnable_at]
+
+        if host:
+            conditions.append("host = %s")
+            params.append(host)
+        if exclude_hosts:
+            conditions.append("NOT (host = ANY(%s))")
+            params.append(exclude_hosts)
+
+        with self._conn.cursor() as cur:
+            cur.execute(
+                f"""SELECT
+                        physical_queue,
+                        host,
+                        head_url,
+                        head_next_fetch_at,
+                        head_added_at,
+                        head_priority,
+                        runnable_url_count,
+                        latency_penalty,
+                        runnable_at,
+                        refreshed_at
+                    FROM {HOST_RUNNABLE_HEADS_TABLE}
+                    WHERE {" AND ".join(conditions)}
+                    ORDER BY
+                        runnable_url_count ASC,
+                        latency_penalty ASC,
+                        head_next_fetch_at ASC,
+                        head_added_at ASC,
+                        head_priority DESC,
+                        physical_queue ASC,
+                        head_url ASC
+                    LIMIT %s""",
+                (*params, limit),
+            )
+            rows = cur.fetchall()
+
+        return [
+            HostRunnableHead(
+                physical_queue=physical_queue,
+                host_key=host_key,
+                url=url,
+                next_fetch_at=next_fetch_at,
+                added_at=added_at,
+                priority=priority,
+                runnable_url_count=runnable_url_count,
+                latency_penalty=latency_penalty,
+                runnable_at=row_runnable_at,
+                refreshed_at=refreshed_at,
+            )
+            for (
+                physical_queue,
+                host_key,
+                url,
+                next_fetch_at,
+                added_at,
+                priority,
+                runnable_url_count,
+                latency_penalty,
+                row_runnable_at,
+                refreshed_at,
+            ) in rows
+        ]
 
     def _queue_table_sql(self, physical_queue: str) -> str:
         """Return the table name for one physical queue."""

@@ -1,10 +1,10 @@
 # web-crawler plan
 
-## Current milestone: host-first lease query optimization
+## Current milestone: host runnable-head read model v1
 
-The current priority is to reduce the cost of the existing host-first lease path before adding a new
-runtime read model. The durable host ledger foundation is already in place; normal lease execution
-still depends on queue membership, active leases, and `host_state`, not on `host_ledger`.
+The current priority is to add a loose host-level read model for measuring the next host-first
+execution design. This read model is not source of truth; normal lease execution still depends on
+queue membership, active leases, and `host_state`.
 
 The documentation split is:
 
@@ -15,28 +15,29 @@ The documentation split is:
 
 ## Completed in this slice
 
-- Replaced repeated correlated `host_state` lookups in readiness and latency ordering with one
-  `LEFT JOIN host_state` per candidate query.
-- Preserved the existing host-first behavior and ordering.
-- Kept missing `host_state` rows runnable by treating host timing and latency as zero.
-- Kept URL membership and active leases as the execution source of truth.
+- Added `host_runnable_heads` as a derived read model table.
+- Added rebuild support from scheduler queue membership and `host_state`.
+- Added a read API for ready host-head candidates from the read model.
+- Kept existing `lease_next` and `lease_batch` behavior unchanged.
 
 ## Not in this slice
 
-- No schema migration.
-- No `host_ready` execution read model.
-- No `host_ledger` dependency in the lease path.
-- No rewrite of the host pending count window yet.
+- No production lease-path switch to the read model.
+- No strict synchronization on every queue or host-state mutation.
+- No stale-candidate miss tracking yet.
+- No partial per-host refresh yet.
 
 ## Acceptance
 
-- Host gating by `next_request_at` and `backoff_until` still works.
-- Host latency ordering still works.
-- The runnable host-head query no longer contains correlated `host_state` subqueries.
+- `host_runnable_heads` exists on new and migrated databases.
+- Rebuild creates one head row per host and physical queue.
+- Read model candidates respect `runnable_at <= now`, `limit`, and excluded hosts.
+- Existing lease behavior is unchanged.
 - Related tests and lint pass.
 
 ## Next checks
 
-- Measure the production host-first query again after deploy.
-- Evaluate disabling PostgreSQL JIT for crawler sessions if query planning/execution is still costly.
-- Recheck whether `COUNT(*) OVER (PARTITION BY host)` remains the dominant cost.
+- Measure full rebuild time on production data.
+- Measure read-model candidate query latency with `EXPLAIN ANALYZE`.
+- Compare read-model candidate latency against the current host-head query.
+- If read latency is good, plan v2 cheap-miss lease selection with source-of-truth revalidation.

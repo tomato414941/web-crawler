@@ -15,6 +15,7 @@ from crawler.migrate import (
 )
 from crawler.url_ledger import (
     BLOCKED_HOST_BACKOFF_TABLE,
+    HOST_RUNNABLE_HEADS_TABLE,
     LEASE_TABLE,
     PHYSICAL_QUEUE_TABLES,
     QUEUE_BACKLOG,
@@ -38,6 +39,7 @@ def _reset_schema(dsn: str) -> None:
     try:
         with conn.cursor() as cur:
             cur.execute("DROP TABLE IF EXISTS public.schema_migrations")
+            cur.execute(f"DROP TABLE IF EXISTS public.{HOST_RUNNABLE_HEADS_TABLE}")
             cur.execute("DROP TABLE IF EXISTS public.host_ledger")
             cur.execute("DROP TABLE IF EXISTS public.host_state")
             cur.execute(f"DROP TABLE IF EXISTS public.{frontline_table}")
@@ -77,6 +79,7 @@ def test_apply_migrations_creates_expected_tables(migrated_dsn):
         "026_add_current_intent.sql",
         "027_rename_domain_to_host.sql",
         "028_add_host_ledger.sql",
+        "029_add_host_runnable_heads.sql",
     ]
 
     conn = psycopg2.connect(migrated_dsn)
@@ -94,7 +97,9 @@ def test_apply_migrations_creates_expected_tables(migrated_dsn):
                        to_regclass('public.{PHYSICAL_QUEUE_TABLES[QUEUE_BACKLOG]}'),
                        to_regclass('public.{PHYSICAL_QUEUE_TABLES[QUEUE_RECRAWL]}'),
                        to_regclass('public.{BLOCKED_HOST_BACKOFF_TABLE}'),
-                       to_regclass('public.{LEASE_TABLE}')
+                       to_regclass('public.{LEASE_TABLE}'),
+                       to_regclass('public.{HOST_RUNNABLE_HEADS_TABLE}'),
+                       to_regclass('public.idx_host_runnable_heads_ready')
                 """
             )
             assert cur.fetchone() == (
@@ -109,6 +114,8 @@ def test_apply_migrations_creates_expected_tables(migrated_dsn):
                 PHYSICAL_QUEUE_TABLES[QUEUE_RECRAWL],
                 BLOCKED_HOST_BACKOFF_TABLE,
                 LEASE_TABLE,
+                HOST_RUNNABLE_HEADS_TABLE,
+                "idx_host_runnable_heads_ready",
             )
     finally:
         conn.close()
@@ -191,6 +198,7 @@ def test_apply_migrations_skips_baseline_when_legacy_history_exists(migrated_dsn
         "026_add_current_intent.sql",
         "027_rename_domain_to_host.sql",
         "028_add_host_ledger.sql",
+        "029_add_host_runnable_heads.sql",
     ]
 
     conn = psycopg2.connect(migrated_dsn)
@@ -207,4 +215,5 @@ def test_apply_migrations_skips_baseline_when_legacy_history_exists(migrated_dsn
     assert "026_add_current_intent.sql" in versions
     assert "027_rename_domain_to_host.sql" in versions
     assert "028_add_host_ledger.sql" in versions
+    assert "029_add_host_runnable_heads.sql" in versions
     assert BASELINE_VERSION not in versions

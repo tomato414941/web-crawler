@@ -103,8 +103,9 @@ Recommended order:
    This is now implemented in the URL ledger query builder.
 2. Evaluate setting PostgreSQL JIT off for crawler sessions or for the specific hot-path query.
 3. Recheck whether `COUNT(*) OVER (PARTITION BY host)` is still too expensive at production scale.
-4. If the query still scans too much ready work per lease, design a host runnable capability
-   projection.
+   Production measurement shows it remains the dominant cost.
+4. Add a loose host runnable-head projection and measure rebuild/read latency before switching the
+   lease path.
 
 A host runnable capability projection would be a runtime read model. It would summarize which hosts
 currently have executable work and enough host capacity. It should not become a second source of
