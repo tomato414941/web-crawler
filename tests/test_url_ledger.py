@@ -1934,6 +1934,18 @@ class TestUrlLedger:
         assert ready == ["http://a.com/1"]
         assert scheduled == ["http://a.com/2", "http://a.com/3"]
 
+    def test_delay_overcrowded_scheduled_surface_honors_limit(self, ledger):
+        for index in range(1, 5):
+            ledger.place(CrawlTask(url=f"http://a.com/{index}", priority=0.55, added_at=1000 + index))
+
+        delayed = ledger.delay_overcrowded_scheduled_surface(
+            keep_runnable_per_host=1,
+            limit=1,
+            delay_seconds=60.0,
+        )
+
+        assert delayed == 1
+
     def test_delay_overcrowded_scheduled_surface_delays_excess_branch_urls(self, ledger):
         ledger.place(CrawlTask(url="http://a.com/docs/python/1", priority=0.55, added_at=1000))
         ledger.place(CrawlTask(url="http://a.com/docs/python/2", priority=0.55, added_at=1001))
