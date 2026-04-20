@@ -127,11 +127,7 @@ class DaemonSchedulerPolicy:
             return 0
         if self._blocked_retry_budget <= 0:
             return 0
-        runnable_count = (
-            scheduler.runnable_count()
-            if hasattr(scheduler, "runnable_count")
-            else scheduler.runnable_count()
-        )
+        runnable_count = self._runnable_supply_count(scheduler)
         runnable_deficit = max(0, self._min_runnable_supply_count - runnable_count)
         runnable_hosts = self._runnable_supply_hosts(scheduler)
         host_deficit = max(0, self._min_runnable_supply_hosts - runnable_hosts)
@@ -178,10 +174,12 @@ class DaemonSchedulerPolicy:
         )
 
     def _retry_quarantine_count(self, scheduler) -> int | None:
-        if not hasattr(scheduler, "blocked_reason_counts"):
-            return None
-        blocked_reason_counts = scheduler.blocked_reason_counts()
-        return int(blocked_reason_counts.get("retry_quarantine", 0) or 0)
+        if hasattr(scheduler, "blocked_host_backoff_count"):
+            return int(scheduler.blocked_host_backoff_count() or 0)
+        if hasattr(scheduler, "blocked_reason_counts"):
+            blocked_reason_counts = scheduler.blocked_reason_counts()
+            return int(blocked_reason_counts.get("retry_quarantine", 0) or 0)
+        return None
 
     def _rebalance_blocked(self, scheduler) -> int:
         if not hasattr(scheduler, "rebalance_blocked_host_backoff"):
@@ -200,3 +198,11 @@ class DaemonSchedulerPolicy:
             return scheduler.runnable_count(runnable_surface=SCHEDULER_SURFACE_RUNNABLE)
         readiness = scheduler.readiness() if hasattr(scheduler, "readiness") else None
         return int(getattr(readiness, "runnable_hosts", 0) or 0)
+
+    def _runnable_supply_count(self, scheduler) -> int:
+        if hasattr(scheduler, "pending_count"):
+            return scheduler.pending_count(runnable_surface=SCHEDULER_SURFACE_RUNNABLE)
+        if hasattr(scheduler, "runnable_count"):
+            return scheduler.runnable_count(runnable_surface=SCHEDULER_SURFACE_RUNNABLE)
+        readiness = scheduler.readiness() if hasattr(scheduler, "readiness") else None
+        return int(getattr(readiness, "runnable", 0) or 0)
