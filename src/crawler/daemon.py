@@ -40,6 +40,13 @@ def _format_error_breakdown(error_breakdown: dict[str, int]) -> str:
     return ", ".join(parts) if parts else "none"
 
 
+def _daemon_readiness(url_ledger: object):
+    """Read daemon gating readiness, preferring the lightweight runtime projection."""
+    if hasattr(url_ledger, "daemon_readiness"):
+        return url_ledger.daemon_readiness()
+    return url_ledger.readiness()
+
+
 class CrawlDaemon:
     """Runs CrawlerEngine in cycles, refreshing stale pages and re-seeding."""
 
@@ -197,7 +204,7 @@ class CrawlDaemon:
                             maintenance["promoted"],
                         )
 
-                    readiness = url_ledger.readiness()
+                    readiness = _daemon_readiness(url_ledger)
                     pending = readiness.pending
                     if pending == 0:
                         logger.info("No URLs to crawl, sleeping %ds", self._idle_sleep)
