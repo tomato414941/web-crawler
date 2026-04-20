@@ -1,5 +1,6 @@
 """Tests for host manager module."""
 
+import asyncio
 import time
 from dataclasses import replace
 
@@ -480,6 +481,36 @@ class TestHostManagerCaching:
             await manager.is_allowed("http://example.com/page2")
 
             # Should only have made one request
+            assert len(httpx_mock.get_requests()) == 1
+        finally:
+            await manager.close()
+
+    async def test_unavailable_robots_cache(self, httpx_mock):
+        """Should cache unavailable robots.txt responses too."""
+        httpx_mock.add_response(url="http://example.com/robots.txt", status_code=404)
+
+        manager = HostManager()
+        try:
+            await manager.is_allowed("http://example.com/page1")
+            await manager.is_allowed("http://example.com/page2")
+
+            assert len(httpx_mock.get_requests()) == 1
+        finally:
+            await manager.close()
+
+    async def test_concurrent_robots_checks_share_one_fetch(self, httpx_mock):
+        """Concurrent checks for the same host should share the first robots fetch."""
+        httpx_mock.add_response(url="http://example.com/robots.txt", status_code=404)
+
+        manager = HostManager()
+        try:
+            allowed = await asyncio.gather(
+                manager.is_allowed("http://example.com/page1"),
+                manager.is_allowed("http://example.com/page2"),
+                manager.is_allowed("http://example.com/page3"),
+            )
+
+            assert allowed == [True, True, True]
             assert len(httpx_mock.get_requests()) == 1
         finally:
             await manager.close()

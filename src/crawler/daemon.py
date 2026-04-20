@@ -257,12 +257,21 @@ class CrawlDaemon:
                     logger.info("Cycle %d: %d runnable / %d pending URLs", cycle, runnable, pending)
                     start = time.time()
                     cycle_result = await self._run_cycle(storage, url_ledger)
+                    host_first_fallback = {"attempts": 0, "hits": 0, "misses": 0}
                     if len(cycle_result) == 2:
                         pages, error_breakdown = cycle_result
                         timing_summary = {}
                         timing_summary_log = "timings=unavailable"
-                    else:
+                    elif len(cycle_result) == 4:
                         pages, error_breakdown, timing_summary, timing_summary_log = cycle_result
+                    else:
+                        (
+                            pages,
+                            error_breakdown,
+                            timing_summary,
+                            timing_summary_log,
+                            host_first_fallback,
+                        ) = cycle_result
                     elapsed = time.time() - start
                     rate = pages / elapsed if elapsed > 0 else 0
                     logger.info(
@@ -289,6 +298,7 @@ class CrawlDaemon:
                             "pages_per_second": round(rate, 3),
                             "errors": error_breakdown,
                             "timing_summary": timing_summary,
+                            "host_first_fallback": host_first_fallback,
                         }
                     )
                     cycle_payload.update(
@@ -465,7 +475,7 @@ class CrawlDaemon:
 
     async def _run_cycle(
         self, storage: PgStorage, url_ledger: UrlLedger
-    ) -> tuple[int, dict[str, int], dict[str, object], str]:
+    ) -> tuple[int, dict[str, int], dict[str, object], str, dict[str, int]]:
         """Run one crawl cycle."""
         runtime_storage = PgStorage(self._postgres_dsn)
         try:
@@ -501,6 +511,7 @@ class CrawlDaemon:
                     engine.failure_breakdown,
                     engine.timing_summary(),
                     engine.timing_summary_log(),
+                    engine._host_first_fallback_stats(),
                 )
         finally:
             runtime_storage.close()

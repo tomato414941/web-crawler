@@ -100,6 +100,7 @@ class HostManager:
         )
         self._runtime_states: dict[str, RuntimeHostState] = {}
         self._locks: dict[str, asyncio.Lock] = {}
+        self._robots_locks: dict[str, asyncio.Lock] = {}
         self._client: httpx.AsyncClient | None = None
         self._client_lock = asyncio.Lock()
         self._hosts = self._runtime_states
@@ -113,6 +114,12 @@ class HostManager:
         if host_key not in self._locks:
             self._locks[host_key] = asyncio.Lock()
         return self._locks[host_key]
+
+    async def _get_robots_lock(self, host_key: str) -> asyncio.Lock:
+        """Get or create the robots fetch lock for a host key."""
+        if host_key not in self._robots_locks:
+            self._robots_locks[host_key] = asyncio.Lock()
+        return self._robots_locks[host_key]
 
     async def _get_client(self) -> httpx.AsyncClient:
         """Get or create shared HTTP client for robots.txt fetching."""
@@ -191,7 +198,10 @@ class HostManager:
         state = self._runtime_states[host_key]
 
         if self.respect_robots and not self._is_robots_cache_valid(state):
-            await self._fetch_robots(state, url)
+            robots_lock = await self._get_robots_lock(host_key)
+            async with robots_lock:
+                if not self._is_robots_cache_valid(state):
+                    await self._fetch_robots(state, url)
 
         return state
 
