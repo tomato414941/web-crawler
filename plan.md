@@ -13,6 +13,8 @@ queries scan multi-million-row scheduler queues and delay the next crawl cycle.
   crawl cycle.
 - Made daemon runtime scheduler views use the already-read readiness object instead of live full
   queue diagnostics.
+- Stopped pre-cycle blocked-retry promotion from calling `blocked_reason_counts()` and full durable
+  scheduler snapshots.
 - Changed `/stats/diagnostics` to return runtime-snapshot-only degraded diagnostics.
 - Added tests that fail if cycle completion calls live scheduler stats or snapshots.
 
@@ -20,6 +22,7 @@ queries scan multi-million-row scheduler queues and delay the next crawl cycle.
 
 - Cycle completion does not call `url_ledger.stats()`.
 - Cycle completion does not call `scheduler_state_snapshot()`.
+- Pre-cycle retry promotion uses cheap runnable-surface and blocked-queue counts.
 - `/stats` stays backed by the persisted runtime snapshot.
 - `/stats/diagnostics` does not execute the expensive `pending_entries` full scheduler scan.
 - Related tests and lint pass before deploy.

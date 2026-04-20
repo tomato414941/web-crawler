@@ -1071,13 +1071,11 @@ def test_promote_blocked_retry_restores_small_subset_when_ready_is_thin():
             assert runnable_surface == "runnable"
             return 3
 
+        def blocked_host_backoff_count(self):
+            return 12
+
         def blocked_reason_counts(self):
-            return {
-                "next_fetch_at": 0,
-                "host_next_request": 0,
-                "host_backoff": 0,
-                "retry_quarantine": 12,
-            }
+            raise AssertionError("retry promotion should use the cheap blocked queue count")
 
         def promote_blocked_host_backoff(self, limit, per_host=1, max_consecutive_failures=None):
             self.calls.append((limit, per_host, max_consecutive_failures))
