@@ -19,24 +19,24 @@ scheduler abstractions until runtime evidence says they are needed.
 - Split cycle timing enough to show that current production latency is mostly robots/precheck and
   fetch cost, not only lease selection.
 - Shortened the robots fetch timeout and verified production still runs.
+- Exposed host-first read-model fallback counters in runtime stats.
+- Added a per-host robots fetch lock so concurrent workers share one robots.txt check.
+- Deployed commit `88359ef` and verified `/health`, `/stats`, and `/stats/diagnostics`.
 
 ## Current slice
 
-- Expose host-first read-model fallback counters in runtime stats.
-- Prevent concurrent workers for the same host from repeatedly fetching the same robots.txt.
-- Keep this slice schema-free: no migration, no new durable table, no queue policy rewrite.
-- Commit, push, deploy, and evaluate production `/stats`.
+- Observe one or more production cycles with the new fallback counters.
+- Decide whether high fallback misses are just idle worker polling or a scheduler supply issue.
+- If speed remains low, target fetch transport behavior before adding scheduler abstractions.
 
 ## Acceptance
 
-- Runtime stats include `host_first_fallback` counters.
-- Repeated unavailable robots checks for one host use the runtime cache instead of repeating HTTP.
-- Concurrent robots checks for one host share one fetch.
-- Related tests, full tests, lint, and diff checks pass before deploy.
+- Production `/stats` continues to expose `host_first_fallback`.
+- Production cycle timing identifies the next dominant cost after robots/fetch/scheduler/persist.
+- Related tests and lint pass before the next deploy.
 
 ## Next checks after deploy
 
-- Confirm `/health`, `/stats`, and `/stats/diagnostics` are healthy.
-- Confirm production crawler and API containers are running.
-- Recheck production crawl timing and `host_first_fallback` after a full cycle.
-- If speed remains low, target fetch transport behavior before adding scheduler abstractions.
+- Recheck production crawl timing after another full cycle.
+- Compare active-cycle timing against completed-cycle throughput.
+- Keep changes schema-free unless runtime evidence shows a durable model is needed.
