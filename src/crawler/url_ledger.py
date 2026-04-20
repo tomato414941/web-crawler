@@ -1977,14 +1977,25 @@ class UrlLedger:
         *,
         keep_runnable_per_host: int = 128,
         keep_runnable_per_branch: int = 16,
+        limit: int | None = None,
         delay_seconds: float = 1800.0,
     ) -> int:
         """Delay excess runnable work on the scheduled surface so one host or branch cannot dominate."""
         if keep_runnable_per_host <= 0 or keep_runnable_per_branch <= 0:
             return 0
+        if limit is not None and limit <= 0:
+            return 0
 
         now = time.time()
         delayed_until = now + delay_seconds
+        limit_sql = "" if limit is None else "\n                        LIMIT %s"
+        params: tuple[object, ...] = (
+            now,
+            keep_runnable_per_host,
+            keep_runnable_per_branch,
+            *((limit,) if limit is not None else ()),
+            delayed_until,
+        )
         with self._conn.cursor() as cur:
             cur.execute(
                 f"""WITH ranked AS (
@@ -2005,17 +2016,14 @@ class UrlLedger:
                         FROM ranked
                         WHERE ranked.host_rownum > %s
                            OR ranked.branch_rownum > %s
+                        ORDER BY ranked.host_rownum DESC, ranked.branch_rownum DESC, ranked.url ASC
+                        {limit_sql}
                     )
                     UPDATE {URL_LEDGER_TABLE}
                     SET next_fetch_at = GREATEST(next_fetch_at, %s)
                     WHERE url IN (SELECT url FROM scheduled)
                     RETURNING url, host, priority, next_fetch_at, added_at""",
-                (
-                    now,
-                    keep_runnable_per_host,
-                    keep_runnable_per_branch,
-                    delayed_until,
-                ),
+                params,
             )
             rows = cur.fetchall()
             pending_rows = self._pending_rows_for_physical_queue(

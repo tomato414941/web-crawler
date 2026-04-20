@@ -24,6 +24,7 @@ class CrawlerSettings(BaseSettings):
     max_host_backoff_seconds: float = 600.0
     daemon_keep_runnable_per_host: int = 128
     daemon_keep_runnable_per_branch: int = 16
+    daemon_scheduled_surface_delay_limit: int = 5000
     daemon_scheduled_surface_delay_seconds: float = 1800.0
     daemon_min_runnable_sleep: float = 0.5
     daemon_min_runnable_supply_pending: int = 3

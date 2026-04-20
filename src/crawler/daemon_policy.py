@@ -23,6 +23,7 @@ class DaemonSchedulerPolicy:
         quarantine_retire_after_seconds: float,
         scheduled_runnable_per_host: int,
         scheduled_runnable_per_branch: int,
+        scheduled_surface_delay_limit: int,
         scheduled_surface_delay_seconds: float,
     ):
         self._cycle_pages = cycle_pages
@@ -37,6 +38,7 @@ class DaemonSchedulerPolicy:
         self._quarantine_retire_after_seconds = quarantine_retire_after_seconds
         self._scheduled_runnable_per_host = scheduled_runnable_per_host
         self._scheduled_runnable_per_branch = scheduled_runnable_per_branch
+        self._scheduled_surface_delay_limit = scheduled_surface_delay_limit
         self._scheduled_surface_delay_seconds = scheduled_surface_delay_seconds
 
     def prepare_scheduler(
@@ -61,6 +63,7 @@ class DaemonSchedulerPolicy:
         metrics["scheduled"] = scheduler.delay_overcrowded_scheduled_surface(
             keep_runnable_per_host=self._scheduled_runnable_per_host,
             keep_runnable_per_branch=self._scheduled_runnable_per_branch,
+            limit=self._scheduled_surface_delay_limit,
             delay_seconds=self._scheduled_surface_delay_seconds,
         )
         metrics["rebalanced_after"] = self._rebalance_blocked(scheduler)
@@ -76,6 +79,7 @@ class DaemonSchedulerPolicy:
         scheduled = scheduler.delay_overcrowded_scheduled_surface(
             keep_runnable_per_host=self._scheduled_runnable_per_host,
             keep_runnable_per_branch=self._scheduled_runnable_per_branch,
+            limit=self._scheduled_surface_delay_limit,
             delay_seconds=self._scheduled_surface_delay_seconds,
         )
         promoted = self.promote_blocked_retry(scheduler)
