@@ -40,7 +40,7 @@ Current interpretation:
 
 - `runnable` and `scheduled` are internal scheduler membership projections.
 - `normal` is the runtime-facing runnable view for regular crawling across those projections.
-- `refresh` is recrawl work and remains separate from regular crawling.
+- `refresh` work remains separate from regular crawling.
 - active leases own execution after a URL is selected.
 - host state decides whether a host may be touched and how much capacity it has.
 

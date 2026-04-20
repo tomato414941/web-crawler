@@ -13,9 +13,9 @@ from crawler.url_ledger import (
     CrawlTask,
     LEASE_TABLE,
     PHYSICAL_QUEUE_TABLES,
-    QUEUE_SCHEDULED,
+    QUEUE_REFRESH,
     QUEUE_RUNNABLE,
-    QUEUE_RECRAWL,
+    QUEUE_SCHEDULED,
     URL_LEDGER_TABLE,
     UrlLedger,
 )
@@ -39,12 +39,9 @@ def _reset_schema(dsn: str) -> None:
             cur.execute("DROP TABLE IF EXISTS public.host_state")
             cur.execute(f"DROP TABLE IF EXISTS public.{PHYSICAL_QUEUE_TABLES[QUEUE_RUNNABLE]}")
             cur.execute(f"DROP TABLE IF EXISTS public.{PHYSICAL_QUEUE_TABLES[QUEUE_SCHEDULED]}")
-            cur.execute(f"DROP TABLE IF EXISTS public.{PHYSICAL_QUEUE_TABLES[QUEUE_RECRAWL]}")
+            cur.execute(f"DROP TABLE IF EXISTS public.{PHYSICAL_QUEUE_TABLES[QUEUE_REFRESH]}")
             cur.execute(f"DROP TABLE IF EXISTS public.{BLOCKED_HOST_BACKOFF_TABLE}")
             cur.execute(f"DROP TABLE IF EXISTS public.{LEASE_TABLE}")
-            cur.execute("DROP TABLE IF EXISTS public.frontier_queue_recrawl")
-            cur.execute("DROP TABLE IF EXISTS public.frontier_queue_blocked_host_backoff")
-            cur.execute("DROP TABLE IF EXISTS public.frontier_lease_active")
             cur.execute(f"DROP TABLE IF EXISTS public.{URL_LEDGER_TABLE} CASCADE")
             cur.execute("DROP TABLE IF EXISTS public.crawler_runtime_stats")
             cur.execute("DROP TABLE IF EXISTS public.pages")
@@ -105,7 +102,7 @@ def test_refresh_stale_skips_when_pending_queue_is_full(pg_resources):
 
     with storage._conn.cursor() as cur:
         cur.execute(
-            f"SELECT COUNT(*) FROM {PHYSICAL_QUEUE_TABLES[QUEUE_RECRAWL]} WHERE url = %s",
+            f"SELECT COUNT(*) FROM {PHYSICAL_QUEUE_TABLES[QUEUE_REFRESH]} WHERE url = %s",
             (stale_url,),
         )
         (refresh_count,) = cur.fetchone()
@@ -143,7 +140,7 @@ def test_refresh_stale_requeues_only_oldest_rows_needed(pg_resources):
         cur.execute(
             f"""
             SELECT url
-            FROM {PHYSICAL_QUEUE_TABLES[QUEUE_RECRAWL]}
+            FROM {PHYSICAL_QUEUE_TABLES[QUEUE_REFRESH]}
             WHERE url LIKE 'https://example.com/stale-%'
             ORDER BY url
             """

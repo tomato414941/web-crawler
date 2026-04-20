@@ -217,7 +217,7 @@ Two layers:
 ### Scheduling
 
 Two persistent schedulers work together:
-1. **URL scheduler** — controls retry timing, leasing, and recrawl eligibility
+1. **URL scheduler** — controls retry timing, leasing, and refresh eligibility
 2. **Host state** — controls per-host crawl delay and cooldown via `host_state`
 
 Current scheduler state is split across explicit physical tables:

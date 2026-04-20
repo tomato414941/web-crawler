@@ -9,7 +9,6 @@ import psycopg2
 
 MIGRATIONS_PACKAGE = "crawler.sql_migrations"
 BASELINE_VERSION = "001_schema.sql"
-LEGACY_BASELINE_REQUIRED_VERSION = "032_add_host_latency_observations.sql"
 SCHEMA_MIGRATIONS_SQL = """
 CREATE TABLE IF NOT EXISTS schema_migrations (
     version TEXT PRIMARY KEY,
@@ -39,23 +38,6 @@ def apply_migrations(dsn: str) -> list[str]:
             applied = {version for (version,) in cur.fetchall()}
 
         applied_now: list[str] = []
-        if applied and BASELINE_VERSION not in applied:
-            if LEGACY_BASELINE_REQUIRED_VERSION not in applied:
-                raise RuntimeError(
-                    "Database migration history is older than the current baseline. "
-                    f"Apply legacy migrations through {LEGACY_BASELINE_REQUIRED_VERSION} "
-                    "before upgrading to this release."
-                )
-            with conn.cursor() as cur:
-                cur.execute("DELETE FROM schema_migrations")
-                cur.execute(
-                    "INSERT INTO schema_migrations (version, applied_at) VALUES (%s, %s)",
-                    (BASELINE_VERSION, time()),
-                )
-            conn.commit()
-            applied = {BASELINE_VERSION}
-            applied_now.append(BASELINE_VERSION)
-
         root = resources.files(MIGRATIONS_PACKAGE)
         for version in _migration_names():
             if version in applied:

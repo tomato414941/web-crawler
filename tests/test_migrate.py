@@ -5,12 +5,7 @@ import os
 import psycopg2
 import pytest
 
-from importlib import resources
-
 from crawler.migrate import (
-    BASELINE_VERSION,
-    MIGRATIONS_PACKAGE,
-    SCHEMA_MIGRATIONS_SQL,
     apply_migrations,
 )
 from crawler.url_ledger import (
@@ -18,9 +13,9 @@ from crawler.url_ledger import (
     HOST_RUNNABLE_HEADS_TABLE,
     LEASE_TABLE,
     PHYSICAL_QUEUE_TABLES,
-    QUEUE_SCHEDULED,
     QUEUE_RUNNABLE,
-    QUEUE_RECRAWL,
+    QUEUE_SCHEDULED,
+    QUEUE_REFRESH,
     URL_LEDGER_TABLE,
 )
 
@@ -33,7 +28,7 @@ pytestmark = pytest.mark.skipif(
 def _reset_schema(dsn: str) -> None:
     runnable_table = PHYSICAL_QUEUE_TABLES[QUEUE_RUNNABLE]
     scheduled_table = PHYSICAL_QUEUE_TABLES[QUEUE_SCHEDULED]
-    refresh_table = PHYSICAL_QUEUE_TABLES[QUEUE_RECRAWL]
+    refresh_table = PHYSICAL_QUEUE_TABLES[QUEUE_REFRESH]
     conn = psycopg2.connect(dsn)
     conn.autocommit = False
     try:
@@ -46,13 +41,7 @@ def _reset_schema(dsn: str) -> None:
             cur.execute(f"DROP TABLE IF EXISTS public.{scheduled_table}")
             cur.execute(f"DROP TABLE IF EXISTS public.{refresh_table}")
             cur.execute(f"DROP TABLE IF EXISTS public.{BLOCKED_HOST_BACKOFF_TABLE}")
-            cur.execute("DROP TABLE IF EXISTS public.frontier_queue_exploration")
-            cur.execute("DROP TABLE IF EXISTS public.frontier_queue_backlog")
-            cur.execute("DROP TABLE IF EXISTS public.frontier_queue_recrawl")
-            cur.execute("DROP TABLE IF EXISTS public.frontier_queue_blocked_domain_backoff")
-            cur.execute("DROP TABLE IF EXISTS public.frontier_queue_blocked_host_backoff")
             cur.execute(f"DROP TABLE IF EXISTS public.{LEASE_TABLE}")
-            cur.execute("DROP TABLE IF EXISTS public.frontier_lease_active")
             cur.execute(f"DROP TABLE IF EXISTS public.{URL_LEDGER_TABLE} CASCADE")
             cur.execute("DROP TABLE IF EXISTS public.crawler_runtime_stats")
             cur.execute("DROP TABLE IF EXISTS public.pages")
@@ -87,7 +76,7 @@ def test_apply_migrations_creates_expected_tables(migrated_dsn):
                        to_regclass('public.crawler_runtime_stats'),
                        to_regclass('public.{PHYSICAL_QUEUE_TABLES[QUEUE_RUNNABLE]}'),
                        to_regclass('public.{PHYSICAL_QUEUE_TABLES[QUEUE_SCHEDULED]}'),
-                       to_regclass('public.{PHYSICAL_QUEUE_TABLES[QUEUE_RECRAWL]}'),
+                       to_regclass('public.{PHYSICAL_QUEUE_TABLES[QUEUE_REFRESH]}'),
                        to_regclass('public.{BLOCKED_HOST_BACKOFF_TABLE}'),
                        to_regclass('public.{LEASE_TABLE}'),
                        to_regclass('public.{HOST_RUNNABLE_HEADS_TABLE}'),
@@ -107,7 +96,7 @@ def test_apply_migrations_creates_expected_tables(migrated_dsn):
                 "crawler_runtime_stats",
                 PHYSICAL_QUEUE_TABLES[QUEUE_RUNNABLE],
                 PHYSICAL_QUEUE_TABLES[QUEUE_SCHEDULED],
-                PHYSICAL_QUEUE_TABLES[QUEUE_RECRAWL],
+                PHYSICAL_QUEUE_TABLES[QUEUE_REFRESH],
                 BLOCKED_HOST_BACKOFF_TABLE,
                 LEASE_TABLE,
                 HOST_RUNNABLE_HEADS_TABLE,
@@ -121,7 +110,7 @@ def test_apply_migrations_creates_expected_tables(migrated_dsn):
         conn.close()
 
 
-def test_apply_migrations_drops_legacy_url_ledger_columns(migrated_dsn):
+def test_apply_migrations_creates_current_url_ledger_columns(migrated_dsn):
     apply_migrations(migrated_dsn)
 
     conn = psycopg2.connect(migrated_dsn)
@@ -170,36 +159,3 @@ def test_apply_migrations_is_idempotent(migrated_dsn):
     applied = apply_migrations(migrated_dsn)
 
     assert applied == []
-
-
-def test_apply_migrations_resets_current_legacy_history_to_baseline(migrated_dsn):
-    root = resources.files(MIGRATIONS_PACKAGE)
-    baseline_sql = root.joinpath(BASELINE_VERSION).read_text(encoding="utf-8")
-
-    conn = psycopg2.connect(migrated_dsn)
-    conn.autocommit = False
-    try:
-        with conn.cursor() as cur:
-            cur.execute(SCHEMA_MIGRATIONS_SQL)
-            cur.execute(baseline_sql)
-            cur.execute(
-                "INSERT INTO schema_migrations (version, applied_at) VALUES (%s, EXTRACT(epoch FROM now()))",
-                ("032_add_host_latency_observations.sql",),
-            )
-        conn.commit()
-    finally:
-        conn.close()
-
-    applied = apply_migrations(migrated_dsn)
-
-    assert applied == [BASELINE_VERSION]
-
-    conn = psycopg2.connect(migrated_dsn)
-    try:
-        with conn.cursor() as cur:
-            cur.execute("SELECT version FROM schema_migrations ORDER BY version")
-            versions = [version for (version,) in cur.fetchall()]
-    finally:
-        conn.close()
-
-    assert versions == [BASELINE_VERSION]
