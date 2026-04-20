@@ -1,10 +1,10 @@
 # web-crawler plan
 
-## Current milestone: remove hidden historical debt
+## Current milestone: improve crawl throughput
 
-The project now uses a single greenfield schema baseline. The immediate priority is to keep the
-repo aligned with that baseline by removing old migration bridges, old queue vocabulary, and stale
-planning text.
+The project now has a single greenfield schema baseline and no known active migration bridge.
+The immediate priority is to raise production crawl speed without adding durable schema or broad
+scheduler abstractions until runtime evidence says they are needed.
 
 ## Completed
 
@@ -13,27 +13,30 @@ planning text.
 - Reset database migrations to a single `001_schema.sql` baseline.
 - Reset production `schema_migrations` to the new baseline.
 - Removed archived migration history from the repo.
+- Removed the one-time migration baseline bridge.
+- Removed test cleanup for obsolete scheduler table names.
+- Renamed the remaining internal refresh queue constant to refresh vocabulary.
 - Split cycle timing enough to show that current production latency is mostly robots/precheck and
   fetch cost, not only lease selection.
 - Shortened the robots fetch timeout and verified production still runs.
 
 ## Current slice
 
-- Remove the one-time migration baseline bridge now that production has been reset.
-- Remove test cleanup for obsolete scheduler table names.
-- Rename the remaining internal refresh queue constant to refresh vocabulary.
-- Keep this cleanup behavior-neutral: no scheduler policy or speed logic changes.
+- Expose host-first read-model fallback counters in runtime stats.
+- Prevent concurrent workers for the same host from repeatedly fetching the same robots.txt.
+- Keep this slice schema-free: no migration, no new durable table, no queue policy rewrite.
+- Commit, push, deploy, and evaluate production `/stats`.
 
 ## Acceptance
 
-- `sql_migrations/` contains only the current baseline and package marker.
-- `schema_migrations` on production remains `001_schema.sql`.
-- Repo search has no old migration bridge, old scheduler table cleanup, or old refresh queue vocabulary.
+- Runtime stats include `host_first_fallback` counters.
+- Repeated unavailable robots checks for one host use the runtime cache instead of repeating HTTP.
+- Concurrent robots checks for one host share one fetch.
 - Related tests, full tests, lint, and diff checks pass before deploy.
 
 ## Next checks after deploy
 
 - Confirm `/health`, `/stats`, and `/stats/diagnostics` are healthy.
 - Confirm production crawler and API containers are running.
-- Recheck production crawl timing after a full cycle.
-- If speed remains low, target fetch/robots behavior next rather than adding scheduler abstractions.
+- Recheck production crawl timing and `host_first_fallback` after a full cycle.
+- If speed remains low, target fetch transport behavior before adding scheduler abstractions.

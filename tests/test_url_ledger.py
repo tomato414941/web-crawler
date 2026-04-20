@@ -102,6 +102,54 @@ class TestCrawlTask:
         assert before <= task.added_at <= after
 
 
+class TestHostFirstFallbackStats:
+    def test_fallback_stats_track_bounded_scan_hit_and_miss(self, monkeypatch):
+        class FakeConn:
+            def commit(self):
+                return None
+
+            def rollback(self):
+                return None
+
+        ledger = UrlLedger.__new__(UrlLedger)
+        ledger._conn = FakeConn()
+        ledger.reset_host_first_fallback_stats()
+
+        monkeypatch.setattr(ledger, "_recover_leased_locked", lambda *_args, **_kwargs: None)
+        monkeypatch.setattr(
+            ledger,
+            "_lease_next_host_first_from_read_model",
+            lambda **_kwargs: None,
+        )
+        fallback_results = iter([CrawlTask(url="http://example.com/"), None])
+        monkeypatch.setattr(
+            ledger,
+            "_lease_next_host_first_from_bounded_scan",
+            lambda **_kwargs: next(fallback_results),
+        )
+
+        first = ledger._lease_next_host_first(
+            host=None,
+            lease_seconds=None,
+            exclude_hosts=None,
+            physical_queue=QUEUE_RUNNABLE,
+        )
+        second = ledger._lease_next_host_first(
+            host=None,
+            lease_seconds=None,
+            exclude_hosts=None,
+            physical_queue=QUEUE_RUNNABLE,
+        )
+
+        assert first is not None
+        assert second is None
+        assert ledger.host_first_fallback_stats() == {
+            "attempts": 2,
+            "hits": 1,
+            "misses": 1,
+        }
+
+
 class TestUrlLedgerSqlFragments:
     def test_runnable_host_heads_uses_host_state_join(self):
         ledger = UrlLedger.__new__(UrlLedger)

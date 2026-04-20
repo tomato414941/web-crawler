@@ -394,6 +394,17 @@ class CrawlerEngine:
         self._publish_queue_depth_max = 0
         self._timing_summary = _TimingAccumulator()
 
+    def _host_first_fallback_stats(self) -> dict[str, int]:
+        stats_fn = getattr(self.scheduler, "host_first_fallback_stats", None)
+        if not callable(stats_fn):
+            return {"attempts": 0, "hits": 0, "misses": 0}
+        raw = stats_fn()
+        return {
+            "attempts": int(raw.get("attempts", 0)),
+            "hits": int(raw.get("hits", 0)),
+            "misses": int(raw.get("misses", 0)),
+        }
+
     def snapshot_runtime_stats(self) -> dict[str, object]:
         """Return live queue/backpressure stats for external observers."""
         return {
@@ -426,6 +437,7 @@ class CrawlerEngine:
             "publish_queue_depth_max": self._publish_queue_depth_max,
             "failure_breakdown": dict(self._failure_counts),
             "timing_summary": self._timing_summary.snapshot(),
+            "host_first_fallback": self._host_first_fallback_stats(),
         }
 
     def timing_summary(self) -> dict[str, object]:
@@ -1283,6 +1295,9 @@ class CrawlerEngine:
         self._finalize_queue_depth_max = 0
         self._publish_queue_depth_max = 0
         self._timing_summary = _TimingAccumulator()
+        reset_fallback_stats = getattr(self.scheduler, "reset_host_first_fallback_stats", None)
+        if callable(reset_fallback_stats):
+            reset_fallback_stats()
 
         if self.start_url and self.scheduler.pending_count() == 0:
             self.scheduler.place(self._build_seed_task(self.start_url))
