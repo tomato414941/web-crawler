@@ -720,6 +720,42 @@ class TestUrlLedger:
         ]
         assert {head.refreshed_at for head in heads} == {1234.0}
 
+    def test_host_runnable_heads_are_updated_incrementally(self, ledger):
+        now = 1000.0
+        ledger.place(CrawlTask(url="http://a.com/1", added_at=1000, next_fetch_at=now - 1))
+        ledger.place(CrawlTask(url="http://a.com/2", added_at=1001, next_fetch_at=now - 1))
+        ledger.place(CrawlTask(url="http://b.com/1", added_at=900, next_fetch_at=now - 1))
+
+        heads = ledger.host_runnable_heads_from_read_model(
+            runnable_surface=SCHEDULER_SURFACE_RUNNABLE,
+            now=now,
+        )
+
+        assert [(head.host_key, head.url, head.runnable_url_count) for head in heads] == [
+            ("b.com", "http://b.com/1", 1),
+            ("a.com", "http://a.com/1", 2),
+        ]
+
+    def test_host_runnable_heads_advance_after_lease(self, ledger):
+        now = 1000.0
+        ledger.place(CrawlTask(url="http://a.com/1", added_at=1000, next_fetch_at=now - 1))
+        ledger.place(CrawlTask(url="http://a.com/2", added_at=1001, next_fetch_at=now - 1))
+
+        leased = ledger.lease_next(
+            lease_strategy=LEASE_STRATEGY_HOST_FIRST,
+            runnable_surface=SCHEDULER_SURFACE_RUNNABLE,
+        )
+
+        assert leased is not None
+        assert leased.url == "http://a.com/1"
+        heads = ledger.host_runnable_heads_from_read_model(
+            runnable_surface=SCHEDULER_SURFACE_RUNNABLE,
+            now=now,
+        )
+        assert [(head.host_key, head.url, head.runnable_url_count) for head in heads] == [
+            ("a.com", "http://a.com/2", 1),
+        ]
+
     def test_host_runnable_heads_read_model_respects_runnable_at(self, ledger):
         now = 1000.0
         ledger.place(CrawlTask(url="http://a.com/1", added_at=1000, next_fetch_at=now - 1))

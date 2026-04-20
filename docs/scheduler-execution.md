@@ -90,12 +90,12 @@ Execution changes should preserve these constraints:
 - keep host-first breadth as the normal execution strategy
 - keep `refresh` separate from normal crawling
 - keep `normal` as a runtime-facing view, not a durable URL state
-- avoid schema migrations unless the current query shape cannot be made cheap enough
+- accept small schema migrations when they remove global hot-path work
 
 ## Implementation Direction
 
 The current implementation direction is to keep queue membership as the scheduler source of truth,
-but move normal host-first candidate selection onto a loose read model.
+but move normal host-first candidate selection onto an incremental loose read model.
 
 Implemented order:
 
@@ -106,6 +106,8 @@ Implemented order:
    Production measurement shows it remains the dominant cost.
 4. Add a loose host runnable-head projection and measure rebuild/read latency.
 5. Use the host runnable-head read model as the first normal host-first lease candidate source.
+6. Stop rebuilding that projection globally at crawl-cycle start.
+7. Refresh only the affected `(physical_queue, host)` heads when queue membership changes.
 
 The host runnable-head projection is a runtime read model. It summarizes which hosts currently have
 executable work and enough host capacity. It is not a second source of truth for URL membership.
@@ -114,9 +116,10 @@ The lease path therefore uses a cheap-miss pattern:
 
 - read candidate host heads from `host_runnable_heads`
 - revalidate each candidate against queue membership, active leases, and `host_state`
-- delete stale read-model candidates after a miss so old heads do not keep blocking selection
-- fall back to the derived host-first query when the read model is empty, stale, or unavailable
+- delete and host-locally refresh stale read-model candidates after a miss
+- use a bounded queue scan only as a safety fallback when the read model is empty or unavailable
 
-The read model is refreshed once at crawl-cycle start. It must not be fully rebuilt on every lease.
-If production still shows frequent fallback after this switch, the next step should be a small
-incremental refresh for the affected host or physical queue, not a hot-path global rebuild.
+The read model is maintained incrementally by queue insert/delete/lease/finalize paths. A global
+rebuild remains a manual repair mechanism, not normal crawler startup behavior. If production still
+shows frequent fallback after this switch, the next step should be to find the mutation path that is
+not refreshing its affected host, not to reintroduce a global rebuild.

@@ -1,33 +1,34 @@
 # web-crawler plan
 
-## Current milestone: fetch admission and bounded body reads
+## Current milestone: incremental host-first frontier
 
-The current priority is to keep crawler workers from being captured by non-page resources.
-The crawler is an HTML-centered WWW discovery system, not an unbounded downloader.
+The current priority is to remove global scheduler scans from normal crawler startup and lease
+selection. The crawler should choose work from a cheap host-first runtime cache, not rebuild host
+eligibility from the full URL queue every cycle.
 
 ## Completed in this slice
 
-- Added fetch admission before response body reads.
-- Treat binary, media, archive, font, image, and oversized responses as metadata-only.
-- Bound body reads by byte count and elapsed time.
-- Kept metadata-only resources as successful scheduler completions.
-- Made heavy scheduler diagnostics degrade instead of returning `/stats/diagnostics` 500.
-- Disabled global scheduled-surface delay maintenance by default because it scans the production
-  scheduled surface before cycles can start.
-- Documented fetch admission in the content policy and crawler concepts.
+- Removed the crawl-cycle-start global `host_runnable_heads` rebuild from the normal runtime path.
+- Made queue insert/delete/replace update affected `(physical_queue, host)` heads incrementally.
+- Made stale read-model candidate deletion refresh that host from source queue membership.
+- Replaced the host-first derived-query fallback with a bounded queue scan safety fallback.
+- Added host-local queue indexes and a `host_runnable_heads.head_url` index.
+- Documented that `host_runnable_heads` is an incremental worker-facing cache, not scheduler truth.
 
 ## Acceptance
 
-- `audio/mpeg` and other media streams do not read response bodies.
-- Metadata-only resources are marked done and do not extract links.
-- One streaming URL cannot hold a worker indefinitely.
-- `/stats/diagnostics` remains available even when heavy scheduler diagnostics time out.
-- Daemon startup does not run global scheduled-surface rank maintenance by default.
+- Daemon startup does not log or wait for a full `host_runnable_heads` refresh.
+- Leasing uses `host_runnable_heads` first and does not rebuild host heads globally on cache miss.
+- Queue mutations keep the affected host head usable without requiring a cycle restart.
+- Stale head rows are self-healed by host-local refresh.
 - Related tests and lint pass before deploy.
 
 ## Next checks after deploy
 
 - Confirm `/health`, `/stats`, and `/stats/diagnostics` are healthy.
 - Confirm expired `active_leases` do not accumulate.
-- Confirm media-stream URLs complete quickly as metadata-only.
-- Compare cycle completion time and pages/sec against the stuck `299/300` production cycle.
+- Confirm crawler logs no longer include the previous ~24s `Refreshed host runnable-head read model`
+  startup delay.
+- Compare cycle completion time and pages/sec against the previous `300 pages in 145.2s`
+  production baseline.
+- Watch PostgreSQL CPU while the crawler is running at the current production concurrency.

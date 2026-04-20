@@ -46,6 +46,138 @@ class HostRunnableHeadStore:
         self._normalized_surface_queues = normalized_surface_queues
         self._latency_penalty_sql = latency_penalty_sql
 
+    def _head_sql(self, *, physical_queue: str) -> tuple[str, str, str]:
+        normalized_physical_queue = self._normalize_physical_queue(physical_queue)
+        queue_table = self._queue_table_sql(normalized_physical_queue)
+        latency_penalty = self._latency_penalty_sql(
+            "candidate",
+            latency_ms_sql="COALESCE(candidate_host_state.latency_ewma_ms, 0)",
+        )
+        runnable_at = (
+            "GREATEST("
+            "candidate.next_fetch_at, "
+            "COALESCE(candidate_host_state.next_request_at, 0), "
+            "COALESCE(candidate_host_state.backoff_until, 0)"
+            ")"
+        )
+        return queue_table, latency_penalty, runnable_at
+
+    def refresh_host_in_tx(
+        self,
+        cur,
+        *,
+        physical_queue: str,
+        host: str,
+        refreshed_at: float | None = None,
+    ) -> int:
+        """Refresh one host-head row from source queue membership inside an open transaction."""
+        if not host:
+            return 0
+
+        normalized_physical_queue = self._normalize_physical_queue(physical_queue)
+        queue_table, latency_penalty, runnable_at = self._head_sql(
+            physical_queue=normalized_physical_queue
+        )
+        timestamp = time.time() if refreshed_at is None else refreshed_at
+
+        cur.execute(
+            f"""WITH selected AS (
+                    SELECT
+                        candidate.host,
+                        candidate.url,
+                        candidate.next_fetch_at,
+                        candidate.added_at,
+                        candidate.priority,
+                        (
+                            SELECT COUNT(*)
+                            FROM {queue_table} AS host_rows
+                            WHERE host_rows.host = candidate.host
+                        ) AS runnable_url_count,
+                        {latency_penalty} AS latency_penalty,
+                        {runnable_at} AS runnable_at
+                    FROM {queue_table} AS candidate
+                    LEFT JOIN host_state AS candidate_host_state
+                        ON candidate_host_state.host_key = candidate.host
+                    WHERE candidate.host = %s
+                    ORDER BY
+                        runnable_at ASC,
+                        latency_penalty ASC,
+                        candidate.added_at ASC,
+                        candidate.priority DESC,
+                        candidate.url ASC
+                    LIMIT 1
+                )
+                INSERT INTO {self._table_name} (
+                    physical_queue,
+                    host,
+                    head_url,
+                    head_next_fetch_at,
+                    head_added_at,
+                    head_priority,
+                    runnable_url_count,
+                    latency_penalty,
+                    runnable_at,
+                    refreshed_at
+                )
+                SELECT
+                    %s,
+                    host,
+                    url,
+                    next_fetch_at,
+                    added_at,
+                    priority,
+                    runnable_url_count,
+                    latency_penalty,
+                    runnable_at,
+                    %s
+                FROM selected
+                ON CONFLICT (physical_queue, host) DO UPDATE SET
+                    head_url = EXCLUDED.head_url,
+                    head_next_fetch_at = EXCLUDED.head_next_fetch_at,
+                    head_added_at = EXCLUDED.head_added_at,
+                    head_priority = EXCLUDED.head_priority,
+                    runnable_url_count = EXCLUDED.runnable_url_count,
+                    latency_penalty = EXCLUDED.latency_penalty,
+                    runnable_at = EXCLUDED.runnable_at,
+                    refreshed_at = EXCLUDED.refreshed_at""",
+            (host, normalized_physical_queue, timestamp),
+        )
+        if cur.rowcount:
+            return cur.rowcount
+
+        cur.execute(
+            f"""DELETE FROM {self._table_name}
+                WHERE physical_queue = %s
+                  AND host = %s""",
+            (normalized_physical_queue, host),
+        )
+        return 0
+
+    def refresh_hosts_in_tx(
+        self,
+        cur,
+        pairs: list[tuple[str, str]],
+        *,
+        refreshed_at: float | None = None,
+    ) -> int:
+        """Refresh multiple host-head rows from source queue membership in one transaction."""
+        timestamp = time.time() if refreshed_at is None else refreshed_at
+        refreshed = 0
+        for physical_queue, host in sorted(
+            {
+                (self._normalize_physical_queue(physical_queue), host)
+                for physical_queue, host in pairs
+                if host
+            }
+        ):
+            refreshed += self.refresh_host_in_tx(
+                cur,
+                physical_queue=physical_queue,
+                host=host,
+                refreshed_at=timestamp,
+            )
+        return refreshed
+
     def rebuild(
         self,
         *,
@@ -78,17 +210,8 @@ class HostRunnableHeadStore:
 
     def _rebuild_queue(self, cur, *, physical_queue: str, refreshed_at: float) -> int:
         normalized_physical_queue = self._normalize_physical_queue(physical_queue)
-        queue_table = self._queue_table_sql(normalized_physical_queue)
-        latency_penalty = self._latency_penalty_sql(
-            "candidate",
-            latency_ms_sql="COALESCE(candidate_host_state.latency_ewma_ms, 0)",
-        )
-        runnable_at = (
-            "GREATEST("
-            "candidate.next_fetch_at, "
-            "COALESCE(candidate_host_state.next_request_at, 0), "
-            "COALESCE(candidate_host_state.backoff_until, 0)"
-            ")"
+        queue_table, latency_penalty, runnable_at = self._head_sql(
+            physical_queue=normalized_physical_queue
         )
 
         cur.execute(
@@ -242,15 +365,18 @@ class HostRunnableHeadStore:
         ]
 
     def delete_candidate(self, *, physical_queue: str, url: str) -> None:
-        """Drop a stale read-model candidate after source-of-truth revalidation misses."""
+        """Drop a stale read-model candidate and refresh its host from queue membership."""
         try:
             with self._conn.cursor() as cur:
                 cur.execute(
                     f"""DELETE FROM {self._table_name}
                         WHERE physical_queue = %s
-                          AND head_url = %s""",
+                          AND head_url = %s
+                        RETURNING physical_queue, host""",
                     (self._normalize_physical_queue(physical_queue), url),
                 )
+                pairs = [(physical_queue, host) for physical_queue, host in cur.fetchall()]
+                self.refresh_hosts_in_tx(cur, pairs)
             self._conn.commit()
         except Exception:
             self._conn.rollback()
