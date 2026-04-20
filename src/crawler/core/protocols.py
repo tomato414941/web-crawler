@@ -14,6 +14,10 @@ class Response:
     headers: dict[str, str]
     fetch_request_ms: float = 0.0
     fetch_body_read_ms: float = 0.0
+    content_length: int | None = None
+    metadata_only: bool = False
+    body_truncated: bool = False
+    admission_reason: str | None = None
 
     @property
     def text(self) -> str:

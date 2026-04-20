@@ -88,6 +88,86 @@ class TestHttpFetcher:
         assert "example.com/new" in response.url
         assert response.status == 200
 
+    async def test_fetch_skips_binary_body_after_headers(self, monkeypatch):
+        """Binary response bodies should not be read."""
+        body_read = False
+
+        class DummyResponse:
+            url = "https://example.com/live.mp3"
+            status_code = 200
+            headers = {"content-type": "audio/mpeg"}
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_args):
+                return None
+
+            async def aiter_bytes(self):
+                nonlocal body_read
+                body_read = True
+                yield b"should-not-be-read"
+
+        class DummyClient:
+            def stream(self, method, url):
+                assert method == "GET"
+                assert url == "https://example.com/live.mp3"
+                return DummyResponse()
+
+            async def aclose(self):
+                return None
+
+        monkeypatch.setattr(
+            "crawler.core.fetcher.httpx.AsyncClient",
+            lambda *args, **kwargs: DummyClient(),
+        )
+
+        fetcher = HttpFetcher(timeout=10.0)
+        response = await fetcher.fetch("https://example.com/live.mp3")
+
+        assert response.metadata_only is True
+        assert response.content == b""
+        assert response.admission_reason == "binary_content_type"
+        assert body_read is False
+
+    async def test_fetch_truncates_unbounded_body(self, monkeypatch):
+        """Unknown-size bodies should be bounded by max_body_bytes."""
+
+        class DummyResponse:
+            url = "https://example.com/page"
+            status_code = 200
+            headers = {"content-type": "text/html"}
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_args):
+                return None
+
+            async def aiter_bytes(self):
+                yield b"abc"
+                yield b"defghij"
+
+        class DummyClient:
+            def stream(self, method, url):
+                return DummyResponse()
+
+            async def aclose(self):
+                return None
+
+        monkeypatch.setattr(
+            "crawler.core.fetcher.httpx.AsyncClient",
+            lambda *args, **kwargs: DummyClient(),
+        )
+
+        fetcher = HttpFetcher(timeout=10.0, max_body_bytes=5, body_timeout=1.0)
+        response = await fetcher.fetch("https://example.com/page")
+
+        assert response.content == b"abcde"
+        assert response.body_truncated is True
+        assert response.admission_reason == "body_truncated"
+        assert response.content_length == 5
+
 
 class TestResponse:
     def test_text_property(self):

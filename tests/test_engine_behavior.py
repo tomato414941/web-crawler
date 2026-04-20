@@ -536,6 +536,42 @@ async def test_crawler_treats_pdf_as_metadata_only():
 
 
 @pytest.mark.asyncio
+async def test_crawler_completes_metadata_only_audio_without_parsing():
+    ledger = FakeLedger([CrawlTask(url="https://example.com/live.mp3")])
+    host_manager = FakeHostManager()
+    fetcher = FakeFetcher(
+        [
+            Response(
+                url="https://example.com/live.mp3",
+                status=200,
+                content=b"",
+                headers={"content-type": "audio/mpeg"},
+                content_length=12345,
+                metadata_only=True,
+                admission_reason="binary_content_type",
+            )
+        ]
+    )
+
+    async with CrawlerEngine(
+        max_pages=1,
+        url_ledger=ledger,
+        host_manager=host_manager,
+    ) as engine:
+        engine.fetcher = fetcher
+        results = await engine.crawl()
+
+    assert engine.pages_crawled == 1
+    assert ledger.done == ["https://example.com/live.mp3"]
+    assert ledger.added_batches == []
+    assert host_manager.successes == ["https://example.com/live.mp3"]
+    assert len(results) == 1
+    assert results[0]["content_length"] == 12345
+    assert results[0]["content"] == ""
+    assert results[0]["outlinks"] == []
+
+
+@pytest.mark.asyncio
 async def test_crawler_reserves_some_leases_for_breadth():
     ledger = FakeLedger(
         [

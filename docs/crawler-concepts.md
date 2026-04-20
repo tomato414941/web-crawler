@@ -12,6 +12,7 @@ An ideal crawler should separate at least these six concerns:
 - `execution`: active leases and worker ownership
 - `host state`: host/site-level politeness and backoff
 - `policy intent`: why the system wants to fetch this URL next
+- `fetch admission`: whether a selected URL is worth reading as a response body
 
 The key rule is to keep `state` and `intent` separate.
 
@@ -72,6 +73,21 @@ should be driven by host/site runnable capability rather than by a raw URL queue
 
 For the runtime execution design, see
 [scheduler-execution.md](/home/dev/projects/web-crawler/docs/scheduler-execution.md).
+
+## Fetch Admission Principle
+
+The scheduler may select a URL, but that does not mean the crawler should read the entire response
+body. Fetch admission is the boundary between "this URL is selected for an attempt" and "this
+payload is useful enough to spend body-read, parse, and storage cost on".
+
+The abstract rule is:
+
+- HTML and safe text can become parseable page content
+- binary, media, archive, font, image, and stream resources are metadata-only by default
+- one URL must not be able to hold a worker or cycle indefinitely
+- metadata-only completion is a valid outcome, not a crawl failure
+
+This keeps the crawler focused on WWW discovery rather than becoming an unbounded downloader.
 
 ## Naming Guidance
 

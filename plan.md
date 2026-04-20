@@ -1,40 +1,30 @@
 # web-crawler plan
 
-## Current milestone: scheduler responsibility split
+## Current milestone: fetch admission and bounded body reads
 
-The current priority is to keep the crawler fast while making scheduler ownership explicit.
-The URL ledger should own durable URL facts. Scheduler membership, host runnable-head read models,
-quarantine, and leases should be separate implementation units.
+The current priority is to keep crawler workers from being captured by non-page resources.
+The crawler is an HTML-centered WWW discovery system, not an unbounded downloader.
 
 ## Completed in this slice
 
-- Renamed the normal scheduler surfaces to `runnable` and `scheduled`.
-- Added migration support for existing databases that still have the previous scheduler table names
-  or queue values.
-- Moved scheduler membership table/surface operations into `SchedulerMembershipStore`.
-- Moved the `host_runnable_heads` projection into `HostRunnableHeadStore`.
-- Kept the existing host-first lease path behavior: read model first, source-of-truth revalidation,
-  stale candidate cleanup, and derived-query fallback.
-
-## Remaining near-term work
-
-- Move active lease insert/delete/recovery into a dedicated lease store.
-- Move the remaining admission/requeue methods out of `UrlLedger` and into scheduler membership.
-- Split heavy diagnostic stats out of `PgStorage` so normal storage and operator diagnostics have
-  separate ownership.
-- Re-measure production lease timings and crawler throughput after deploy.
+- Added fetch admission before response body reads.
+- Treat binary, media, archive, font, image, and oversized responses as metadata-only.
+- Bound body reads by byte count and elapsed time.
+- Kept metadata-only resources as successful scheduler completions.
+- Made heavy scheduler diagnostics degrade instead of returning `/stats/diagnostics` 500.
+- Documented fetch admission in the content policy and crawler concepts.
 
 ## Acceptance
 
-- New databases use `scheduler_queue_runnable` and `scheduler_queue_scheduled`.
-- Existing databases migrate to the new scheduler queue names and queue values.
-- `/stats` reports scheduler surfaces as `runnable`, `scheduled`, and `refresh`.
-- Normal host-first leasing remains read-model-first and does not add hot-path global rebuilds.
+- `audio/mpeg` and other media streams do not read response bodies.
+- Metadata-only resources are marked done and do not extract links.
+- One streaming URL cannot hold a worker indefinitely.
+- `/stats/diagnostics` remains available even when heavy scheduler diagnostics time out.
 - Related tests and lint pass before deploy.
 
 ## Next checks after deploy
 
-- Confirm migration `030_rename_scheduler_surfaces.sql` is applied.
-- Confirm `/health` and `/stats` are healthy.
-- Check production logs for read-model refresh latency and `lease=` timings.
-- Compare pages/sec and PostgreSQL CPU against the previous deployment.
+- Confirm `/health`, `/stats`, and `/stats/diagnostics` are healthy.
+- Confirm expired `active_leases` do not accumulate.
+- Confirm media-stream URLs complete quickly as metadata-only.
+- Compare cycle completion time and pages/sec against the stuck `299/300` production cycle.
