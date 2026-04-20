@@ -335,6 +335,7 @@ class CrawlerEngine:
         """Return active cycle stats without completed-cycle fields."""
         return {
             "running": self._running,
+            "state": "active" if self._running else "idle",
             "pages_crawled": self.pages_crawled,
             "claimed_pages": self._claimed_pages,
             "max_pages": self.max_pages,
@@ -371,6 +372,10 @@ class CrawlerEngine:
         active_cycle = self._active_cycle_payload()
         return {
             **active_cycle,
+            "pages": None,
+            "elapsed_seconds": None,
+            "pages_per_second": None,
+            "errors": dict(self._failure_counts),
             "active_cycle": active_cycle,
         }
 
