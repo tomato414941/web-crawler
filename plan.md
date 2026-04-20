@@ -24,22 +24,21 @@ robots admission and host rate-limit reservation so the next speed fix can targe
 
 ## Current slice
 
-- Add `robots_ms` and `rate_limit_ms` to per-result timings.
-- Include both fields in `timing_summary.stages` and compact cycle-complete p95 logs.
-- Keep `precheck_ms` as the existing aggregate for compatibility.
+- Add a configurable `robots_fetch_timeout` with a lower default than page fetch timeout.
+- Use that timeout for robots.txt fetches.
+- Keep timeout failures on the current allow-unavailable path.
 
 ## Acceptance
 
-- Runtime snapshots include `robots_ms` and `rate_limit_ms` stage summaries.
-- Cycle-complete logs include `robots_p95` and `rate_limit_p95`.
+- Robots fetch timeout defaults to 3 seconds.
+- `CRAWLER_ROBOTS_FETCH_TIMEOUT` can override the timeout.
 - Related tests and lint pass before deploy.
 
 ## Next checks after deploy
 
 - Confirm `/health`, `/stats`, and `/stats/diagnostics` are healthy.
-- Confirm `/stats` exposes `runtime.payload.timing_summary.stages.robots_ms` and
-  `runtime.payload.timing_summary.stages.rate_limit_ms`.
-- Observe at least two production cycles and decide whether `precheck` is dominated by robots
-  admission or host rate-limit reservation.
-- If `fetch_request_ms` remains the largest stage, move next to slow-host deprioritization or timeout
-  tuning.
+- Observe at least two production cycles and compare `robots_p95`, `precheck_p95`, and pages/s with
+  the previous baseline.
+- If `robots_p95` remains high, consider persisted robots bodies or unavailable/error cache policy.
+- If `fetch_request_ms` remains the largest stage, move next to slow-host deprioritization or page
+  fetch timeout tuning.

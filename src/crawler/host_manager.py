@@ -69,6 +69,7 @@ class HostManager:
         default_delay: float = 1.0,
         respect_robots: bool = True,
         max_retries: int = 3,
+        robots_fetch_timeout: float | None = None,
         robots_cache_ttl: float | None = None,
         host_store: "HostStore | None" = None,
         host_ledger_store: "HostLedgerStore | None" = None,
@@ -81,6 +82,11 @@ class HostManager:
         self.max_retries = max_retries
         self.robots_cache_ttl = (
             settings.robots_cache_ttl if robots_cache_ttl is None else robots_cache_ttl
+        )
+        self.robots_fetch_timeout = (
+            settings.robots_fetch_timeout
+            if robots_fetch_timeout is None
+            else robots_fetch_timeout
         )
         self._host_store = host_store
         self._host_ledger_store = host_ledger_store
@@ -114,7 +120,7 @@ class HostManager:
             async with self._client_lock:
                 if self._client is None:
                     self._client = httpx.AsyncClient(
-                        timeout=10.0,
+                        timeout=self.robots_fetch_timeout,
                         headers={"User-Agent": self.user_agent},
                         verify=build_ssl_context(),
                     )
