@@ -1,12 +1,13 @@
 # web-crawler plan
 
-## Current milestone: remove live scheduler scans from the daemon hot loop
+## Current milestone: measure crawl-cycle body bottlenecks
 
-The current priority is to make measured crawler throughput match wall-clock throughput. The daemon
-must not run full scheduler diagnostics or readiness snapshots at cycle boundaries, because those
-queries scan multi-million-row scheduler queues and delay the next crawl cycle.
+The cycle-boundary scheduler scan problem is largely resolved: production now starts the next cycle
+about 9 seconds after cycle completion instead of 60-70 seconds. The current priority is to make the
+remaining crawl-cycle body cost visible enough to choose the next speed fix from data, not log
+inspection.
 
-## Completed in this slice
+## Completed
 
 - Removed `url_ledger.stats()` from the daemon cycle-complete log path.
 - Stopped the daemon from running a second `url_ledger.readiness()` / scheduler snapshot after each
@@ -20,24 +21,25 @@ queries scan multi-million-row scheduler queues and delay the next crawl cycle.
 - Changed `/stats/diagnostics` to return runtime-snapshot-only degraded diagnostics.
 - Added tests that fail if cycle completion calls live scheduler stats or snapshots.
 
+## Current slice
+
+- Add cycle-local timing summaries for `lease`, `precheck`, `fetch`, `parse`, `scheduler`,
+  `persist`, and queue waits.
+- Persist the timing summary in the existing runtime snapshot so `/stats` can expose it without a new
+  schema.
+- Add compact p95 timing fields to the cycle-complete log.
+
 ## Acceptance
 
-- Cycle completion does not call `url_ledger.stats()`.
-- Cycle completion does not call `scheduler_state_snapshot()`.
-- Cycle start does not call the full `url_ledger.readiness()` query when lightweight daemon
-  readiness is available.
-- Pre-cycle retry promotion uses cheap runnable-surface and blocked-queue counts.
-- `/stats` stays backed by the persisted runtime snapshot.
-- `/stats/diagnostics` does not execute the expensive `pending_entries` full scheduler scan.
+- Runtime snapshots include `timing_summary.samples`, outcome counts, and per-stage
+  `count` / `avg` / `p50` / `p95` / `max`.
+- Cycle-complete logs include compact p95 timing fields.
 - Related tests and lint pass before deploy.
 
 ## Next checks after deploy
 
 - Confirm `/health`, `/stats`, and `/stats/diagnostics` are healthy.
-- Confirm crawler `pg_stat_activity` no longer shows daemon-origin long-running
-  `WITH pending_entries AS (...)` queries at cycle boundaries.
-- Confirm `Cycle complete` to next `Cycle N:` gap drops from about 60-70 seconds to a few seconds.
-- Compare start-to-next-start effective pages/sec against the recent production baseline of about
-  0.95-1.2 pages/sec.
-- If the gap is fixed but crawl body speed is still low, investigate finalizer serialization and
-  fetch/precheck latency next.
+- Confirm `/stats` exposes `runtime.payload.timing_summary`.
+- Observe at least two production cycles and identify the top p95 stage among `lease`, `precheck`,
+  `fetch`, `scheduler`, `persist`, and queue waits.
+- Use that measured top stage to choose the next speed fix.

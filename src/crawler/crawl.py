@@ -7,6 +7,7 @@ import concurrent.futures
 from collections import Counter
 from dataclasses import dataclass
 import logging
+import math
 import re
 import time
 from typing import TYPE_CHECKING
@@ -52,6 +53,22 @@ _TITLE_PATTERN = re.compile(r"<title[^>]*>(.*?)</title>", re.IGNORECASE | re.DOT
 _META_ROBOTS_PATTERN = re.compile(
     r'<meta[^>]+name=["\']robots["\'][^>]+content=["\']([^"\']+)["\']',
     re.IGNORECASE | re.DOTALL,
+)
+_TIMING_STAGE_FIELDS = (
+    "lease_ms",
+    "precheck_ms",
+    "fetch_ms",
+    "fetch_request_ms",
+    "fetch_body_read_ms",
+    "parse_ms",
+    "scheduler_ms",
+    "persist_ms",
+    "output_ms",
+    "parse_queue_wait_ms",
+    "finalize_queue_wait_ms",
+    "publish_queue_wait_ms",
+    "process_ms",
+    "slot_ms",
 )
 
 
@@ -112,6 +129,84 @@ def _format_timings(timings: CrawlStageTimings | None) -> str:
         timings.finalize_queue_depth,
         timings.publish_queue_depth,
     )
+
+
+def _percentile(values: list[float], percentile: int) -> float:
+    """Return a nearest-rank percentile for small cycle-local timing samples."""
+    if not values:
+        return 0.0
+    ordered = sorted(values)
+    index = max(0, min(len(ordered) - 1, math.ceil(percentile / 100 * len(ordered)) - 1))
+    return round(ordered[index], 1)
+
+
+class _TimingAccumulator:
+    """Cycle-local per-result timing aggregation."""
+
+    def __init__(self) -> None:
+        self._outcomes: Counter[str] = Counter()
+        self._stages: dict[str, list[float]] = {field: [] for field in _TIMING_STAGE_FIELDS}
+
+    def record(self, outcome: str, timings: CrawlStageTimings | None) -> None:
+        """Record one finalized crawl attempt."""
+        self._outcomes[outcome] += 1
+        if timings is None:
+            return
+        for field in _TIMING_STAGE_FIELDS:
+            self._stages[field].append(float(getattr(timings, field)))
+
+    def snapshot(self) -> dict[str, object]:
+        """Return a runtime-safe summary of observed cycle timings."""
+        stages = {}
+        for field, values in self._stages.items():
+            if not values:
+                stages[field] = {
+                    "count": 0,
+                    "avg": 0.0,
+                    "p50": 0.0,
+                    "p95": 0.0,
+                    "max": 0.0,
+                }
+                continue
+            stages[field] = {
+                "count": len(values),
+                "avg": round(sum(values) / len(values), 1),
+                "p50": _percentile(values, 50),
+                "p95": _percentile(values, 95),
+                "max": round(max(values), 1),
+            }
+        outcomes = {
+            "success": int(self._outcomes.get("success", 0)),
+            "skipped": int(self._outcomes.get("skipped", 0)),
+            "failed": int(self._outcomes.get("failed", 0)),
+        }
+        return {
+            "samples": sum(outcomes.values()),
+            "outcomes": outcomes,
+            "stages": stages,
+        }
+
+
+def _format_timing_summary(summary: dict[str, object]) -> str:
+    """Render the highest-signal timing summary fields for cycle logs."""
+    stages = summary.get("stages")
+    if not isinstance(stages, dict):
+        return "timings=unavailable"
+    fields = (
+        "lease_ms",
+        "precheck_ms",
+        "fetch_ms",
+        "scheduler_ms",
+        "persist_ms",
+        "finalize_queue_wait_ms",
+        "publish_queue_wait_ms",
+    )
+    parts = []
+    for field in fields:
+        stage = stages.get(field)
+        if isinstance(stage, dict):
+            parts.append(f"{field.removesuffix('_ms')}_p95={stage.get('p95', 0.0)}ms")
+    return " ".join(parts) if parts else "timings=unavailable"
 
 
 @dataclass(slots=True)
@@ -290,6 +385,7 @@ class CrawlerEngine:
         self._parse_queue_depth_max = 0
         self._finalize_queue_depth_max = 0
         self._publish_queue_depth_max = 0
+        self._timing_summary = _TimingAccumulator()
 
     def snapshot_runtime_stats(self) -> dict[str, object]:
         """Return live queue/backpressure stats for external observers."""
@@ -322,7 +418,20 @@ class CrawlerEngine:
             "finalize_queue_depth_max": self._finalize_queue_depth_max,
             "publish_queue_depth_max": self._publish_queue_depth_max,
             "failure_breakdown": dict(self._failure_counts),
+            "timing_summary": self._timing_summary.snapshot(),
         }
+
+    def timing_summary(self) -> dict[str, object]:
+        """Return the current cycle timing summary."""
+        return self._timing_summary.snapshot()
+
+    def timing_summary_log(self) -> str:
+        """Return a compact log representation of the current cycle timings."""
+        return _format_timing_summary(self.timing_summary())
+
+    def _record_timing(self, outcome: str, timings: CrawlStageTimings | None) -> None:
+        """Record one finalized crawl attempt in cycle-local timing stats."""
+        self._timing_summary.record(outcome, timings)
 
     async def __aenter__(self) -> "CrawlerEngine":
         return self
@@ -742,6 +851,7 @@ class CrawlerEngine:
                     await self._finalize_queue.put(queue_item)
                 else:
                     skipped = await self._finalize_skipped_task(result)
+                    self._record_timing("skipped", skipped.timings)
                     logger.info(
                         "Skipped %s: %s (%s)",
                         skipped.task.url,
@@ -765,6 +875,7 @@ class CrawlerEngine:
                     await self._finalize_queue.put(queue_item)
                 else:
                     failure = await self._finalize_failed_task(result)
+                    self._record_timing("failed", failure.timings)
                     logger.warning(
                         "Failed %s: %s (%s)",
                         failure.url,
@@ -789,6 +900,7 @@ class CrawlerEngine:
                     finalized.timings.publish_queue_depth = 0
                     finalized.timings.publish_queue_wait_ms = 0.0
                     await self._publish_result(finalized)
+                    self._record_timing("success", finalized.timings)
                     logger.info(
                         "[%d/%d] %s (%s)",
                         self.pages_crawled,
@@ -903,6 +1015,7 @@ class CrawlerEngine:
                 else:
                     finalized = await self._finalize_parsed_page(parsed)
                     await self._publish_result(finalized)
+                    self._record_timing("success", finalized.timings)
                     logger.info(
                         "[%d/%d] %s (%s)",
                         self.pages_crawled,
@@ -938,6 +1051,7 @@ class CrawlerEngine:
                     await self._finalize_queue.put(queue_item)
                 else:
                     finalized = await self._finalize_failed_task(failed)
+                    self._record_timing("failed", finalized.timings)
                     logger.warning(
                         "Failed %s during parse: %s (%s)",
                         fetched.task.url,
@@ -1044,6 +1158,7 @@ class CrawlerEngine:
                         await self._publish_queue.put(publish_item)
                     else:
                         await self._publish_result(result)
+                        self._record_timing("success", result.timings)
                         logger.info(
                             "[%d/%d] %s (%s)",
                             self.pages_crawled,
@@ -1056,6 +1171,7 @@ class CrawlerEngine:
                     skipped.timings.finalize_queue_wait_ms = queue_wait_ms
                     skipped.timings.finalize_queue_depth = queue_item.queue_depth
                     skipped = await self._finalize_skipped_task(skipped)
+                    self._record_timing("skipped", skipped.timings)
                     logger.info(
                         "Skipped %s: %s (%s)",
                         skipped.task.url,
@@ -1067,6 +1183,7 @@ class CrawlerEngine:
                     failed.failure.timings.finalize_queue_wait_ms = queue_wait_ms
                     failed.failure.timings.finalize_queue_depth = queue_item.queue_depth
                     failure = await self._finalize_failed_task(failed)
+                    self._record_timing("failed", failure.timings)
                     logger.warning(
                         "Failed %s: %s (%s)",
                         failure.url,
@@ -1104,6 +1221,7 @@ class CrawlerEngine:
             )
             try:
                 await self._publish_result(result)
+                self._record_timing("success", result.timings)
                 logger.info(
                     "[%d/%d] %s (%s)",
                     self.pages_crawled,
@@ -1152,6 +1270,7 @@ class CrawlerEngine:
         self._parse_queue_depth_max = 0
         self._finalize_queue_depth_max = 0
         self._publish_queue_depth_max = 0
+        self._timing_summary = _TimingAccumulator()
 
         if self.start_url and self.scheduler.pending_count() == 0:
             self.scheduler.place(self._build_seed_task(self.start_url))

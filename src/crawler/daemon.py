@@ -256,11 +256,17 @@ class CrawlDaemon:
                     cycle += 1
                     logger.info("Cycle %d: %d runnable / %d pending URLs", cycle, runnable, pending)
                     start = time.time()
-                    pages, error_breakdown = await self._run_cycle(storage, url_ledger)
+                    cycle_result = await self._run_cycle(storage, url_ledger)
+                    if len(cycle_result) == 2:
+                        pages, error_breakdown = cycle_result
+                        timing_summary = {}
+                        timing_summary_log = "timings=unavailable"
+                    else:
+                        pages, error_breakdown, timing_summary, timing_summary_log = cycle_result
                     elapsed = time.time() - start
                     rate = pages / elapsed if elapsed > 0 else 0
                     logger.info(
-                        "Cycle %d complete: %d pages in %.1fs (%.1f pages/s) | errors=%s | pending=%d runnable=%d",
+                        "Cycle %d complete: %d pages in %.1fs (%.1f pages/s) | errors=%s | pending=%d runnable=%d | timings=%s",
                         cycle,
                         pages,
                         elapsed,
@@ -268,6 +274,7 @@ class CrawlDaemon:
                         _format_error_breakdown(error_breakdown),
                         pending,
                         runnable,
+                        timing_summary_log,
                     )
                     cycle_payload = self._idle_runtime_payload(
                         state="cycle_complete",
@@ -281,6 +288,7 @@ class CrawlDaemon:
                             "elapsed_seconds": round(elapsed, 3),
                             "pages_per_second": round(rate, 3),
                             "errors": error_breakdown,
+                            "timing_summary": timing_summary,
                         }
                     )
                     cycle_payload.update(
@@ -347,6 +355,7 @@ class CrawlDaemon:
             "finalize_queue_depth_max",
             "publish_queue_depth_max",
             "failure_breakdown",
+            "timing_summary",
         ):
             if key in self._last_runtime_snapshot:
                 payload[key] = self._last_runtime_snapshot[key]
@@ -456,7 +465,7 @@ class CrawlDaemon:
 
     async def _run_cycle(
         self, storage: PgStorage, url_ledger: UrlLedger
-    ) -> tuple[int, dict[str, int]]:
+    ) -> tuple[int, dict[str, int], dict[str, object], str]:
         """Run one crawl cycle."""
         runtime_storage = PgStorage(self._postgres_dsn)
         try:
@@ -487,7 +496,12 @@ class CrawlDaemon:
                     reporter.join(timeout=2.0)
                     self._flush_runtime_stats(runtime_storage, engine)
                     self._engine = None
-                return engine.pages_crawled, engine.failure_breakdown
+                return (
+                    engine.pages_crawled,
+                    engine.failure_breakdown,
+                    engine.timing_summary(),
+                    engine.timing_summary_log(),
+                )
         finally:
             runtime_storage.close()
 

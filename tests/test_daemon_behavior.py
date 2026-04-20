@@ -303,7 +303,12 @@ async def test_daemon_logs_cycle_error_breakdown(caplog):
 
     async def fake_run_cycle(_storage, _ledger):
         daemon._shutdown = True
-        return 2, {"http_4xx": 3, "timeout": 1}
+        return (
+            2,
+            {"http_4xx": 3, "timeout": 1},
+            {"samples": 2, "outcomes": {"success": 2, "skipped": 0, "failed": 0}},
+            "lease_p95=1.0ms fetch_p95=2.0ms",
+        )
 
     daemon._connect = fake_connect
     daemon._run_cycle = fake_run_cycle
@@ -312,6 +317,7 @@ async def test_daemon_logs_cycle_error_breakdown(caplog):
         await daemon.run()
 
     assert "errors=http_4xx=3, timeout=1" in caplog.text
+    assert "timings=lease_p95=1.0ms fetch_p95=2.0ms" in caplog.text
 
 
 @pytest.mark.asyncio
