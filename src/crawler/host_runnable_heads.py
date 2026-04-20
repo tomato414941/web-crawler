@@ -7,6 +7,8 @@ from dataclasses import dataclass
 import logging
 import time
 
+import psycopg2.extras
+
 logger = logging.getLogger(__name__)
 
 
@@ -177,6 +179,126 @@ class HostRunnableHeadStore:
                 refreshed_at=timestamp,
             )
         return refreshed
+
+    def upsert_candidates_in_tx(
+        self,
+        cur,
+        rows: list[tuple[str, str, float, float, float, str]],
+        *,
+        refreshed_at: float | None = None,
+    ) -> int:
+        """Offer inserted queue rows as host heads without host-local rescans."""
+        if not rows:
+            return 0
+
+        timestamp = time.time() if refreshed_at is None else refreshed_at
+        grouped: dict[tuple[str, str], list[tuple[str, str, float, float, float, str]]] = {}
+        for row in rows:
+            url, host, priority, next_fetch_at, added_at, physical_queue = row
+            if not url or not host:
+                continue
+            key = (self._normalize_physical_queue(physical_queue), host)
+            grouped.setdefault(key, []).append(
+                (url, host, priority, next_fetch_at, added_at, key[0])
+            )
+
+        candidate_rows = []
+        for (physical_queue, host), host_rows in grouped.items():
+            best = min(
+                host_rows,
+                key=lambda row: (row[3], row[4], -row[2], row[0]),
+            )
+            url, _host, priority, next_fetch_at, added_at, _physical_queue = best
+            candidate_rows.append(
+                (
+                    physical_queue,
+                    host,
+                    url,
+                    next_fetch_at,
+                    added_at,
+                    priority,
+                    len(host_rows),
+                    timestamp,
+                )
+            )
+
+        if not candidate_rows:
+            return 0
+
+        psycopg2.extras.execute_values(
+            cur,
+            f"""WITH incoming (
+                    physical_queue,
+                    host,
+                    head_url,
+                    head_next_fetch_at,
+                    head_added_at,
+                    head_priority,
+                    runnable_url_count,
+                    refreshed_at
+                ) AS (VALUES %s)
+                INSERT INTO {self._table_name} (
+                    physical_queue,
+                    host,
+                    head_url,
+                    head_next_fetch_at,
+                    head_added_at,
+                    head_priority,
+                    runnable_url_count,
+                    latency_penalty,
+                    runnable_at,
+                    refreshed_at
+                )
+                SELECT
+                    incoming.physical_queue,
+                    incoming.host,
+                    incoming.head_url,
+                    incoming.head_next_fetch_at,
+                    incoming.head_added_at,
+                    incoming.head_priority,
+                    incoming.runnable_url_count,
+                    CASE
+                        WHEN COALESCE(host_state.latency_ewma_ms, 0) >= 1000.0 THEN 3
+                        WHEN COALESCE(host_state.latency_ewma_ms, 0) >= 400.0 THEN 2
+                        WHEN COALESCE(host_state.latency_ewma_ms, 0) >= 150.0 THEN 1
+                        ELSE 0
+                    END AS latency_penalty,
+                    GREATEST(
+                        incoming.head_next_fetch_at,
+                        COALESCE(host_state.next_request_at, 0),
+                        COALESCE(host_state.backoff_until, 0)
+                    ) AS runnable_at,
+                    incoming.refreshed_at
+                FROM incoming
+                LEFT JOIN host_state ON host_state.host_key = incoming.host
+                ON CONFLICT (physical_queue, host) DO UPDATE SET
+                    head_url = EXCLUDED.head_url,
+                    head_next_fetch_at = EXCLUDED.head_next_fetch_at,
+                    head_added_at = EXCLUDED.head_added_at,
+                    head_priority = EXCLUDED.head_priority,
+                    runnable_url_count = EXCLUDED.runnable_url_count,
+                    latency_penalty = EXCLUDED.latency_penalty,
+                    runnable_at = EXCLUDED.runnable_at,
+                    refreshed_at = EXCLUDED.refreshed_at
+                WHERE (
+                    EXCLUDED.runnable_at,
+                    EXCLUDED.latency_penalty,
+                    EXCLUDED.head_added_at,
+                    0 - EXCLUDED.head_priority,
+                    EXCLUDED.head_url
+                ) < (
+                    {self._table_name}.runnable_at,
+                    {self._table_name}.latency_penalty,
+                    {self._table_name}.head_added_at,
+                    0 - {self._table_name}.head_priority,
+                    {self._table_name}.head_url
+                )""",
+            candidate_rows,
+            template="(%s, %s, %s, %s, %s, %s, %s, %s)",
+            page_size=200,
+            fetch=False,
+        )
+        return len(candidate_rows)
 
     def rebuild(
         self,
