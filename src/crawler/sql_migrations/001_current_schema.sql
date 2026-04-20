@@ -116,6 +116,9 @@ CREATE INDEX idx_scheduler_queue_runnable_ready
 CREATE INDEX idx_scheduler_queue_runnable_branch
     ON public.scheduler_queue_runnable(host, branch_key);
 
+CREATE INDEX idx_scheduler_queue_runnable_host_head
+    ON public.scheduler_queue_runnable(host, next_fetch_at ASC, priority DESC, added_at ASC, url ASC);
+
 CREATE TABLE public.scheduler_queue_scheduled (
     url text NOT NULL,
     host text NOT NULL,
@@ -137,6 +140,9 @@ CREATE INDEX idx_scheduler_queue_scheduled_ready
 CREATE INDEX idx_scheduler_queue_scheduled_branch
     ON public.scheduler_queue_scheduled(host, branch_key);
 
+CREATE INDEX idx_scheduler_queue_scheduled_host_head
+    ON public.scheduler_queue_scheduled(host, next_fetch_at ASC, priority DESC, added_at ASC, url ASC);
+
 CREATE TABLE public.scheduler_queue_refresh (
     url text NOT NULL,
     host text NOT NULL,
@@ -157,6 +163,9 @@ CREATE INDEX idx_scheduler_queue_refresh_ready
 
 CREATE INDEX idx_scheduler_queue_refresh_branch
     ON public.scheduler_queue_refresh(host, branch_key);
+
+CREATE INDEX idx_scheduler_queue_refresh_host_head
+    ON public.scheduler_queue_refresh(host, next_fetch_at ASC, priority DESC, added_at ASC, url ASC);
 
 CREATE TABLE public.scheduler_queue_retry_quarantine (
     url text NOT NULL,
@@ -231,3 +240,6 @@ CREATE INDEX idx_host_runnable_heads_ready
         head_priority DESC,
         head_url
     );
+
+CREATE INDEX idx_host_runnable_heads_head_url
+    ON public.host_runnable_heads(head_url);
