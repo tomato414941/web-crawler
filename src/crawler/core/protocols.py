@@ -3,6 +3,8 @@
 from dataclasses import dataclass
 from typing import Protocol
 
+from ..telemetry import FetchTelemetry
+
 
 @dataclass
 class Response:
@@ -18,6 +20,7 @@ class Response:
     metadata_only: bool = False
     body_truncated: bool = False
     admission_reason: str | None = None
+    telemetry: FetchTelemetry | None = None
 
     @property
     def text(self) -> str:

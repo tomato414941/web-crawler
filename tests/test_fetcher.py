@@ -55,6 +55,11 @@ class TestHttpFetcher:
         assert "text/html" in response.headers.get("content-type", "")
         assert response.fetch_request_ms >= 0
         assert response.fetch_body_read_ms >= 0
+        assert response.telemetry is not None
+        assert response.telemetry.outcome == "ok"
+        assert response.telemetry.status == 200
+        assert response.telemetry.response_headers_ms >= 0
+        assert response.telemetry.body_read_ms >= 0
 
     async def test_fetch_returns_response_fields(self, fetcher, httpx_mock):
         """Verify all response fields are populated."""
@@ -128,6 +133,9 @@ class TestHttpFetcher:
         assert response.metadata_only is True
         assert response.content == b""
         assert response.admission_reason == "binary_content_type"
+        assert response.telemetry is not None
+        assert response.telemetry.metadata_only is True
+        assert response.telemetry.admission_reason == "binary_content_type"
         assert body_read is False
 
     async def test_fetch_truncates_unbounded_body(self, monkeypatch):
@@ -167,6 +175,9 @@ class TestHttpFetcher:
         assert response.body_truncated is True
         assert response.admission_reason == "body_truncated"
         assert response.content_length == 5
+        assert response.telemetry is not None
+        assert response.telemetry.body_truncated is True
+        assert response.telemetry.bytes_read == 5
 
 
 class TestResponse:
