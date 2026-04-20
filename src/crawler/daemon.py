@@ -82,6 +82,10 @@ class CrawlDaemon:
             if scheduled_surface_delay_seconds is None
             else scheduled_surface_delay_seconds
         )
+        self._scheduled_surface_delay_limit = max(
+            0,
+            settings.daemon_scheduled_surface_delay_limit,
+        )
         self._min_runnable_sleep = (
             settings.daemon_min_runnable_sleep if min_runnable_sleep is None else min_runnable_sleep
         )
@@ -125,6 +129,7 @@ class CrawlDaemon:
             quarantine_retire_after_seconds=self._quarantine_retire_after_seconds,
             scheduled_runnable_per_host=self._scheduled_runnable_per_host,
             scheduled_runnable_per_branch=self._scheduled_runnable_per_branch,
+            scheduled_surface_delay_limit=self._scheduled_surface_delay_limit,
             scheduled_surface_delay_seconds=self._scheduled_surface_delay_seconds,
         )
 

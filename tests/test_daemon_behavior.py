@@ -373,6 +373,7 @@ async def test_daemon_uses_configured_scheduled_controls():
     assert ledger.delay_args == {
         "keep_runnable_per_host": 7,
         "keep_runnable_per_branch": 2,
+        "limit": 5000,
         "delay_seconds": 12.0,
     }
 
