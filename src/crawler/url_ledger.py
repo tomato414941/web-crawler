@@ -256,6 +256,7 @@ class UrlLedger:
             normalized_surface_queues=self._normalized_surface_queues,
             latency_penalty_sql=self._latency_penalty_sql,
         )
+        self.reset_host_first_fallback_stats()
         self._observability = SchedulerObservability(
             conn,
             physical_queue_tables=PHYSICAL_QUEUE_TABLES,
@@ -276,6 +277,32 @@ class UrlLedger:
             insert_pending_rows=self._insert_pending_queue_rows,
         )
         self._assert_current_schema()
+
+    def reset_host_first_fallback_stats(self) -> None:
+        """Reset cycle-local host-first fallback counters."""
+        self._host_first_fallback_attempts = 0
+        self._host_first_fallback_hits = 0
+        self._host_first_fallback_misses = 0
+
+    def host_first_fallback_stats(self) -> dict[str, int]:
+        """Return cycle-local host-first fallback counters."""
+        return {
+            "attempts": int(getattr(self, "_host_first_fallback_attempts", 0)),
+            "hits": int(getattr(self, "_host_first_fallback_hits", 0)),
+            "misses": int(getattr(self, "_host_first_fallback_misses", 0)),
+        }
+
+    def _record_host_first_fallback(self, task: CrawlTask | None) -> None:
+        """Record that host-first leasing fell back to bounded scanning."""
+        self._host_first_fallback_attempts = (
+            int(getattr(self, "_host_first_fallback_attempts", 0)) + 1
+        )
+        if task is None:
+            self._host_first_fallback_misses = (
+                int(getattr(self, "_host_first_fallback_misses", 0)) + 1
+            )
+        else:
+            self._host_first_fallback_hits = int(getattr(self, "_host_first_fallback_hits", 0)) + 1
 
     def attach_host_store(self, host_store: "HostStore | None") -> None:
         """Attach the persistent host scheduler used for lease selection."""
@@ -1512,13 +1539,15 @@ class UrlLedger:
         if task is not None:
             return task
 
-        return self._lease_next_host_first_from_bounded_scan(
+        fallback_task = self._lease_next_host_first_from_bounded_scan(
             host=host,
             lease_seconds=lease_seconds,
             exclude_hosts=exclude_hosts,
             physical_queue=physical_queue,
             now=now,
         )
+        self._record_host_first_fallback(fallback_task)
+        return fallback_task
 
     def _lease_next_host_first_from_read_model(
         self,

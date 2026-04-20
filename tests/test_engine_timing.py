@@ -118,6 +118,24 @@ def test_timing_accumulator_handles_empty_samples():
     }
 
 
+def test_runtime_stats_include_host_first_fallback_stats():
+    class FallbackLedger(_FakeLedger):
+        def host_first_fallback_stats(self):
+            return {"attempts": 2, "hits": 1, "misses": 1}
+
+    engine = CrawlerEngine(
+        max_pages=0,
+        url_ledger=FallbackLedger(None),
+        host_manager=_FakeHostManager(),
+    )
+
+    assert engine.snapshot_runtime_stats()["host_first_fallback"] == {
+        "attempts": 2,
+        "hits": 1,
+        "misses": 1,
+    }
+
+
 @pytest.mark.asyncio
 async def test_crawler_engine_records_stage_timings():
     ledger = _FakeLedger(CrawlTask(url="https://example.com/", lease_token="lease-1"))
