@@ -1,44 +1,39 @@
 # web-crawler plan
 
-## Current milestone: split precheck bottleneck timing
+## Current milestone: remove hidden historical debt
 
-Cycle-local timing summaries are now deployed and show that the current crawl-cycle body cost is
-mostly `fetch` and `precheck`, not lease selection. The next priority is to split `precheck` into
-robots admission and host rate-limit reservation so the next speed fix can target the right subsystem.
+The project now uses a single greenfield schema baseline. The immediate priority is to keep the
+repo aligned with that baseline by removing old migration bridges, old queue vocabulary, and stale
+planning text.
 
 ## Completed
 
-- Removed `url_ledger.stats()` from the daemon cycle-complete log path.
-- Stopped the daemon from running a second `url_ledger.readiness()` / scheduler snapshot after each
-  crawl cycle.
-- Made daemon runtime scheduler views use the already-read readiness object instead of live full
-  queue diagnostics.
-- Stopped pre-cycle blocked-retry promotion from calling `blocked_reason_counts()` and full durable
-  scheduler snapshots.
-- Changed daemon cycle-start readiness to use the lightweight `host_runnable_heads` read model
-  instead of the live full scheduler readiness query.
-- Changed `/stats/diagnostics` to return runtime-snapshot-only degraded diagnostics.
-- Added tests that fail if cycle completion calls live scheduler stats or snapshots.
-- Added cycle-local timing summaries and compact cycle-complete p95 timing logs.
-- Confirmed production exposes `runtime.payload.timing_summary` through `/stats`.
+- Added host latency observations: EWMA, last observed latency, observed timestamp, and sample count.
+- Deployed the host latency observation fields to production.
+- Reset database migrations to a single `001_schema.sql` baseline.
+- Reset production `schema_migrations` to the new baseline.
+- Removed archived migration history from the repo.
+- Split cycle timing enough to show that current production latency is mostly robots/precheck and
+  fetch cost, not only lease selection.
+- Shortened the robots fetch timeout and verified production still runs.
 
 ## Current slice
 
-- Add a configurable `robots_fetch_timeout` with a lower default than page fetch timeout.
-- Use that timeout for robots.txt fetches.
-- Keep timeout failures on the current allow-unavailable path.
+- Remove the one-time migration baseline bridge now that production has been reset.
+- Remove test cleanup for obsolete scheduler table names.
+- Rename the remaining internal refresh queue constant to refresh vocabulary.
+- Keep this cleanup behavior-neutral: no scheduler policy or speed logic changes.
 
 ## Acceptance
 
-- Robots fetch timeout defaults to 3 seconds.
-- `CRAWLER_ROBOTS_FETCH_TIMEOUT` can override the timeout.
-- Related tests and lint pass before deploy.
+- `sql_migrations/` contains only the current baseline and package marker.
+- `schema_migrations` on production remains `001_schema.sql`.
+- Repo search has no old migration bridge, old scheduler table cleanup, or old refresh queue vocabulary.
+- Related tests, full tests, lint, and diff checks pass before deploy.
 
 ## Next checks after deploy
 
 - Confirm `/health`, `/stats`, and `/stats/diagnostics` are healthy.
-- Observe at least two production cycles and compare `robots_p95`, `precheck_p95`, and pages/s with
-  the previous baseline.
-- If `robots_p95` remains high, consider persisted robots bodies or unavailable/error cache policy.
-- If `fetch_request_ms` remains the largest stage, move next to slow-host deprioritization or page
-  fetch timeout tuning.
+- Confirm production crawler and API containers are running.
+- Recheck production crawl timing after a full cycle.
+- If speed remains low, target fetch/robots behavior next rather than adding scheduler abstractions.
