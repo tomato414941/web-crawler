@@ -22,22 +22,25 @@ optimizations.
 - Exposed host-first read-model fallback counters in runtime stats.
 - Added a per-host robots fetch lock so concurrent workers share one robots.txt check.
 - Deployed commit `88359ef` and verified `/health`, `/stats`, and `/stats/diagnostics`.
+- Added cause-oriented telemetry for fetch, robots, lease, and pipeline waits.
+- Split runtime payload into `active_cycle` and `last_completed_cycle`.
+- Deployed telemetry commits `a05c657` and `5af97c3`, then verified active and completed cycle telemetry in production.
 
 ## Current slice
 
-- Add cause-oriented telemetry for fetch, robots, lease, and pipeline waits.
-- Split runtime payload into `active_cycle` and `last_completed_cycle`.
-- Keep the external stats endpoints available while allowing the internal runtime payload to change.
-- Commit, push, deploy, and evaluate whether production now explains why fetch/robots/DB/pipeline are slow.
+- Use the new production telemetry to choose the next speed optimization.
+- Compare fetch outcome counts, robots status counts, lease fallback misses, and DB/pipeline p95.
+- Avoid new scheduler or DB abstractions until telemetry points to a concrete bottleneck.
 
 ## Acceptance
 
-- `/stats` exposes active and completed cycle views without mixing them.
-- Runtime timing includes outcome counts for fetch, robots cache/status, and lease/fallback behavior.
-- Related tests, full tests, lint, and diff checks pass before deploy.
+- The next optimization target is selected from `last_completed_cycle` evidence.
+- The chosen change has a measurable before/after metric in `/stats`.
+- Related tests and lint pass before the next deploy.
 
 ## Next checks after deploy
 
-- Inspect production telemetry after one active cycle and one completed cycle.
-- Decide the next optimization from labeled evidence, not from raw p95 stage times.
+- Inspect whether `lease_fallbacks.miss` is idle polling or scheduler read-model drift.
+- Inspect whether robots timeout/connect errors justify more aggressive robots policy.
+- Inspect whether fetch p95 is caused by timeout/connect/http-error distribution or successful slow hosts.
 - Keep changes schema-free unless runtime evidence shows a durable metrics table is needed.
