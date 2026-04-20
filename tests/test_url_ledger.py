@@ -806,6 +806,26 @@ class TestUrlLedger:
 
         assert [(head.host_key, head.url) for head in heads] == [("a.com", "http://a.com/1")]
 
+    def test_daemon_readiness_uses_host_head_read_model_without_live_readiness(
+        self, ledger, monkeypatch
+    ):
+        now = 1000.0
+        ledger.place(CrawlTask(url="http://a.com/1", added_at=900, next_fetch_at=now - 1))
+        ledger.place(CrawlTask(url="http://b.com/1", added_at=901, next_fetch_at=now + 10))
+        monkeypatch.setattr(
+            ledger._observability,
+            "readiness",
+            lambda **_kwargs: (_ for _ in ()).throw(AssertionError("live readiness used")),
+        )
+
+        readiness = ledger.daemon_readiness(now=now)
+
+        assert readiness.pending == 2
+        assert readiness.runnable == 1
+        assert readiness.runnable_hosts == 1
+        assert readiness.scheduled == 1
+        assert readiness.next_runnable_delay == 10.0
+
     def test_lease_next_host_first_uses_read_model_before_derived_query(
         self, ledger, monkeypatch
     ):
