@@ -1,10 +1,10 @@
 # web-crawler plan
 
-## Current milestone: improve crawl throughput
+## Current milestone: make crawl latency explainable
 
 The project now has a single greenfield schema baseline and no known active migration bridge.
-The immediate priority is to raise production crawl speed without adding durable schema or broad
-scheduler abstractions until runtime evidence says they are needed.
+The immediate priority is to make production crawl latency explainable before applying more speed
+optimizations.
 
 ## Completed
 
@@ -25,18 +25,19 @@ scheduler abstractions until runtime evidence says they are needed.
 
 ## Current slice
 
-- Observe one or more production cycles with the new fallback counters.
-- Decide whether high fallback misses are just idle worker polling or a scheduler supply issue.
-- If speed remains low, target fetch transport behavior before adding scheduler abstractions.
+- Add cause-oriented telemetry for fetch, robots, lease, and pipeline waits.
+- Split runtime payload into `active_cycle` and `last_completed_cycle`.
+- Keep the external stats endpoints available while allowing the internal runtime payload to change.
+- Commit, push, deploy, and evaluate whether production now explains why fetch/robots/DB/pipeline are slow.
 
 ## Acceptance
 
-- Production `/stats` continues to expose `host_first_fallback`.
-- Production cycle timing identifies the next dominant cost after robots/fetch/scheduler/persist.
-- Related tests and lint pass before the next deploy.
+- `/stats` exposes active and completed cycle views without mixing them.
+- Runtime timing includes outcome counts for fetch, robots cache/status, and lease/fallback behavior.
+- Related tests, full tests, lint, and diff checks pass before deploy.
 
 ## Next checks after deploy
 
-- Recheck production crawl timing after another full cycle.
-- Compare active-cycle timing against completed-cycle throughput.
-- Keep changes schema-free unless runtime evidence shows a durable model is needed.
+- Inspect production telemetry after one active cycle and one completed cycle.
+- Decide the next optimization from labeled evidence, not from raw p95 stage times.
+- Keep changes schema-free unless runtime evidence shows a durable metrics table is needed.

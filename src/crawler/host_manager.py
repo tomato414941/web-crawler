@@ -10,6 +10,7 @@ from robotexclusionrulesparser import RobotExclusionRulesParser
 
 from .config import settings
 from .host_state import PersistedHostState, RuntimeHostState
+from .telemetry import RobotsDecision
 from .tls import build_ssl_context
 
 if TYPE_CHECKING:
@@ -30,6 +31,7 @@ __all__ = [
     "RuntimeHostState",
     "PersistedHostState",
     "ROBOTS_CACHE_TTL",
+    "RobotsDecision",
 ]
 
 
@@ -84,9 +86,7 @@ class HostManager:
             settings.robots_cache_ttl if robots_cache_ttl is None else robots_cache_ttl
         )
         self.robots_fetch_timeout = (
-            settings.robots_fetch_timeout
-            if robots_fetch_timeout is None
-            else robots_fetch_timeout
+            settings.robots_fetch_timeout if robots_fetch_timeout is None else robots_fetch_timeout
         )
         self._host_store = host_store
         self._host_ledger_store = host_ledger_store
@@ -101,6 +101,7 @@ class HostManager:
         self._runtime_states: dict[str, RuntimeHostState] = {}
         self._locks: dict[str, asyncio.Lock] = {}
         self._robots_locks: dict[str, asyncio.Lock] = {}
+        self._robots_statuses: dict[str, str] = {}
         self._client: httpx.AsyncClient | None = None
         self._client_lock = asyncio.Lock()
         self._hosts = self._runtime_states
@@ -225,7 +226,11 @@ class HostManager:
                 if delay:
                     state.crawl_delay_seconds = max(delay, self.default_delay)
             else:
-                robots_status = f"http_{resp.status_code}"
+                robots_status = "http_4xx" if resp.status_code < 500 else "http_5xx"
+        except httpx.TimeoutException:
+            robots_status = "timeout"
+        except httpx.ConnectError:
+            robots_status = "connect_error"
         except Exception:
             robots_status = "error"
             pass  # robots.txt not available or error
@@ -233,6 +238,7 @@ class HostManager:
         checked_at = time.time()
         state.has_checked_robots = True
         state.robots_checked_at = checked_at
+        self._robots_statuses[state.host_key] = robots_status
         if self._host_store is not None:
             persisted_state = self._host_store.update_robots(
                 state.host_key,
@@ -247,18 +253,48 @@ class HostManager:
                 checked_at=checked_at,
             )
 
-    async def is_allowed(self, url: str) -> bool:
-        """Check if URL is allowed by robots.txt (async version)."""
+    async def is_allowed(self, url: str) -> RobotsDecision:
+        """Check if URL is allowed by robots.txt and return cause telemetry."""
+        host_key = self._get_host_key(url)
         if not self.respect_robots:
-            return True
+            return RobotsDecision(
+                allowed=True,
+                reason="disabled",
+                cache_status="disabled",
+                robots_status="disabled",
+                elapsed_ms=0.0,
+                host=host_key,
+            )
 
-        # Ensure robots.txt is fetched before checking
+        existing_state = self._runtime_states.get(host_key)
+        cache_status = (
+            "hit"
+            if existing_state is not None and self._is_robots_cache_valid(existing_state)
+            else "miss"
+        )
+        started = time.perf_counter()
         state = await self.get_state(url)
+        elapsed_ms = round((time.perf_counter() - started) * 1000, 1)
 
         if not state.robots_parser:
-            return True  # No robots.txt means everything is allowed
+            return RobotsDecision(
+                allowed=True,
+                reason="no_rules",
+                cache_status=cache_status,
+                robots_status=self._robots_statuses.get(host_key, "unavailable"),
+                elapsed_ms=elapsed_ms,
+                host=host_key,
+            )
 
-        return state.robots_parser.is_allowed(self.user_agent, url)
+        allowed = state.robots_parser.is_allowed(self.user_agent, url)
+        return RobotsDecision(
+            allowed=allowed,
+            reason="allowed" if allowed else "denied",
+            cache_status=cache_status,
+            robots_status=self._robots_statuses.get(host_key, "ok"),
+            elapsed_ms=elapsed_ms,
+            host=host_key,
+        )
 
     async def wait_for_rate_limit(self, url: str):
         """Wait if needed to respect rate limit."""
