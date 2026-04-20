@@ -54,7 +54,9 @@ async def _fetch(url: str, use_browser: bool = False, auto: bool = False) -> Fet
         return FetchResult(
             url=response.url,
             status=response.status,
-            content_length=len(response.content),
+            content_length=response.content_length
+            if response.content_length is not None
+            else len(response.content),
             headers=response.headers,
             content=response.text,
             used_browser=used_browser,
