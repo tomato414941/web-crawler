@@ -40,7 +40,7 @@ execution は、次の 4 つの layer として分けて考える。
 
 - `runnable` と `scheduled` は内部 scheduler membership projection
 - `normal` は、それらをまたいだ通常クロール用の runtime-facing runnable view
-- `refresh` は recrawl work であり、通常クロールとは分ける
+- `refresh` work は通常クロールとは分ける
 - URL が選ばれた後の実行所有権は active lease が持つ
 - host に触れてよいか、どの程度触れてよいかは host state が決める
 

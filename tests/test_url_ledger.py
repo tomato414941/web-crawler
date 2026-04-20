@@ -17,9 +17,9 @@ from crawler.url_ledger import (
     LEASE_TABLE,
     LEASE_STRATEGY_HOST_FIRST,
     PHYSICAL_QUEUE_TABLES,
-    QUEUE_SCHEDULED,
+    QUEUE_REFRESH,
     QUEUE_RUNNABLE,
-    QUEUE_RECRAWL,
+    QUEUE_SCHEDULED,
     SCHEDULER_SURFACE_RUNNABLE,
     SCHEDULER_SURFACE_SCHEDULED,
     SCHEDULER_SURFACE_REFRESH,
@@ -128,15 +128,10 @@ class TestUrlLedger:
             cur.execute("DROP TABLE IF EXISTS schema_migrations")
             cur.execute(f"DROP TABLE IF EXISTS {HOST_RUNNABLE_HEADS_TABLE}")
             cur.execute(f"DROP TABLE IF EXISTS {LEASE_TABLE}")
-            cur.execute("DROP TABLE IF EXISTS frontier_lease_active")
             cur.execute(f"DROP TABLE IF EXISTS {PHYSICAL_QUEUE_TABLES[QUEUE_RUNNABLE]}")
             cur.execute(f"DROP TABLE IF EXISTS {PHYSICAL_QUEUE_TABLES[QUEUE_SCHEDULED]}")
-            cur.execute(f"DROP TABLE IF EXISTS {PHYSICAL_QUEUE_TABLES[QUEUE_RECRAWL]}")
+            cur.execute(f"DROP TABLE IF EXISTS {PHYSICAL_QUEUE_TABLES[QUEUE_REFRESH]}")
             cur.execute(f"DROP TABLE IF EXISTS {BLOCKED_HOST_BACKOFF_TABLE}")
-            cur.execute("DROP TABLE IF EXISTS frontier_queue_exploration")
-            cur.execute("DROP TABLE IF EXISTS frontier_queue_backlog")
-            cur.execute("DROP TABLE IF EXISTS frontier_queue_recrawl")
-            cur.execute("DROP TABLE IF EXISTS frontier_queue_blocked_host_backoff")
             cur.execute(f"DROP TABLE IF EXISTS {URL_LEDGER_TABLE} CASCADE")
             cur.execute(f"DROP TABLE IF EXISTS {HOST_LEDGER_TABLE}")
             cur.execute("DROP TABLE IF EXISTS host_state")
@@ -166,11 +161,11 @@ class TestUrlLedger:
             )
             (scheduled_queue_count,) = cur.fetchone()
             cur.execute(
-                f"SELECT COUNT(*) FROM {PHYSICAL_QUEUE_TABLES[QUEUE_RECRAWL]} WHERE url = %s",
+                f"SELECT COUNT(*) FROM {PHYSICAL_QUEUE_TABLES[QUEUE_REFRESH]} WHERE url = %s",
                 (url,),
             )
-            (recrawl_count,) = cur.fetchone()
-        return runnable_queue_count, scheduled_queue_count, recrawl_count
+            (refresh_count,) = cur.fetchone()
+        return runnable_queue_count, scheduled_queue_count, refresh_count
 
     def test_add_new_url_returns_true(self, ledger):
         task = CrawlTask(url="http://example.com")
@@ -216,13 +211,13 @@ class TestUrlLedger:
                 ("http://example.com/discovered",),
             )
             (ledger_count,) = cur.fetchone()
-        runnable_queue_count, scheduled_queue_count, recrawl_count = self._queue_counts(
+        runnable_queue_count, scheduled_queue_count, refresh_count = self._queue_counts(
             ledger, "http://example.com/discovered"
         )
         assert ledger_count == 1
         assert runnable_queue_count == 0
         assert scheduled_queue_count == 0
-        assert recrawl_count == 0
+        assert refresh_count == 0
 
     def test_admit_urls_assigns_scheduler_membership(self, ledger):
         ledger.discover(CrawlTask(url="http://example.com/discovered"))
@@ -233,13 +228,13 @@ class TestUrlLedger:
             intent=INTENT_EXPLORE,
         )
 
-        runnable_queue_count, scheduled_queue_count, recrawl_count = self._queue_counts(
+        runnable_queue_count, scheduled_queue_count, refresh_count = self._queue_counts(
             ledger, "http://example.com/discovered"
         )
         assert scheduled == 1
         assert runnable_queue_count == 1
         assert scheduled_queue_count == 0
-        assert recrawl_count == 0
+        assert refresh_count == 0
 
     def test_admit_urls_can_schedule_unchanged_ledger_row(self, ledger):
         ledger.discover(CrawlTask(url="http://example.com/discovered"))
@@ -247,13 +242,13 @@ class TestUrlLedger:
 
         scheduled = ledger.admit_urls(["http://example.com/discovered"])
 
-        runnable_queue_count, scheduled_queue_count, recrawl_count = self._queue_counts(
+        runnable_queue_count, scheduled_queue_count, refresh_count = self._queue_counts(
             ledger, "http://example.com/discovered"
         )
         assert scheduled == 1
         assert runnable_queue_count == 0
         assert scheduled_queue_count == 1
-        assert recrawl_count == 0
+        assert refresh_count == 0
 
     def test_admit_urls_can_target_refresh_intent_surface(self, ledger):
         ledger.discover(CrawlTask(url="http://example.com/discovered"))
@@ -264,13 +259,13 @@ class TestUrlLedger:
             intent=INTENT_REFRESH,
         )
 
-        runnable_queue_count, scheduled_queue_count, recrawl_count = self._queue_counts(
+        runnable_queue_count, scheduled_queue_count, refresh_count = self._queue_counts(
             ledger, "http://example.com/discovered"
         )
         assert scheduled == 1
         assert runnable_queue_count == 0
         assert scheduled_queue_count == 0
-        assert recrawl_count == 1
+        assert refresh_count == 1
 
     def test_admit_discovered_tasks_can_use_intent_and_surface(self, ledger):
         ledger.discover_many(
@@ -304,10 +299,10 @@ class TestUrlLedger:
         )
 
         explore_counts = self._queue_counts(ledger, "http://example.com/explore")
-        recrawl_counts = self._queue_counts(ledger, "http://example.com/again")
+        refresh_counts = self._queue_counts(ledger, "http://example.com/again")
         assert admitted == 2
         assert explore_counts == (0, 1, 0)
-        assert recrawl_counts == (0, 0, 1)
+        assert refresh_counts == (0, 0, 1)
 
     def test_prepare_tasks_prefers_more_urgent_surface(self, ledger):
         prepared = ledger._prepare_tasks(
@@ -387,57 +382,57 @@ class TestUrlLedger:
     def test_add_classifies_shallow_urls_as_scheduled(self, ledger):
         ledger.place(CrawlTask(url="http://example.com"))
 
-        runnable_queue_count, scheduled_queue_count, recrawl_count = self._queue_counts(
+        runnable_queue_count, scheduled_queue_count, refresh_count = self._queue_counts(
             ledger, "http://example.com/"
         )
         assert runnable_queue_count == 0
         assert scheduled_queue_count == 1
-        assert recrawl_count == 0
+        assert refresh_count == 0
 
     def test_add_classifies_same_host_urls_as_scheduled_through_depth_three(self, ledger):
         ledger.place(CrawlTask(url="http://example.com/guide"))
-        runnable_queue_count, scheduled_queue_count, recrawl_count = self._queue_counts(
+        runnable_queue_count, scheduled_queue_count, refresh_count = self._queue_counts(
             ledger, "http://example.com/guide"
         )
         assert runnable_queue_count == 0
         assert scheduled_queue_count == 1
-        assert recrawl_count == 0
+        assert refresh_count == 0
 
     def test_add_classifies_same_host_urls_as_scheduled_from_depth_four(self, ledger):
         ledger.place(CrawlTask(url="http://example.com/guide"))
-        runnable_queue_count, scheduled_queue_count, recrawl_count = self._queue_counts(
+        runnable_queue_count, scheduled_queue_count, refresh_count = self._queue_counts(
             ledger, "http://example.com/guide"
         )
         assert runnable_queue_count == 0
         assert scheduled_queue_count == 1
-        assert recrawl_count == 0
+        assert refresh_count == 0
 
     def test_add_classifies_seed_host_urls_as_scheduled_through_depth_two(self, ledger):
         ledger.place(CrawlTask(url="http://docs.example.com/guide"))
-        runnable_queue_count, scheduled_queue_count, recrawl_count = self._queue_counts(
+        runnable_queue_count, scheduled_queue_count, refresh_count = self._queue_counts(
             ledger, "http://docs.example.com/guide"
         )
         assert runnable_queue_count == 0
         assert scheduled_queue_count == 1
-        assert recrawl_count == 0
+        assert refresh_count == 0
 
     def test_add_classifies_seed_host_urls_as_scheduled_through_depth_three(self, ledger):
         ledger.place(CrawlTask(url="http://docs.example.com/guide"))
-        runnable_queue_count, scheduled_queue_count, recrawl_count = self._queue_counts(
+        runnable_queue_count, scheduled_queue_count, refresh_count = self._queue_counts(
             ledger, "http://docs.example.com/guide"
         )
         assert runnable_queue_count == 0
         assert scheduled_queue_count == 1
-        assert recrawl_count == 0
+        assert refresh_count == 0
 
     def test_add_defaults_implicit_urls_to_scheduled(self, ledger):
         ledger.place(CrawlTask(url="http://example.com/seed"))
-        runnable_queue_count, scheduled_queue_count, recrawl_count = self._queue_counts(
+        runnable_queue_count, scheduled_queue_count, refresh_count = self._queue_counts(
             ledger, "http://example.com/seed"
         )
         assert runnable_queue_count == 0
         assert scheduled_queue_count == 1
-        assert recrawl_count == 0
+        assert refresh_count == 0
 
     def test_upsert_seeds_keeps_seed_urls_in_runnable(self, ledger):
         ledger.upsert_seeds(["http://example.com/seed"])
@@ -462,30 +457,30 @@ class TestUrlLedger:
             ledger.place(CrawlTask(url=f"http://example.com/known-{i}"))
 
         ledger.place(CrawlTask(url="http://example.com/new-branch"))
-        runnable_queue_count, scheduled_queue_count, recrawl_count = self._queue_counts(
+        runnable_queue_count, scheduled_queue_count, refresh_count = self._queue_counts(
             ledger, "http://example.com/new-branch"
         )
         assert runnable_queue_count == 0
         assert scheduled_queue_count == 1
-        assert recrawl_count == 0
+        assert refresh_count == 0
 
     def test_add_classifies_external_deep_urls_as_scheduled(self, ledger):
         ledger.place(CrawlTask(url="http://external.example.com/deep"))
-        runnable_queue_count, scheduled_queue_count, recrawl_count = self._queue_counts(
+        runnable_queue_count, scheduled_queue_count, refresh_count = self._queue_counts(
             ledger, "http://external.example.com/deep"
         )
         assert runnable_queue_count == 0
         assert scheduled_queue_count == 1
-        assert recrawl_count == 0
+        assert refresh_count == 0
 
     def test_add_classifies_deep_urls_as_scheduled(self, ledger):
         ledger.place(CrawlTask(url="http://example.com/deep"))
-        runnable_queue_count, scheduled_queue_count, recrawl_count = self._queue_counts(
+        runnable_queue_count, scheduled_queue_count, refresh_count = self._queue_counts(
             ledger, "http://example.com/deep"
         )
         assert runnable_queue_count == 0
         assert scheduled_queue_count == 1
-        assert recrawl_count == 0
+        assert refresh_count == 0
 
     def test_lease_next_returns_task(self, ledger):
         ledger.place(CrawlTask(url="http://example.com"))
@@ -1916,9 +1911,9 @@ class TestUrlLedger:
         requeued = ledger.requeue_refresh_urls([leased.url])
         assert requeued == 1
 
-        recrawl = ledger.lease_next(runnable_surface=SCHEDULER_SURFACE_REFRESH)
-        assert recrawl is not None
-        assert recrawl.url == leased.url
+        refresh = ledger.lease_next(runnable_surface=SCHEDULER_SURFACE_REFRESH)
+        assert refresh is not None
+        assert refresh.url == leased.url
 
     def test_lease_next_uses_queue_membership_not_task_metadata(self, ledger):
         ledger.place(CrawlTask(url="http://example.com"))
@@ -1929,9 +1924,9 @@ class TestUrlLedger:
         requeued = ledger.requeue_refresh_urls([leased.url])
         assert requeued == 1
 
-        recrawl = ledger.lease_next(runnable_surface=SCHEDULER_SURFACE_REFRESH)
-        assert recrawl is not None
-        assert recrawl.url == leased.url
+        refresh = ledger.lease_next(runnable_surface=SCHEDULER_SURFACE_REFRESH)
+        assert refresh is not None
+        assert refresh.url == leased.url
 
     def test_mark_done_resets_fail_streak(self, ledger):
         ledger.place(CrawlTask(url="http://example.com"))

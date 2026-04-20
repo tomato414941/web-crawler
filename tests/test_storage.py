@@ -13,9 +13,9 @@ from crawler.url_ledger import (
     BLOCKED_HOST_BACKOFF_TABLE,
     LEASE_TABLE,
     PHYSICAL_QUEUE_TABLES,
-    QUEUE_SCHEDULED,
+    QUEUE_REFRESH,
     QUEUE_RUNNABLE,
-    QUEUE_RECRAWL,
+    QUEUE_SCHEDULED,
     URL_LEDGER_TABLE,
 )
 
@@ -29,7 +29,7 @@ pytestmark = pytest.mark.skipif(
 def _reset_schema(dsn: str) -> None:
     runnable_table = PHYSICAL_QUEUE_TABLES[QUEUE_RUNNABLE]
     scheduled_table = PHYSICAL_QUEUE_TABLES[QUEUE_SCHEDULED]
-    refresh_table = PHYSICAL_QUEUE_TABLES[QUEUE_RECRAWL]
+    refresh_table = PHYSICAL_QUEUE_TABLES[QUEUE_REFRESH]
     conn = psycopg2.connect(dsn)
     conn.autocommit = False
     try:
@@ -41,12 +41,7 @@ def _reset_schema(dsn: str) -> None:
             cur.execute(f"DROP TABLE IF EXISTS public.{scheduled_table}")
             cur.execute(f"DROP TABLE IF EXISTS public.{refresh_table}")
             cur.execute(f"DROP TABLE IF EXISTS public.{BLOCKED_HOST_BACKOFF_TABLE}")
-            cur.execute("DROP TABLE IF EXISTS public.frontier_queue_exploration")
-            cur.execute("DROP TABLE IF EXISTS public.frontier_queue_backlog")
-            cur.execute("DROP TABLE IF EXISTS public.frontier_queue_recrawl")
-            cur.execute("DROP TABLE IF EXISTS public.frontier_queue_blocked_host_backoff")
             cur.execute(f"DROP TABLE IF EXISTS public.{LEASE_TABLE}")
-            cur.execute("DROP TABLE IF EXISTS public.frontier_lease_active")
             cur.execute(f"DROP TABLE IF EXISTS public.{URL_LEDGER_TABLE} CASCADE")
             cur.execute("DROP TABLE IF EXISTS public.crawler_runtime_stats")
             cur.execute("DROP TABLE IF EXISTS public.pages")
@@ -1026,45 +1021,6 @@ def test_get_stats_includes_active_error_breakdown(pg_storage):
         {"host": "other.com", "count": 2},
         {"host": "third.com", "count": 2},
     ]
-
-
-def test_get_stats_rejects_legacy_queue_schema(pg_storage):
-    result = {
-        "url": "https://example.com/page1",
-        "status": 200,
-        "content_length": 100,
-        "timestamp": 1710000000.0,
-        "content": "<html><title>Example</title></html>",
-        "outlinks": [],
-    }
-    pg_storage.save(result)
-
-    with pg_storage._conn.cursor() as cur:
-        cur.execute(f"DROP TABLE IF EXISTS public.{URL_LEDGER_TABLE} CASCADE")
-    pg_storage._conn.commit()
-
-    with pg_storage._conn.cursor() as cur:
-        cur.execute(
-            """
-            CREATE TABLE public.url_ledger (
-                url TEXT PRIMARY KEY,
-                host TEXT NOT NULL,
-                priority REAL NOT NULL DEFAULT 1.0,
-                source_url TEXT,
-                added_at DOUBLE PRECISION NOT NULL
-            )
-            """
-        )
-        cur.execute(
-            """
-            INSERT INTO url_ledger (url, host, priority, source_url, added_at)
-            VALUES ('https://example.com/page2', 'example.com', 1.0, 'https://example.com/page1', 1710000001.0)
-            """
-        )
-    pg_storage._conn.commit()
-
-    with pytest.raises(RuntimeError, match="url_ledger schema is outdated"):
-        pg_storage.get_stats()
 
 
 def test_read_methods_leave_connection_idle(pg_storage):
