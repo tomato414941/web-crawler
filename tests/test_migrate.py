@@ -72,17 +72,7 @@ def migrated_dsn():
 def test_apply_migrations_creates_expected_tables(migrated_dsn):
     applied = apply_migrations(migrated_dsn)
 
-    assert applied == [
-        "001_current_schema.sql",
-        "024_normalize_constraint_names.sql",
-        "025_rename_physical_queue_columns.sql",
-        "026_add_current_intent.sql",
-        "027_rename_domain_to_host.sql",
-        "028_add_host_ledger.sql",
-        "029_add_host_runnable_heads.sql",
-        "030_rename_scheduler_surfaces.sql",
-        "031_incremental_host_runnable_heads.sql",
-    ]
+    assert applied == ["001_schema.sql"]
 
     conn = psycopg2.connect(migrated_dsn)
     try:
@@ -182,7 +172,7 @@ def test_apply_migrations_is_idempotent(migrated_dsn):
     assert applied == []
 
 
-def test_apply_migrations_skips_baseline_when_legacy_history_exists(migrated_dsn):
+def test_apply_migrations_resets_current_legacy_history_to_baseline(migrated_dsn):
     root = resources.files(MIGRATIONS_PACKAGE)
     baseline_sql = root.joinpath(BASELINE_VERSION).read_text(encoding="utf-8")
 
@@ -194,7 +184,7 @@ def test_apply_migrations_skips_baseline_when_legacy_history_exists(migrated_dsn
             cur.execute(baseline_sql)
             cur.execute(
                 "INSERT INTO schema_migrations (version, applied_at) VALUES (%s, EXTRACT(epoch FROM now()))",
-                ("023_rename_frontier_queue_tables.sql",),
+                ("032_add_host_latency_observations.sql",),
             )
         conn.commit()
     finally:
@@ -202,16 +192,7 @@ def test_apply_migrations_skips_baseline_when_legacy_history_exists(migrated_dsn
 
     applied = apply_migrations(migrated_dsn)
 
-    assert applied == [
-        "024_normalize_constraint_names.sql",
-        "025_rename_physical_queue_columns.sql",
-        "026_add_current_intent.sql",
-        "027_rename_domain_to_host.sql",
-        "028_add_host_ledger.sql",
-        "029_add_host_runnable_heads.sql",
-        "030_rename_scheduler_surfaces.sql",
-        "031_incremental_host_runnable_heads.sql",
-    ]
+    assert applied == [BASELINE_VERSION]
 
     conn = psycopg2.connect(migrated_dsn)
     try:
@@ -221,13 +202,4 @@ def test_apply_migrations_skips_baseline_when_legacy_history_exists(migrated_dsn
     finally:
         conn.close()
 
-    assert "023_rename_frontier_queue_tables.sql" in versions
-    assert "024_normalize_constraint_names.sql" in versions
-    assert "025_rename_physical_queue_columns.sql" in versions
-    assert "026_add_current_intent.sql" in versions
-    assert "027_rename_domain_to_host.sql" in versions
-    assert "028_add_host_ledger.sql" in versions
-    assert "029_add_host_runnable_heads.sql" in versions
-    assert "030_rename_scheduler_surfaces.sql" in versions
-    assert "031_incremental_host_runnable_heads.sql" in versions
-    assert BASELINE_VERSION not in versions
+    assert versions == [BASELINE_VERSION]
