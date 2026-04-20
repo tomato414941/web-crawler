@@ -539,6 +539,9 @@ async def test_daemon_persists_scheduler_views_after_cycle():
             self.payloads.append((component, dict(payload)))
 
     class FakeLedger:
+        def __init__(self):
+            self.readiness_calls = 0
+
         def pending_count(self, runnable_surface=None):
             return 2
 
@@ -549,6 +552,7 @@ async def test_daemon_persists_scheduler_views_after_cycle():
             return 1
 
         def readiness(self):
+            self.readiness_calls += 1
             return SimpleNamespace(
                 pending=2,
                 runnable=1,
@@ -578,7 +582,10 @@ async def test_daemon_persists_scheduler_views_after_cycle():
             return len(urls)
 
         def stats(self):
-            return {"pending": 2, "total": 2}
+            raise AssertionError("cycle completion should not run live scheduler stats")
+
+        def scheduler_state_snapshot(self, now=None):
+            raise AssertionError("cycle completion should not run live scheduler snapshot")
 
     daemon = CrawlDaemon(
         seeds=["https://example.com/"],
@@ -609,6 +616,7 @@ async def test_daemon_persists_scheduler_views_after_cycle():
     await daemon.run()
 
     assert storage.payloads[-1][1]["state"] == "cycle_complete"
+    assert ledger.readiness_calls == 1
     assert storage.payloads[-1][1]["blocked_reason_counts"] == {
         "next_fetch_at": 0,
         "host_next_request": 1,

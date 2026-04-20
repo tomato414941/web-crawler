@@ -1,34 +1,36 @@
 # web-crawler plan
 
-## Current milestone: incremental host-first frontier
+## Current milestone: remove live scheduler scans from the daemon hot loop
 
-The current priority is to remove global scheduler scans from normal crawler startup and lease
-selection. The crawler should choose work from a cheap host-first runtime cache, not rebuild host
-eligibility from the full URL queue every cycle.
+The current priority is to make measured crawler throughput match wall-clock throughput. The daemon
+must not run full scheduler diagnostics or readiness snapshots at cycle boundaries, because those
+queries scan multi-million-row scheduler queues and delay the next crawl cycle.
 
 ## Completed in this slice
 
-- Removed the crawl-cycle-start global `host_runnable_heads` rebuild from the normal runtime path.
-- Made queue insert/delete/replace update affected `(physical_queue, host)` heads incrementally.
-- Made stale read-model candidate deletion refresh that host from source queue membership.
-- Replaced the host-first derived-query fallback with a bounded queue scan safety fallback.
-- Added host-local queue indexes and a `host_runnable_heads.head_url` index.
-- Documented that `host_runnable_heads` is an incremental worker-facing cache, not scheduler truth.
+- Removed `url_ledger.stats()` from the daemon cycle-complete log path.
+- Stopped the daemon from running a second `url_ledger.readiness()` / scheduler snapshot after each
+  crawl cycle.
+- Made daemon runtime scheduler views use the already-read readiness object instead of live full
+  queue diagnostics.
+- Changed `/stats/diagnostics` to return runtime-snapshot-only degraded diagnostics.
+- Added tests that fail if cycle completion calls live scheduler stats or snapshots.
 
 ## Acceptance
 
-- Daemon startup does not log or wait for a full `host_runnable_heads` refresh.
-- Leasing uses `host_runnable_heads` first and does not rebuild host heads globally on cache miss.
-- Queue mutations keep the affected host head usable without requiring a cycle restart.
-- Stale head rows are self-healed by host-local refresh.
+- Cycle completion does not call `url_ledger.stats()`.
+- Cycle completion does not call `scheduler_state_snapshot()`.
+- `/stats` stays backed by the persisted runtime snapshot.
+- `/stats/diagnostics` does not execute the expensive `pending_entries` full scheduler scan.
 - Related tests and lint pass before deploy.
 
 ## Next checks after deploy
 
 - Confirm `/health`, `/stats`, and `/stats/diagnostics` are healthy.
-- Confirm expired `active_leases` do not accumulate.
-- Confirm crawler logs no longer include the previous ~24s `Refreshed host runnable-head read model`
-  startup delay.
-- Compare cycle completion time and pages/sec against the previous `300 pages in 145.2s`
-  production baseline.
-- Watch PostgreSQL CPU while the crawler is running at the current production concurrency.
+- Confirm crawler `pg_stat_activity` no longer shows daemon-origin long-running
+  `WITH pending_entries AS (...)` queries at cycle boundaries.
+- Confirm `Cycle complete` to next `Cycle N:` gap drops from about 60-70 seconds to a few seconds.
+- Compare start-to-next-start effective pages/sec against the recent production baseline of about
+  0.95-1.2 pages/sec.
+- If the gap is fixed but crawl body speed is still low, investigate finalizer serialization and
+  fetch/precheck latency next.

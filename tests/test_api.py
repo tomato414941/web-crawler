@@ -12,7 +12,7 @@ class FakeStorage:
         return {"stats_source": "runtime_snapshot"}
 
     def get_stats(self):
-        return {"stats_source": "diagnostics"}
+        raise AssertionError("live diagnostics should not be called")
 
 
 @pytest.fixture(autouse=True)
@@ -32,10 +32,15 @@ def test_stats_uses_fast_runtime_summary():
     assert response.json() == {"stats_source": "runtime_snapshot"}
 
 
-def test_stats_diagnostics_uses_full_stats():
+def test_stats_diagnostics_uses_runtime_snapshot_only():
     client = TestClient(api.app)
 
     response = client.get("/stats/diagnostics")
 
     assert response.status_code == 200
-    assert response.json() == {"stats_source": "diagnostics"}
+    assert response.json() == {
+        "stats_source": "runtime_snapshot",
+        "diagnostics_unavailable": True,
+        "diagnostics_error": "live_scheduler_diagnostics_disabled",
+        "diagnostics_mode": "runtime_snapshot_only",
+    }
