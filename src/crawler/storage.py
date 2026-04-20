@@ -748,6 +748,9 @@ class PgStorage:
                                 pending_entries.host,
                                 COUNT(*) AS pending_count,
                                 MAX(COALESCE(host_state.latency_ewma_ms, 0)) AS latency_ewma_ms,
+                                MAX(COALESCE(host_state.latency_last_ms, 0)) AS latency_last_ms,
+                                MAX(COALESCE(host_state.latency_observed_at, 0)) AS latency_observed_at,
+                                MAX(COALESCE(host_state.latency_sample_count, 0)) AS latency_sample_count,
                                 COALESCE(MAX(host_state.consecutive_failures), 0) AS consecutive_failures,
                                 {_physical_queue_count_projection_sql("pending_entries.physical_queue")}
                             FROM pending_entries
@@ -766,6 +769,9 @@ class PgStorage:
                                 host,
                                 pending_count,
                                 latency_ewma_ms,
+                                latency_last_ms,
+                                latency_observed_at,
+                                latency_sample_count,
                                 consecutive_failures,
                                 *queue_count_values,
                             ) = row
@@ -774,6 +780,9 @@ class PgStorage:
                                     "host": host,
                                     "pending_count": pending_count,
                                     "latency_ewma_ms": round(latency_ewma_ms, 1),
+                                    "latency_last_ms": round(latency_last_ms, 1),
+                                    "latency_observed_at": latency_observed_at,
+                                    "latency_sample_count": latency_sample_count,
                                     "consecutive_failures": consecutive_failures,
                                     "surface_counts": _surface_counts_from_physical_queue_count_values(
                                         tuple(queue_count_values)

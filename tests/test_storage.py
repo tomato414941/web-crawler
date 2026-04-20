@@ -909,20 +909,26 @@ def test_get_stats_includes_top_slow_hosts(pg_storage):
                 backoff_until,
                 consecutive_failures,
                 latency_ewma_ms,
+                latency_last_ms,
+                latency_observed_at,
+                latency_sample_count,
                 robots_checked_at,
                 updated_at
             )
             VALUES
-                ('slow.example', 1.0, %s, %s, 4, 900.0, %s, %s),
-                ('fast.example', 1.0, %s, %s, 0, 80.0, %s, %s)
+                ('slow.example', 1.0, %s, %s, 4, 900.0, 1200.0, %s, 5, %s, %s),
+                ('fast.example', 1.0, %s, %s, 0, 80.0, 40.0, %s, 2, %s, %s)
             ON CONFLICT (host_key) DO UPDATE
             SET next_request_at = EXCLUDED.next_request_at,
                 backoff_until = EXCLUDED.backoff_until,
                 consecutive_failures = EXCLUDED.consecutive_failures,
                 latency_ewma_ms = EXCLUDED.latency_ewma_ms,
+                latency_last_ms = EXCLUDED.latency_last_ms,
+                latency_observed_at = EXCLUDED.latency_observed_at,
+                latency_sample_count = EXCLUDED.latency_sample_count,
                 updated_at = EXCLUDED.updated_at
             """,
-            (now, now, now, now, now, now, now, now),
+            (now, now, now, now, now, now, now, now, now, now),
         )
     pg_storage._conn.commit()
 
@@ -935,6 +941,9 @@ def test_get_stats_includes_top_slow_hosts(pg_storage):
             "host": "slow.example",
             "pending_count": 2,
             "latency_ewma_ms": 900.0,
+            "latency_last_ms": 1200.0,
+            "latency_observed_at": now,
+            "latency_sample_count": 5,
             "consecutive_failures": 4,
             "surface_counts": {
                 "runnable": 1,
@@ -946,6 +955,9 @@ def test_get_stats_includes_top_slow_hosts(pg_storage):
             "host": "fast.example",
             "pending_count": 1,
             "latency_ewma_ms": 80.0,
+            "latency_last_ms": 40.0,
+            "latency_observed_at": now,
+            "latency_sample_count": 2,
             "consecutive_failures": 0,
             "surface_counts": {
                 "runnable": 1,
@@ -959,6 +971,9 @@ def test_get_stats_includes_top_slow_hosts(pg_storage):
             "host": "fast.example",
             "pending_count": 1,
             "latency_ewma_ms": 80.0,
+            "latency_last_ms": 40.0,
+            "latency_observed_at": now,
+            "latency_sample_count": 2,
             "consecutive_failures": 0,
             "surface_counts": {
                 "runnable": 1,

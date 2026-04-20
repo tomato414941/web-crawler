@@ -16,11 +16,26 @@ HOST_STATE_REQUIRED_COLUMNS = {
     "backoff_until",
     "consecutive_failures",
     "latency_ewma_ms",
+    "latency_last_ms",
+    "latency_observed_at",
+    "latency_sample_count",
     "robots_checked_at",
     "updated_at",
 }
 
 _LATENCY_EWMA_ALPHA = 0.2
+_HOST_STATE_SELECT_COLUMNS = """
+                       host_key,
+                       crawl_delay_seconds,
+                       next_request_at,
+                       backoff_until,
+                       consecutive_failures,
+                       latency_ewma_ms,
+                       latency_last_ms,
+                       latency_observed_at,
+                       latency_sample_count,
+                       robots_checked_at,
+                       updated_at"""
 
 
 class HostStore:
@@ -39,8 +54,11 @@ class HostStore:
             backoff_until=row[3],
             consecutive_failures=row[4],
             latency_ewma_ms=row[5],
-            robots_checked_at=row[6],
-            updated_at=row[7],
+            latency_last_ms=row[6],
+            latency_observed_at=row[7],
+            latency_sample_count=row[8],
+            robots_checked_at=row[9],
+            updated_at=row[10],
         )
 
     def get_or_create(self, host_key: str) -> PersistedHostState:
@@ -54,15 +72,7 @@ class HostStore:
                 (host_key, self._default_delay, now),
             )
             cur.execute(
-                """SELECT
-                       host_key,
-                       crawl_delay_seconds,
-                       next_request_at,
-                       backoff_until,
-                       consecutive_failures,
-                       latency_ewma_ms,
-                       robots_checked_at,
-                       updated_at
+                f"""SELECT{_HOST_STATE_SELECT_COLUMNS}
                    FROM host_state
                    WHERE host_key = %s""",
                 (host_key,),
@@ -82,7 +92,7 @@ class HostStore:
         checked_at = time.time() if checked_at is None else checked_at
         with self._conn.cursor() as cur:
             cur.execute(
-                """INSERT INTO host_state (
+                f"""INSERT INTO host_state (
                        host_key,
                        crawl_delay_seconds,
                        robots_checked_at,
@@ -93,15 +103,7 @@ class HostStore:
                        crawl_delay_seconds = EXCLUDED.crawl_delay_seconds,
                        robots_checked_at = EXCLUDED.robots_checked_at,
                        updated_at = EXCLUDED.updated_at
-                   RETURNING
-                       host_key,
-                       crawl_delay_seconds,
-                       next_request_at,
-                       backoff_until,
-                       consecutive_failures,
-                       latency_ewma_ms,
-                       robots_checked_at,
-                       updated_at""",
+                   RETURNING{_HOST_STATE_SELECT_COLUMNS}""",
                 (host_key, crawl_delay_seconds, checked_at, checked_at),
             )
             row = cur.fetchone()
@@ -154,6 +156,9 @@ class HostStore:
                        backoff_until,
                        consecutive_failures,
                        latency_ewma_ms,
+                       latency_last_ms,
+                       latency_observed_at,
+                       latency_sample_count,
                        robots_checked_at,
                        updated_at""",
                 (crawl_delay_seconds, next_request_at, now, host_key),
@@ -179,7 +184,7 @@ class HostStore:
                 (host_key, self._default_delay, now),
             )
             cur.execute(
-                """UPDATE host_state
+                f"""UPDATE host_state
                    SET consecutive_failures = 0,
                        backoff_until = 0,
                        latency_ewma_ms = CASE
@@ -187,22 +192,31 @@ class HostStore:
                            WHEN latency_ewma_ms <= 0 THEN %s
                            ELSE latency_ewma_ms + ((%s - latency_ewma_ms) * %s)
                        END,
+                       latency_last_ms = CASE
+                           WHEN %s IS NULL THEN latency_last_ms
+                           ELSE %s
+                       END,
+                       latency_observed_at = CASE
+                           WHEN %s IS NULL THEN latency_observed_at
+                           ELSE %s
+                       END,
+                       latency_sample_count = CASE
+                           WHEN %s IS NULL THEN latency_sample_count
+                           ELSE latency_sample_count + 1
+                       END,
                        updated_at = %s
                    WHERE host_key = %s
-                   RETURNING
-                       host_key,
-                       crawl_delay_seconds,
-                       next_request_at,
-                       backoff_until,
-                       consecutive_failures,
-                       latency_ewma_ms,
-                       robots_checked_at,
-                       updated_at""",
+                   RETURNING{_HOST_STATE_SELECT_COLUMNS}""",
                 (
                     request_latency_ms,
                     request_latency_ms,
                     request_latency_ms,
                     _LATENCY_EWMA_ALPHA,
+                    request_latency_ms,
+                    request_latency_ms,
+                    request_latency_ms,
+                    now,
+                    request_latency_ms,
                     now,
                     host_key,
                 ),
@@ -249,6 +263,9 @@ class HostStore:
                        backoff_until,
                        consecutive_failures,
                        latency_ewma_ms,
+                       latency_last_ms,
+                       latency_observed_at,
+                       latency_sample_count,
                        robots_checked_at,
                        updated_at""",
                 (consecutive_failures + 1, next_backoff_until, now, host_key),
