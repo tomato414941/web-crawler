@@ -917,17 +917,6 @@ class UrlLedger:
         )
         return pairs
 
-    def _queue_head_pairs_for_rows(
-        self,
-        rows: list[tuple[str, str, float, float, float, str]],
-    ) -> list[tuple[str, str]]:
-        """Return affected read-model queue/host pairs from pending queue rows."""
-        return [
-            (self._normalize_physical_queue(physical_queue), host)
-            for _url, host, _priority, _next_fetch_at, _added_at, physical_queue in rows
-            if host
-        ]
-
     def _refresh_host_runnable_heads_for_pairs(
         self,
         cur,
@@ -953,10 +942,7 @@ class UrlLedger:
     ) -> None:
         """Insert scheduler-pending rows into the appropriate physical queue tables."""
         self._membership.insert_pending_rows(cur, rows)
-        self._refresh_host_runnable_heads_for_pairs(
-            cur,
-            self._queue_head_pairs_for_rows(rows),
-        )
+        self._host_heads.upsert_candidates_in_tx(cur, rows)
 
     def _insert_blocked_host_backoff_rows(
         self,
