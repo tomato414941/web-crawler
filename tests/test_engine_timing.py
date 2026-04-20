@@ -135,11 +135,19 @@ def test_runtime_stats_include_host_first_fallback_stats():
         "attempts": 2,
         "hits": 1,
         "misses": 1,
+        "read_model_hits": 0,
+        "read_model_stale": 0,
+        "read_model_misses": 0,
+        "read_model_errors": 0,
     }
     assert engine.snapshot_runtime_stats()["active_cycle"]["host_first_fallback"] == {
         "attempts": 2,
         "hits": 1,
         "misses": 1,
+        "read_model_hits": 0,
+        "read_model_stale": 0,
+        "read_model_misses": 0,
+        "read_model_errors": 0,
     }
 
 

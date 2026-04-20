@@ -431,39 +431,66 @@ class HostRunnableHeadStore:
             runnable_surface=runnable_surface,
             physical_queues=physical_queues,
         )
-        conditions = ["physical_queue = ANY(%s)", "runnable_at <= %s"]
+        effective_runnable_at = (
+            "GREATEST("
+            "heads.runnable_at, "
+            "COALESCE(host_state.next_request_at, 0), "
+            "COALESCE(host_state.backoff_until, 0)"
+            ")"
+        )
+        latency_penalty = self._latency_penalty_sql(
+            "heads",
+            latency_ms_sql="COALESCE(host_state.latency_ewma_ms, 0)",
+        )
+        warm_robots_penalty = (
+            "CASE WHEN GREATEST("
+            "COALESCE(host_state.robots_checked_at, 0), "
+            "COALESCE(host_ledger.robots_last_checked_at, 0)"
+            ") > 0 THEN 0 ELSE 1 END"
+        )
+        warm_success_penalty = (
+            "CASE WHEN COALESCE(host_ledger.success_count, 0) > 0 "
+            "OR COALESCE(host_ledger.last_success_at, 0) > 0 "
+            "THEN 0 ELSE 1 END"
+        )
+        conditions = ["heads.physical_queue = ANY(%s)", f"{effective_runnable_at} <= %s"]
         params: list[object] = [normalized_physical_queues, runnable_at]
 
         if host:
-            conditions.append("host = %s")
+            conditions.append("heads.host = %s")
             params.append(host)
         if exclude_hosts:
-            conditions.append("NOT (host = ANY(%s))")
+            conditions.append("NOT (heads.host = ANY(%s))")
             params.append(exclude_hosts)
 
         with self._conn.cursor() as cur:
             cur.execute(
                 f"""SELECT
-                        physical_queue,
-                        host,
-                        head_url,
-                        head_next_fetch_at,
-                        head_added_at,
-                        head_priority,
-                        runnable_url_count,
-                        latency_penalty,
-                        runnable_at,
-                        refreshed_at
-                    FROM {self._table_name}
+                        heads.physical_queue,
+                        heads.host,
+                        heads.head_url,
+                        heads.head_next_fetch_at,
+                        heads.head_added_at,
+                        heads.head_priority,
+                        heads.runnable_url_count,
+                        {latency_penalty} AS effective_latency_penalty,
+                        {effective_runnable_at} AS effective_runnable_at,
+                        heads.refreshed_at
+                    FROM {self._table_name} AS heads
+                    LEFT JOIN host_state ON host_state.host_key = heads.host
+                    LEFT JOIN host_ledger ON host_ledger.host = heads.host
                     WHERE {" AND ".join(conditions)}
                     ORDER BY
-                        runnable_url_count ASC,
-                        latency_penalty ASC,
-                        head_next_fetch_at ASC,
-                        head_added_at ASC,
-                        head_priority DESC,
-                        physical_queue ASC,
-                        head_url ASC
+                        {warm_robots_penalty} ASC,
+                        {warm_success_penalty} ASC,
+                        COALESCE(host_state.consecutive_failures, 0) ASC,
+                        {latency_penalty} ASC,
+                        heads.runnable_url_count ASC,
+                        heads.head_next_fetch_at ASC,
+                        heads.head_added_at ASC,
+                        heads.head_priority DESC,
+                        heads.physical_queue ASC,
+                        heads.head_url ASC
                     LIMIT %s""",
                 (*params, limit),
             )
@@ -509,18 +536,28 @@ class HostRunnableHeadStore:
             runnable_surface=runnable_surface,
             physical_queues=physical_queues,
         )
+        effective_runnable_at = (
+            "GREATEST("
+            "heads.runnable_at, "
+            "COALESCE(host_state.next_request_at, 0), "
+            "COALESCE(host_state.backoff_until, 0)"
+            ")"
+        )
         with self._conn.cursor() as cur:
             cur.execute(
                 f"""SELECT
-                        COALESCE(SUM(runnable_url_count), 0) AS pending_urls,
+                        COALESCE(SUM(heads.runnable_url_count), 0) AS pending_urls,
                         COALESCE(
-                            SUM(runnable_url_count) FILTER (WHERE runnable_at <= %s),
+                            SUM(heads.runnable_url_count)
+                                FILTER (WHERE {effective_runnable_at} <= %s),
                             0
                         ) AS ready_urls,
-                        COUNT(*) FILTER (WHERE runnable_at <= %s) AS ready_hosts,
-                        MIN(runnable_at) FILTER (WHERE runnable_at > %s) AS next_runnable_at
-                    FROM {self._table_name}
-                    WHERE physical_queue = ANY(%s)""",
+                        COUNT(*) FILTER (WHERE {effective_runnable_at} <= %s) AS ready_hosts,
+                        MIN({effective_runnable_at})
+                            FILTER (WHERE {effective_runnable_at} > %s) AS next_runnable_at
+                    FROM {self._table_name} AS heads
+                    LEFT JOIN host_state ON host_state.host_key = heads.host
+                    WHERE heads.physical_queue = ANY(%s)""",
                 (runnable_at, runnable_at, runnable_at, normalized_physical_queues),
             )
             pending_urls, ready_urls, ready_hosts, next_runnable_at = cur.fetchone()
@@ -542,7 +579,10 @@ class HostRunnableHeadStore:
                         RETURNING physical_queue, host""",
                     (self._normalize_physical_queue(physical_queue), url),
                 )
-                pairs = [(physical_queue, host) for physical_queue, host in cur.fetchall()]
+                pairs = [
+                    (self._normalize_physical_queue(row_physical_queue), host)
+                    for row_physical_queue, host in cur.fetchall()
+                ]
                 self.refresh_hosts_in_tx(cur, pairs)
             self._conn.commit()
         except Exception:

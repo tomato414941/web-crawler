@@ -323,12 +323,24 @@ class CrawlerEngine:
     def _host_first_fallback_stats(self) -> dict[str, int]:
         stats_fn = getattr(self.scheduler, "host_first_fallback_stats", None)
         if not callable(stats_fn):
-            return {"attempts": 0, "hits": 0, "misses": 0}
+            return {
+                "attempts": 0,
+                "hits": 0,
+                "misses": 0,
+                "read_model_hits": 0,
+                "read_model_stale": 0,
+                "read_model_misses": 0,
+                "read_model_errors": 0,
+            }
         raw = stats_fn()
         return {
             "attempts": int(raw.get("attempts", 0)),
             "hits": int(raw.get("hits", 0)),
             "misses": int(raw.get("misses", 0)),
+            "read_model_hits": int(raw.get("read_model_hits", 0)),
+            "read_model_stale": int(raw.get("read_model_stale", 0)),
+            "read_model_misses": int(raw.get("read_model_misses", 0)),
+            "read_model_errors": int(raw.get("read_model_errors", 0)),
         }
 
     def _active_cycle_payload(self) -> dict[str, object]:
@@ -1267,25 +1279,22 @@ class CrawlerEngine:
                 for host, count in self._active_host_counts.items()
                 if count >= self._host_inflight_budget(host)
             ]
-            fallback_before = self._host_first_fallback_stats()
             task = self.scheduler.lease_next(
                 runnable_surface=lease_lane.runnable_surface,
                 lease_strategy=lease_lane.lease_strategy,
                 exclude_hosts=excluded_hosts or None,
             )
-            fallback_after = self._host_first_fallback_stats()
-            fallback = "none"
-            if fallback_after["attempts"] > fallback_before["attempts"]:
-                fallback = "hit" if fallback_after["hits"] > fallback_before["hits"] else "miss"
             if task is not None:
                 host_key = self._host_key_for_url(task.url)
                 self._active_host_counts[host_key] += 1
             read_model = "unknown"
+            fallback = "none"
             if lease_lane.lease_strategy == LEASE_STRATEGY_HOST_FIRST:
-                if fallback == "none" and task is not None:
-                    read_model = "hit"
-                elif fallback != "none":
-                    read_model = "miss"
+                diagnostics_fn = getattr(self.scheduler, "last_lease_diagnostics", None)
+                if callable(diagnostics_fn):
+                    diagnostics = diagnostics_fn()
+                    read_model = str(diagnostics.get("read_model", "unknown"))
+                    fallback = str(diagnostics.get("fallback", "none"))
             lease = LeaseTelemetry(
                 outcome="leased" if task is not None else "empty",
                 runnable_surface=lease_lane.runnable_surface,

@@ -257,7 +257,15 @@ class CrawlDaemon:
                     logger.info("Cycle %d: %d runnable / %d pending URLs", cycle, runnable, pending)
                     start = time.time()
                     cycle_result = await self._run_cycle(storage, url_ledger)
-                    host_first_fallback = {"attempts": 0, "hits": 0, "misses": 0}
+                    host_first_fallback = {
+                        "attempts": 0,
+                        "hits": 0,
+                        "misses": 0,
+                        "read_model_hits": 0,
+                        "read_model_stale": 0,
+                        "read_model_misses": 0,
+                        "read_model_errors": 0,
+                    }
                     if len(cycle_result) == 2:
                         pages, error_breakdown = cycle_result
                         timing_summary = {}
