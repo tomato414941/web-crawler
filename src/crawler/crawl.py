@@ -57,6 +57,8 @@ _META_ROBOTS_PATTERN = re.compile(
 _TIMING_STAGE_FIELDS = (
     "lease_ms",
     "precheck_ms",
+    "robots_ms",
+    "rate_limit_ms",
     "fetch_ms",
     "fetch_request_ms",
     "fetch_body_read_ms",
@@ -106,13 +108,16 @@ def _format_timings(timings: CrawlStageTimings | None) -> str:
     if timings is None:
         return ""
     return (
-        "lease=%0.1fms precheck=%0.1fms fetch=%0.1fms request=%0.1fms body=%0.1fms parse=%0.1fms "
+        "lease=%0.1fms precheck=%0.1fms robots=%0.1fms rate_limit=%0.1fms "
+        "fetch=%0.1fms request=%0.1fms body=%0.1fms parse=%0.1fms "
         "scheduler=%0.1fms persist=%0.1fms output=%0.1fms "
         "parse_q_wait=%0.1fms finalize_q_wait=%0.1fms publish_q_wait=%0.1fms process=%0.1fms slot=%0.1fms "
         "parse_q_depth=%d finalize_q_depth=%d publish_q_depth=%d"
     ) % (
         timings.lease_ms,
         timings.precheck_ms,
+        timings.robots_ms,
+        timings.rate_limit_ms,
         timings.fetch_ms,
         timings.fetch_request_ms,
         timings.fetch_body_read_ms,
@@ -195,6 +200,8 @@ def _format_timing_summary(summary: dict[str, object]) -> str:
     fields = (
         "lease_ms",
         "precheck_ms",
+        "robots_ms",
+        "rate_limit_ms",
         "fetch_ms",
         "scheduler_ms",
         "persist_ms",
@@ -646,7 +653,9 @@ class CrawlerEngine:
         process_started = time.perf_counter()
 
         precheck_started = time.perf_counter()
+        robots_started = time.perf_counter()
         if not await self.host_manager.is_allowed(url):
+            timings.robots_ms = _elapsed_ms(robots_started)
             timings.precheck_ms = _elapsed_ms(precheck_started)
             return _SkippedTask(
                 task=task,
@@ -655,7 +664,10 @@ class CrawlerEngine:
                 process_started=process_started,
             )
 
+        timings.robots_ms = _elapsed_ms(robots_started)
+        rate_limit_started = time.perf_counter()
         await self.host_manager.wait_for_rate_limit(url)
+        timings.rate_limit_ms = _elapsed_ms(rate_limit_started)
         timings.precheck_ms = _elapsed_ms(precheck_started)
 
         fetch_started = time.perf_counter()

@@ -12,6 +12,8 @@ class CrawlStageTimings:
 
     lease_ms: float = 0.0
     precheck_ms: float = 0.0
+    robots_ms: float = 0.0
+    rate_limit_ms: float = 0.0
     fetch_ms: float = 0.0
     fetch_request_ms: float = 0.0
     fetch_body_read_ms: float = 0.0
