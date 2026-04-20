@@ -890,9 +890,57 @@ class UrlLedger:
             return PHYSICAL_QUEUE_TABLES[self._normalize_physical_queue(physical_queue)]
         return self._membership.queue_table_sql(physical_queue)
 
+    def _queue_head_pairs_for_urls(self, cur, urls: list[str]) -> list[tuple[str, str]]:
+        """Return affected read-model queue/host pairs before queue rows are mutated."""
+        normalized_urls = sorted({normalize_url(url) for url in urls if url})
+        if not normalized_urls:
+            return []
+
+        pairs: list[tuple[str, str]] = []
+        for physical_queue in self._physical_queues():
+            cur.execute(
+                f"""SELECT DISTINCT host
+                    FROM {self._queue_table_sql(physical_queue)}
+                    WHERE url = ANY(%s)""",
+                (normalized_urls,),
+            )
+            pairs.extend((physical_queue, host) for (host,) in cur.fetchall())
+        cur.execute(
+            f"""SELECT DISTINCT physical_queue, host
+                FROM {HOST_RUNNABLE_HEADS_TABLE}
+                WHERE head_url = ANY(%s)""",
+            (normalized_urls,),
+        )
+        pairs.extend(
+            (self._normalize_physical_queue(physical_queue), host)
+            for physical_queue, host in cur.fetchall()
+        )
+        return pairs
+
+    def _queue_head_pairs_for_rows(
+        self,
+        rows: list[tuple[str, str, float, float, float, str]],
+    ) -> list[tuple[str, str]]:
+        """Return affected read-model queue/host pairs from pending queue rows."""
+        return [
+            (self._normalize_physical_queue(physical_queue), host)
+            for _url, host, _priority, _next_fetch_at, _added_at, physical_queue in rows
+            if host
+        ]
+
+    def _refresh_host_runnable_heads_for_pairs(
+        self,
+        cur,
+        pairs: list[tuple[str, str]],
+    ) -> None:
+        """Refresh the host-first read model for changed queue/host pairs."""
+        self._host_heads.refresh_hosts_in_tx(cur, pairs)
+
     def _delete_queue_entries(self, cur, urls: list[str]) -> None:
         """Remove URLs from all physical scheduler queue tables."""
+        affected_pairs = self._queue_head_pairs_for_urls(cur, urls)
         self._membership.delete_queue_entries(cur, urls)
+        self._refresh_host_runnable_heads_for_pairs(cur, affected_pairs)
 
     def _delete_host_runnable_head_candidate(self, *, physical_queue: str, url: str) -> None:
         """Drop a stale read-model candidate after source-of-truth revalidation misses."""
@@ -905,6 +953,10 @@ class UrlLedger:
     ) -> None:
         """Insert scheduler-pending rows into the appropriate physical queue tables."""
         self._membership.insert_pending_rows(cur, rows)
+        self._refresh_host_runnable_heads_for_pairs(
+            cur,
+            self._queue_head_pairs_for_rows(rows),
+        )
 
     def _insert_blocked_host_backoff_rows(
         self,
@@ -992,7 +1044,11 @@ class UrlLedger:
         rows: list[tuple[str, str, float, float, float, str]],
     ) -> None:
         """Replace physical pending queue rows using returned scheduler state."""
-        self._membership.replace_pending_rows(cur, rows)
+        normalized_urls = sorted({normalize_url(url) for url, *_ in rows if url})
+        if not normalized_urls:
+            return
+        self._delete_queue_entries(cur, normalized_urls)
+        self._insert_pending_queue_rows(cur, rows)
 
     def _project_pending_queue_rows(
         self,
@@ -1426,14 +1482,14 @@ class UrlLedger:
         except Exception:
             self._conn.rollback()
             logger.debug(
-                "Failed to lease from host runnable-head read model; falling back",
+                "Failed to lease from host runnable-head read model; using bounded fallback",
                 exc_info=True,
             )
             task = None
         if task is not None:
             return task
 
-        return self._lease_next_host_first_from_derived_query(
+        return self._lease_next_host_first_from_bounded_scan(
             host=host,
             lease_seconds=lease_seconds,
             exclude_hosts=exclude_hosts,
@@ -1478,7 +1534,7 @@ class UrlLedger:
             )
         return None
 
-    def _lease_next_host_first_from_derived_query(
+    def _lease_next_host_first_from_bounded_scan(
         self,
         *,
         host: str | None,
@@ -1487,17 +1543,43 @@ class UrlLedger:
         physical_queue: str,
         now: float,
     ) -> CrawlTask | None:
-        """Lease host-first candidates by deriving host heads from queue tables."""
-        candidate_urls = [
-            head.url
-            for head in self.runnable_host_heads(
-                limit=HOST_HEAD_LOOKAHEAD,
-                host=host,
-                exclude_hosts=exclude_hosts,
-                physical_queues=[physical_queue],
-                now=now,
-            )
-        ]
+        """Lease from a bounded queue scan when the host-head cache misses."""
+        started_at = time.perf_counter()
+        runnable_sql = self._queue_runnable_sql(
+            alias="candidate",
+            now=now,
+            host=host,
+            exclude_hosts=exclude_hosts,
+        )
+        order_by = self._lease_order_by_sql(
+            "candidate",
+            LEASE_STRATEGY_HOST_FIRST,
+            latency_ms_sql=runnable_sql.latency_ms_sql,
+        )
+        candidate_from = (
+            f"FROM {self._queue_table_sql(physical_queue)} AS candidate {runnable_sql.join_sql}"
+        )
+        try:
+            with self._conn.cursor() as cur:
+                cur.execute(
+                    f"""SELECT candidate.url
+                        {candidate_from}
+                        WHERE {runnable_sql.where}
+                        ORDER BY {order_by}, candidate.url ASC
+                        LIMIT %s""",
+                    (*runnable_sql.params, HOST_HEAD_LOOKAHEAD),
+                )
+                candidate_urls = [url for (url,) in cur.fetchall()]
+            self._conn.commit()
+        except Exception:
+            self._conn.rollback()
+            logger.debug("Failed bounded host-first fallback scan", exc_info=True)
+            return None
+        logger.debug(
+            "Host runnable-head cache miss; bounded fallback candidates=%d elapsed=%0.1fms",
+            len(candidate_urls),
+            (time.perf_counter() - started_at) * 1000,
+        )
         for candidate_url in candidate_urls:
             task = self._lease_candidate_url(
                 candidate_url=candidate_url,

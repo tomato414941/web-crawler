@@ -81,6 +81,7 @@ def test_apply_migrations_creates_expected_tables(migrated_dsn):
         "028_add_host_ledger.sql",
         "029_add_host_runnable_heads.sql",
         "030_rename_scheduler_surfaces.sql",
+        "031_incremental_host_runnable_heads.sql",
     ]
 
     conn = psycopg2.connect(migrated_dsn)
@@ -100,7 +101,11 @@ def test_apply_migrations_creates_expected_tables(migrated_dsn):
                        to_regclass('public.{BLOCKED_HOST_BACKOFF_TABLE}'),
                        to_regclass('public.{LEASE_TABLE}'),
                        to_regclass('public.{HOST_RUNNABLE_HEADS_TABLE}'),
-                       to_regclass('public.idx_host_runnable_heads_ready')
+                       to_regclass('public.idx_host_runnable_heads_ready'),
+                       to_regclass('public.idx_host_runnable_heads_head_url'),
+                       to_regclass('public.idx_scheduler_queue_runnable_host_head'),
+                       to_regclass('public.idx_scheduler_queue_scheduled_host_head'),
+                       to_regclass('public.idx_scheduler_queue_refresh_host_head')
                 """
             )
             assert cur.fetchone() == (
@@ -117,6 +122,10 @@ def test_apply_migrations_creates_expected_tables(migrated_dsn):
                 LEASE_TABLE,
                 HOST_RUNNABLE_HEADS_TABLE,
                 "idx_host_runnable_heads_ready",
+                "idx_host_runnable_heads_head_url",
+                "idx_scheduler_queue_runnable_host_head",
+                "idx_scheduler_queue_scheduled_host_head",
+                "idx_scheduler_queue_refresh_host_head",
             )
     finally:
         conn.close()
@@ -201,6 +210,7 @@ def test_apply_migrations_skips_baseline_when_legacy_history_exists(migrated_dsn
         "028_add_host_ledger.sql",
         "029_add_host_runnable_heads.sql",
         "030_rename_scheduler_surfaces.sql",
+        "031_incremental_host_runnable_heads.sql",
     ]
 
     conn = psycopg2.connect(migrated_dsn)
@@ -219,4 +229,5 @@ def test_apply_migrations_skips_baseline_when_legacy_history_exists(migrated_dsn
     assert "028_add_host_ledger.sql" in versions
     assert "029_add_host_runnable_heads.sql" in versions
     assert "030_rename_scheduler_surfaces.sql" in versions
+    assert "031_incremental_host_runnable_heads.sql" in versions
     assert BASELINE_VERSION not in versions
