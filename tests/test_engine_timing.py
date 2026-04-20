@@ -138,6 +138,8 @@ async def test_crawler_engine_records_stage_timings():
     assert result.timings is not None
     assert result.timings.lease_ms >= 0
     assert result.timings.precheck_ms >= 0
+    assert result.timings.robots_ms >= 0
+    assert result.timings.rate_limit_ms >= 0
     assert result.timings.fetch_ms >= 0
     assert result.timings.fetch_request_ms >= 0
     assert result.timings.fetch_body_read_ms >= 0
@@ -155,6 +157,8 @@ async def test_crawler_engine_records_stage_timings():
     timing_summary = engine.snapshot_runtime_stats()["timing_summary"]
     assert timing_summary["samples"] == 1
     assert timing_summary["outcomes"]["success"] == 1
+    assert timing_summary["stages"]["robots_ms"]["count"] == 1
+    assert timing_summary["stages"]["rate_limit_ms"]["count"] == 1
     assert timing_summary["stages"]["fetch_ms"]["count"] == 1
     assert ledger.done == [("https://example.com/", "lease-1")]
     assert ledger.added
