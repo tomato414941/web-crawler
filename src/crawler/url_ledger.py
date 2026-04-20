@@ -884,6 +884,43 @@ class UrlLedger:
             now=now,
         )
 
+    def daemon_readiness(self, now: float | None = None) -> SchedulerReadiness:
+        """Return loose readiness for daemon cycle gating without live queue scans."""
+        now = time.time() if now is None else now
+        head_summary = self._host_heads.readiness_summary(now=now)
+        retry_quarantine = self.blocked_host_backoff_count()
+        pending_from_heads = head_summary.pending_urls
+        if pending_from_heads == 0 and retry_quarantine == 0:
+            pending_from_heads = self.pending_count()
+
+        pending = pending_from_heads + retry_quarantine
+        runnable = head_summary.ready_urls
+        scheduled = max(0, pending_from_heads - runnable)
+        next_runnable_delay = (
+            None
+            if head_summary.next_runnable_at is None
+            else max(0.0, head_summary.next_runnable_at - now)
+        )
+        return SchedulerReadiness(
+            pending=pending,
+            runnable=runnable,
+            runnable_hosts=head_summary.ready_hosts,
+            next_runnable_delay=next_runnable_delay,
+            blocked={
+                "next_fetch_at": scheduled,
+                "host_next_request": 0,
+                "host_backoff": 0,
+                "retry_quarantine": retry_quarantine,
+            },
+            state_counts={
+                "runnable": runnable,
+                "scheduled": scheduled,
+                "blocked_host_next_request": 0,
+                "blocked_host_backoff": 0,
+                "retry_quarantine": retry_quarantine,
+            },
+        )
+
     def _queue_table_sql(self, physical_queue: str) -> str:
         """Return the table name for one physical queue."""
         if not hasattr(self, "_membership"):

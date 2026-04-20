@@ -28,6 +28,16 @@ class HostRunnableHead:
     refreshed_at: float
 
 
+@dataclass(frozen=True)
+class HostRunnableHeadReadiness:
+    """Loose readiness summary derived from host-head rows."""
+
+    pending_urls: int
+    ready_urls: int
+    ready_hosts: int
+    next_runnable_at: float | None
+
+
 class HostRunnableHeadStore:
     """Owns the loose host-level runnable-head projection."""
 
@@ -485,6 +495,41 @@ class HostRunnableHeadStore:
                 refreshed_at,
             ) in rows
         ]
+
+    def readiness_summary(
+        self,
+        *,
+        runnable_surface: str | None = None,
+        physical_queues: list[str] | None = None,
+        now: float | None = None,
+    ) -> HostRunnableHeadReadiness:
+        """Return a loose queue readiness summary from the host-head projection."""
+        runnable_at = time.time() if now is None else now
+        normalized_physical_queues = self._normalized_surface_queues(
+            runnable_surface=runnable_surface,
+            physical_queues=physical_queues,
+        )
+        with self._conn.cursor() as cur:
+            cur.execute(
+                f"""SELECT
+                        COALESCE(SUM(runnable_url_count), 0) AS pending_urls,
+                        COALESCE(
+                            SUM(runnable_url_count) FILTER (WHERE runnable_at <= %s),
+                            0
+                        ) AS ready_urls,
+                        COUNT(*) FILTER (WHERE runnable_at <= %s) AS ready_hosts,
+                        MIN(runnable_at) FILTER (WHERE runnable_at > %s) AS next_runnable_at
+                    FROM {self._table_name}
+                    WHERE physical_queue = ANY(%s)""",
+                (runnable_at, runnable_at, runnable_at, normalized_physical_queues),
+            )
+            pending_urls, ready_urls, ready_hosts, next_runnable_at = cur.fetchone()
+        return HostRunnableHeadReadiness(
+            pending_urls=int(pending_urls or 0),
+            ready_urls=int(ready_urls or 0),
+            ready_hosts=int(ready_hosts or 0),
+            next_runnable_at=next_runnable_at,
+        )
 
     def delete_candidate(self, *, physical_queue: str, url: str) -> None:
         """Drop a stale read-model candidate and refresh its host from queue membership."""

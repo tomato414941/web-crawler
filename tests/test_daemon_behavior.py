@@ -541,6 +541,7 @@ async def test_daemon_persists_scheduler_views_after_cycle():
     class FakeLedger:
         def __init__(self):
             self.readiness_calls = 0
+            self.daemon_readiness_calls = 0
 
         def pending_count(self, runnable_surface=None):
             return 2
@@ -551,8 +552,8 @@ async def test_daemon_persists_scheduler_views_after_cycle():
         def runnable_host_count(self, runnable_surface=None, now=None):
             return 1
 
-        def readiness(self):
-            self.readiness_calls += 1
+        def daemon_readiness(self):
+            self.daemon_readiness_calls += 1
             return SimpleNamespace(
                 pending=2,
                 runnable=1,
@@ -571,6 +572,10 @@ async def test_daemon_persists_scheduler_views_after_cycle():
                     "retry_quarantine": 0,
                 },
             )
+
+        def readiness(self):
+            self.readiness_calls += 1
+            raise AssertionError("daemon cycle gating should use daemon_readiness")
 
         def delay_overcrowded_scheduled_surface(self, **_kwargs):
             return 0
@@ -616,7 +621,8 @@ async def test_daemon_persists_scheduler_views_after_cycle():
     await daemon.run()
 
     assert storage.payloads[-1][1]["state"] == "cycle_complete"
-    assert ledger.readiness_calls == 1
+    assert ledger.daemon_readiness_calls == 1
+    assert ledger.readiness_calls == 0
     assert storage.payloads[-1][1]["blocked_reason_counts"] == {
         "next_fetch_at": 0,
         "host_next_request": 1,
