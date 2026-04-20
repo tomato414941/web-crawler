@@ -149,6 +149,9 @@ class HostManager:
         runtime_state.crawl_delay_seconds = persisted_state.crawl_delay_seconds
         runtime_state.consecutive_failures = persisted_state.consecutive_failures
         runtime_state.latency_ewma_ms = persisted_state.latency_ewma_ms
+        runtime_state.latency_last_ms = persisted_state.latency_last_ms
+        runtime_state.latency_observed_at = persisted_state.latency_observed_at
+        runtime_state.latency_sample_count = persisted_state.latency_sample_count
         return runtime_state
 
     def _compute_host_backoff(self, consecutive_failures: int) -> float:
@@ -336,6 +339,10 @@ class HostManager:
                 "consecutive_failures": state.consecutive_failures,
                 "crawl_delay_seconds": state.crawl_delay_seconds,
                 "robots_checked_at": state.robots_checked_at,
+                "latency_ewma_ms": state.latency_ewma_ms,
+                "latency_last_ms": state.latency_last_ms,
+                "latency_observed_at": state.latency_observed_at,
+                "latency_sample_count": state.latency_sample_count,
             }
             for host_key, state in self._runtime_states.items()
         }
