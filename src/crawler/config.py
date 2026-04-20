@@ -19,6 +19,7 @@ class CrawlerSettings(BaseSettings):
     scheduler_lease_seconds: float = 300.0
     scheduler_retry_backoff_seconds: float = 30.0
     scheduler_max_retry_backoff_seconds: float = 1800.0
+    robots_fetch_timeout: float = 3.0
     robots_cache_ttl: float = 3600.0
     host_backoff_seconds: float = 30.0
     max_host_backoff_seconds: float = 600.0
