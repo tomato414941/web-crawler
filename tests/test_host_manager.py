@@ -133,6 +133,16 @@ class TestHostManagerHostBudget:
 
 
 class TestHostManagerIsAllowed:
+    async def test_robots_fetch_uses_configured_timeout(self):
+        """Robots HTTP client should use the configured short timeout."""
+        manager = HostManager(robots_fetch_timeout=1.25)
+        try:
+            client = await manager._get_client()
+            assert client.timeout.connect == 1.25
+            assert client.timeout.read == 1.25
+        finally:
+            await manager.close()
+
     async def test_is_allowed_without_robots(self, httpx_mock):
         """Should allow all URLs when robots.txt is not available."""
         httpx_mock.add_response(url="http://example.com/robots.txt", status_code=404)
