@@ -58,6 +58,9 @@ CREATE TABLE public.host_state (
     robots_checked_at double precision DEFAULT 0 NOT NULL,
     updated_at double precision DEFAULT 0 NOT NULL,
     latency_ewma_ms double precision DEFAULT 0 NOT NULL,
+    latency_last_ms double precision DEFAULT 0 NOT NULL,
+    latency_observed_at double precision DEFAULT 0 NOT NULL,
+    latency_sample_count integer DEFAULT 0 NOT NULL,
     CONSTRAINT host_state_pkey PRIMARY KEY (host_key)
 );
 

@@ -55,6 +55,9 @@ class TestHostStore:
         assert state.backoff_until == 0.0
         assert state.consecutive_failures == 0
         assert state.latency_ewma_ms == 0.0
+        assert state.latency_last_ms == 0.0
+        assert state.latency_observed_at == 0.0
+        assert state.latency_sample_count == 0
 
     def test_update_robots_persists_delay(self, store):
         checked_at = time.time()
@@ -99,4 +102,22 @@ class TestHostStore:
         second = store.record_success("example.com", now=110.0, request_latency_ms=300.0)
 
         assert first.latency_ewma_ms == pytest.approx(100.0, abs=1e-6)
+        assert first.latency_last_ms == pytest.approx(100.0, abs=1e-6)
+        assert first.latency_observed_at == pytest.approx(100.0, abs=1e-6)
+        assert first.latency_sample_count == 1
         assert second.latency_ewma_ms == pytest.approx(140.0, abs=1e-6)
+        assert second.latency_last_ms == pytest.approx(300.0, abs=1e-6)
+        assert second.latency_observed_at == pytest.approx(110.0, abs=1e-6)
+        assert second.latency_sample_count == 2
+
+    def test_record_success_without_latency_preserves_observations(self, store):
+        observed = store.record_success("example.com", now=100.0, request_latency_ms=100.0)
+        unobserved = store.record_success("example.com", now=110.0)
+
+        assert unobserved.latency_ewma_ms == pytest.approx(observed.latency_ewma_ms, abs=1e-6)
+        assert unobserved.latency_last_ms == pytest.approx(observed.latency_last_ms, abs=1e-6)
+        assert unobserved.latency_observed_at == pytest.approx(
+            observed.latency_observed_at,
+            abs=1e-6,
+        )
+        assert unobserved.latency_sample_count == observed.latency_sample_count

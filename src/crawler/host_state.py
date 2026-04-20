@@ -17,6 +17,9 @@ class PersistedHostState:
     backoff_until: float = 0.0
     consecutive_failures: int = 0
     latency_ewma_ms: float = 0.0
+    latency_last_ms: float = 0.0
+    latency_observed_at: float = 0.0
+    latency_sample_count: int = 0
     robots_checked_at: float = 0.0
     updated_at: float = 0.0
 
@@ -33,6 +36,9 @@ class RuntimeHostState:
     request_count: int = 0
     consecutive_failures: int = 0
     latency_ewma_ms: float = 0.0
+    latency_last_ms: float = 0.0
+    latency_observed_at: float = 0.0
+    latency_sample_count: int = 0
     crawl_delay_seconds: float = 1.0
 
 

@@ -89,6 +89,10 @@ class TestRuntimeHostState:
         assert state.consecutive_failures == 0
         assert state.request_count == 0
         assert state.crawl_delay_seconds == 1.0
+        assert state.latency_ewma_ms == 0.0
+        assert state.latency_last_ms == 0.0
+        assert state.latency_observed_at == 0.0
+        assert state.latency_sample_count == 0
 
 
 class TestPersistedHostState:
@@ -100,6 +104,10 @@ class TestPersistedHostState:
         assert state.next_request_at == 0.0
         assert state.backoff_until == 0.0
         assert state.consecutive_failures == 0
+        assert state.latency_ewma_ms == 0.0
+        assert state.latency_last_ms == 0.0
+        assert state.latency_observed_at == 0.0
+        assert state.latency_sample_count == 0
         assert state.robots_checked_at == 0.0
 
 
@@ -329,6 +337,10 @@ class TestHostManagerErrorHandling:
         store.states["example.com"] = PersistedHostState(
             host_key="example.com",
             crawl_delay_seconds=2.5,
+            latency_ewma_ms=250.0,
+            latency_last_ms=400.0,
+            latency_observed_at=1234.0,
+            latency_sample_count=3,
             robots_checked_at=time.time(),
         )
         manager = HostManager(
@@ -339,6 +351,10 @@ class TestHostManagerErrorHandling:
         try:
             state = await manager.get_state("http://example.com/page")
             assert state.crawl_delay_seconds == 2.5
+            assert state.latency_ewma_ms == 250.0
+            assert state.latency_last_ms == 400.0
+            assert state.latency_observed_at == 1234.0
+            assert state.latency_sample_count == 3
             assert state.has_checked_robots is False
         finally:
             await manager.close()
