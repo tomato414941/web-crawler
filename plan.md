@@ -12,6 +12,8 @@ The crawler is an HTML-centered WWW discovery system, not an unbounded downloade
 - Bound body reads by byte count and elapsed time.
 - Kept metadata-only resources as successful scheduler completions.
 - Made heavy scheduler diagnostics degrade instead of returning `/stats/diagnostics` 500.
+- Disabled global scheduled-surface delay maintenance by default because it scans the production
+  scheduled surface before cycles can start.
 - Documented fetch admission in the content policy and crawler concepts.
 
 ## Acceptance
@@ -20,6 +22,7 @@ The crawler is an HTML-centered WWW discovery system, not an unbounded downloade
 - Metadata-only resources are marked done and do not extract links.
 - One streaming URL cannot hold a worker indefinitely.
 - `/stats/diagnostics` remains available even when heavy scheduler diagnostics time out.
+- Daemon startup does not run global scheduled-surface rank maintenance by default.
 - Related tests and lint pass before deploy.
 
 ## Next checks after deploy
