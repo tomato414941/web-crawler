@@ -217,6 +217,16 @@ class _RunnableSql:
     latency_ms_sql: str = "0"
 
 
+@dataclass(frozen=True)
+class _HostFirstReadModelResult:
+    """Result of one host-head read-model lease attempt."""
+
+    task: CrawlTask | None
+    read_model: str
+    candidates: int = 0
+    stale_candidates: int = 0
+
+
 class UrlLedger:
     """Durable URL ledger with PostgreSQL persistence. Dedup via ON CONFLICT."""
 
@@ -283,6 +293,16 @@ class UrlLedger:
         self._host_first_fallback_attempts = 0
         self._host_first_fallback_hits = 0
         self._host_first_fallback_misses = 0
+        self._host_first_read_model_hits = 0
+        self._host_first_read_model_stale = 0
+        self._host_first_read_model_misses = 0
+        self._host_first_read_model_errors = 0
+        self._last_lease_diagnostics = {
+            "read_model": "unknown",
+            "fallback": "none",
+            "read_model_candidates": 0,
+            "stale_candidates": 0,
+        }
 
     def host_first_fallback_stats(self) -> dict[str, int]:
         """Return cycle-local host-first fallback counters."""
@@ -290,6 +310,10 @@ class UrlLedger:
             "attempts": int(getattr(self, "_host_first_fallback_attempts", 0)),
             "hits": int(getattr(self, "_host_first_fallback_hits", 0)),
             "misses": int(getattr(self, "_host_first_fallback_misses", 0)),
+            "read_model_hits": int(getattr(self, "_host_first_read_model_hits", 0)),
+            "read_model_stale": int(getattr(self, "_host_first_read_model_stale", 0)),
+            "read_model_misses": int(getattr(self, "_host_first_read_model_misses", 0)),
+            "read_model_errors": int(getattr(self, "_host_first_read_model_errors", 0)),
         }
 
     def _record_host_first_fallback(self, task: CrawlTask | None) -> None:
@@ -303,6 +327,48 @@ class UrlLedger:
             )
         else:
             self._host_first_fallback_hits = int(getattr(self, "_host_first_fallback_hits", 0)) + 1
+
+    def _record_host_first_read_model(self, status: str) -> None:
+        """Record the read-model result for one host-first lease attempt."""
+        if status == "hit":
+            self._host_first_read_model_hits += 1
+        elif status == "stale":
+            self._host_first_read_model_stale += 1
+        elif status == "error":
+            self._host_first_read_model_errors += 1
+        else:
+            self._host_first_read_model_misses += 1
+
+    def _set_last_lease_diagnostics(
+        self,
+        *,
+        read_model: str,
+        fallback: str,
+        read_model_candidates: int = 0,
+        stale_candidates: int = 0,
+    ) -> None:
+        """Store per-lease scheduler diagnostics for the crawler telemetry layer."""
+        self._last_lease_diagnostics = {
+            "read_model": read_model,
+            "fallback": fallback,
+            "read_model_candidates": int(read_model_candidates),
+            "stale_candidates": int(stale_candidates),
+        }
+
+    def last_lease_diagnostics(self) -> dict[str, object]:
+        """Return diagnostics for the most recent lease_next call on this ledger."""
+        return dict(
+            getattr(
+                self,
+                "_last_lease_diagnostics",
+                {
+                    "read_model": "unknown",
+                    "fallback": "none",
+                    "read_model_candidates": 0,
+                    "stale_candidates": 0,
+                },
+            )
+        )
 
     def attach_host_store(self, host_store: "HostStore | None") -> None:
         """Attach the persistent host scheduler used for lease selection."""
@@ -357,6 +423,11 @@ class UrlLedger:
 
     def _normalized_physical_queues(self, physical_queues: list[str] | None) -> list[str]:
         """Return physical queues in stable scheduler order."""
+        if not hasattr(self, "_membership"):
+            if not physical_queues:
+                return list(PHYSICAL_QUEUE_ORDER)
+            allowed = {self._normalize_physical_queue(physical_queue) for physical_queue in physical_queues}
+            return [physical_queue for physical_queue in PHYSICAL_QUEUE_ORDER if physical_queue in allowed]
         return self._membership.normalized_physical_queues(physical_queues)
 
     def _normalized_surface_queues(
@@ -1006,7 +1077,13 @@ class UrlLedger:
     ) -> None:
         """Insert scheduler-pending rows into the appropriate physical queue tables."""
         self._membership.insert_pending_rows(cur, rows)
-        self._host_heads.upsert_candidates_in_tx(cur, rows)
+        self._refresh_host_runnable_heads_for_pairs(
+            cur,
+            [
+                (self._normalize_physical_queue(physical_queue), host)
+                for _url, host, _priority, _next_fetch_at, _added_at, physical_queue in rows
+            ],
+        )
 
     def _insert_blocked_host_backoff_rows(
         self,
@@ -1473,21 +1550,21 @@ class UrlLedger:
         )
         normalized_lease_strategy = self._normalize_lease_strategy(lease_strategy)
         if len(normalized_physical_queues) != 1:
+            if normalized_lease_strategy == LEASE_STRATEGY_HOST_FIRST:
+                return self._lease_next_host_first(
+                    host=host,
+                    lease_seconds=lease_seconds,
+                    exclude_hosts=exclude_hosts,
+                    physical_queues=normalized_physical_queues,
+                )
+
             for physical_queue in normalized_physical_queues:
-                if normalized_lease_strategy == LEASE_STRATEGY_HOST_FIRST:
-                    task = self._lease_next_host_first(
-                        host=host,
-                        lease_seconds=lease_seconds,
-                        exclude_hosts=exclude_hosts,
-                        physical_queue=physical_queue,
-                    )
-                else:
-                    task = self._lease_next_url_order(
-                        host=host,
-                        lease_seconds=lease_seconds,
-                        exclude_hosts=exclude_hosts,
-                        physical_queue=physical_queue,
-                    )
+                task = self._lease_next_url_order(
+                    host=host,
+                    lease_seconds=lease_seconds,
+                    exclude_hosts=exclude_hosts,
+                    physical_queue=physical_queue,
+                )
                 if task is not None:
                     return task
             return None
@@ -1514,19 +1591,27 @@ class UrlLedger:
         host: str | None,
         lease_seconds: float | None,
         exclude_hosts: list[str] | None,
-        physical_queue: str,
+        physical_queue: str | None = None,
+        physical_queues: list[str] | None = None,
     ) -> CrawlTask | None:
         """Lease from the next selected runnable host head."""
+        if physical_queues is None:
+            if physical_queue is None:
+                physical_queues = [self._default_scheduled_physical_queue()]
+            else:
+                physical_queues = [physical_queue]
+        normalized_physical_queues = self._normalized_physical_queues(physical_queues)
+
         now = time.time()
         self._recover_leased_locked(now, expired_only=True)
         self._conn.commit()
 
         try:
-            task = self._lease_next_host_first_from_read_model(
+            read_model_result = self._lease_next_host_first_from_read_model(
                 host=host,
                 lease_seconds=lease_seconds,
                 exclude_hosts=exclude_hosts,
-                physical_queue=physical_queue,
+                physical_queues=normalized_physical_queues,
                 now=now,
             )
         except Exception:
@@ -1535,18 +1620,36 @@ class UrlLedger:
                 "Failed to lease from host runnable-head read model; using bounded fallback",
                 exc_info=True,
             )
-            task = None
-        if task is not None:
-            return task
+            read_model_result = _HostFirstReadModelResult(
+                task=None,
+                read_model="error",
+            )
+
+        self._record_host_first_read_model(read_model_result.read_model)
+        if read_model_result.task is not None:
+            self._set_last_lease_diagnostics(
+                read_model=read_model_result.read_model,
+                fallback="none",
+                read_model_candidates=read_model_result.candidates,
+                stale_candidates=read_model_result.stale_candidates,
+            )
+            return read_model_result.task
 
         fallback_task = self._lease_next_host_first_from_bounded_scan(
             host=host,
             lease_seconds=lease_seconds,
             exclude_hosts=exclude_hosts,
-            physical_queue=physical_queue,
+            physical_queues=normalized_physical_queues,
             now=now,
         )
         self._record_host_first_fallback(fallback_task)
+        fallback = "hit" if fallback_task is not None else "miss"
+        self._set_last_lease_diagnostics(
+            read_model=read_model_result.read_model,
+            fallback=fallback,
+            read_model_candidates=read_model_result.candidates,
+            stale_candidates=read_model_result.stale_candidates,
+        )
         return fallback_task
 
     def _lease_next_host_first_from_read_model(
@@ -1555,38 +1658,70 @@ class UrlLedger:
         host: str | None,
         lease_seconds: float | None,
         exclude_hosts: list[str] | None,
-        physical_queue: str,
+        physical_queues: list[str],
         now: float,
-    ) -> CrawlTask | None:
+    ) -> _HostFirstReadModelResult:
         """Lease host-first candidates from the loose read model first."""
-        candidate_urls = [
-            head.url
-            for head in self.host_runnable_heads_from_read_model(
-                limit=HOST_HEAD_READ_MODEL_LOOKAHEAD,
-                host=host,
-                exclude_hosts=exclude_hosts,
-                physical_queues=[physical_queue],
-                now=now,
-            )
-        ]
-        for candidate_url in candidate_urls:
+        candidate_heads = self.host_runnable_heads_from_read_model(
+            limit=HOST_HEAD_READ_MODEL_LOOKAHEAD,
+            host=host,
+            exclude_hosts=exclude_hosts,
+            physical_queues=physical_queues,
+            now=now,
+        )
+        stale_candidates = 0
+        for head in candidate_heads:
             task = self._lease_candidate_url(
-                candidate_url=candidate_url,
-                physical_queue=physical_queue,
+                candidate_url=head.url,
+                physical_queue=head.physical_queue,
                 lease_seconds=lease_seconds,
                 host=host,
                 exclude_hosts=exclude_hosts,
                 now=now,
             )
             if task is not None:
-                return task
+                return _HostFirstReadModelResult(
+                    task=task,
+                    read_model="hit",
+                    candidates=len(candidate_heads),
+                    stale_candidates=stale_candidates,
+                )
+            stale_candidates += 1
             self._delete_host_runnable_head_candidate(
-                physical_queue=physical_queue,
-                url=candidate_url,
+                physical_queue=head.physical_queue,
+                url=head.url,
             )
-        return None
+
+        return _HostFirstReadModelResult(
+            task=None,
+            read_model="stale" if stale_candidates else "miss",
+            candidates=len(candidate_heads),
+            stale_candidates=stale_candidates,
+        )
 
     def _lease_next_host_first_from_bounded_scan(
+        self,
+        *,
+        host: str | None,
+        lease_seconds: float | None,
+        exclude_hosts: list[str] | None,
+        physical_queues: list[str],
+        now: float,
+    ) -> CrawlTask | None:
+        """Lease from a bounded queue scan when the host-head cache misses."""
+        for physical_queue in physical_queues:
+            task = self._lease_next_host_first_from_bounded_scan_queue(
+                host=host,
+                lease_seconds=lease_seconds,
+                exclude_hosts=exclude_hosts,
+                physical_queue=physical_queue,
+                now=now,
+            )
+            if task is not None:
+                return task
+        return None
+
+    def _lease_next_host_first_from_bounded_scan_queue(
         self,
         *,
         host: str | None,
@@ -1595,7 +1730,7 @@ class UrlLedger:
         physical_queue: str,
         now: float,
     ) -> CrawlTask | None:
-        """Lease from a bounded queue scan when the host-head cache misses."""
+        """Lease from one physical queue using a bounded host-first scan."""
         started_at = time.perf_counter()
         runnable_sql = self._queue_runnable_sql(
             alias="candidate",
@@ -1628,7 +1763,8 @@ class UrlLedger:
             logger.debug("Failed bounded host-first fallback scan", exc_info=True)
             return None
         logger.debug(
-            "Host runnable-head cache miss; bounded fallback candidates=%d elapsed=%0.1fms",
+            "Host runnable-head cache miss; queue=%s bounded fallback candidates=%d elapsed=%0.1fms",
+            physical_queue,
             len(candidate_urls),
             (time.perf_counter() - started_at) * 1000,
         )

@@ -2,6 +2,7 @@
 
 import os
 import time
+from types import SimpleNamespace
 
 import psycopg2
 import pytest
@@ -119,7 +120,12 @@ class TestHostFirstFallbackStats:
         monkeypatch.setattr(
             ledger,
             "_lease_next_host_first_from_read_model",
-            lambda **_kwargs: None,
+            lambda **_kwargs: SimpleNamespace(
+                task=None,
+                read_model="miss",
+                candidates=0,
+                stale_candidates=0,
+            ),
         )
         fallback_results = iter([CrawlTask(url="http://example.com/"), None])
         monkeypatch.setattr(
@@ -147,6 +153,10 @@ class TestHostFirstFallbackStats:
             "attempts": 2,
             "hits": 1,
             "misses": 1,
+            "read_model_hits": 0,
+            "read_model_stale": 0,
+            "read_model_misses": 2,
+            "read_model_errors": 0,
         }
 
 
@@ -711,7 +721,14 @@ class TestUrlLedger:
 
     def test_runnable_host_heads_skips_host_waiting_for_next_request(self, ledger):
         now = 1000.0
-        ledger.place(CrawlTask(url="http://a.com/1", added_at=1000, next_fetch_at=now - 1))
+        ledger.place(
+            CrawlTask(
+                url="http://a.com/1",
+                added_at=1000,
+                next_fetch_at=now - 1,
+                runnable_surface=SCHEDULER_SURFACE_RUNNABLE,
+            )
+        )
         ledger.place(CrawlTask(url="http://b.com/1", added_at=1001, next_fetch_at=now - 1))
 
         self.host_store.reserve_request_slot(
@@ -831,6 +848,65 @@ class TestUrlLedger:
         assert heads[0].host_key == "a.com"
         assert heads[0].runnable_at == 1010.0
 
+    def test_host_runnable_heads_read_model_rechecks_host_state_at_read_time(self, ledger):
+        now = 1000.0
+        ledger.place(
+            CrawlTask(
+                url="http://a.com/1",
+                added_at=1000,
+                next_fetch_at=now - 1,
+                runnable_surface=SCHEDULER_SURFACE_RUNNABLE,
+            )
+        )
+
+        assert ledger.host_runnable_heads_from_read_model(
+            runnable_surface=SCHEDULER_SURFACE_RUNNABLE,
+            now=now,
+        )
+
+        self.host_store.reserve_request_slot(
+            "a.com",
+            crawl_delay_seconds=10.0,
+            now=now,
+        )
+
+        assert (
+            ledger.host_runnable_heads_from_read_model(
+                runnable_surface=SCHEDULER_SURFACE_RUNNABLE,
+                now=now,
+            )
+            == []
+        )
+
+    def test_host_runnable_heads_read_model_prefers_warm_hosts(self, ledger):
+        now = 1000.0
+        ledger.place(
+            CrawlTask(
+                url="http://cold.com/1",
+                added_at=900,
+                next_fetch_at=now - 1,
+                runnable_surface=SCHEDULER_SURFACE_RUNNABLE,
+            )
+        )
+        ledger.place(
+            CrawlTask(
+                url="http://warm.com/1",
+                added_at=1000,
+                next_fetch_at=now - 1,
+                runnable_surface=SCHEDULER_SURFACE_RUNNABLE,
+            )
+        )
+
+        self.host_store.update_robots("warm.com", crawl_delay_seconds=1.0, checked_at=now - 10)
+        ledger.host_ledger_store.record_success("warm.com", at=now - 5)
+
+        heads = ledger.host_runnable_heads_from_read_model(
+            runnable_surface=SCHEDULER_SURFACE_RUNNABLE,
+            now=now,
+        )
+
+        assert [head.host_key for head in heads] == ["warm.com", "cold.com"]
+
     def test_host_runnable_heads_read_model_supports_limit_and_exclude_hosts(self, ledger):
         now = 1000.0
         ledger.place(CrawlTask(url="http://a.com/1", added_at=1000, next_fetch_at=now - 1))
@@ -893,6 +969,30 @@ class TestUrlLedger:
 
         assert result is not None
         assert result.url == "http://b.com/1"
+        assert ledger.last_lease_diagnostics()["read_model"] == "hit"
+        assert ledger.last_lease_diagnostics()["fallback"] == "none"
+
+    def test_lease_next_host_first_uses_normal_surface_read_model_without_empty_queue_fallback(
+        self, ledger
+    ):
+        ledger.place(
+            CrawlTask(
+                url="http://scheduled.com/1",
+                runnable_surface=SCHEDULER_SURFACE_SCHEDULED,
+                intent=INTENT_EXPLORE,
+            )
+        )
+
+        result = ledger.lease_next(
+            lease_strategy=LEASE_STRATEGY_HOST_FIRST,
+            runnable_surface=SCHEDULER_SURFACE_NORMAL,
+        )
+
+        assert result is not None
+        assert result.url == "http://scheduled.com/1"
+        assert ledger.last_lease_diagnostics()["read_model"] == "hit"
+        assert ledger.last_lease_diagnostics()["fallback"] == "none"
+        assert ledger.host_first_fallback_stats()["attempts"] == 0
 
     def test_lease_next_host_first_falls_back_when_read_model_is_empty(
         self, ledger, monkeypatch
