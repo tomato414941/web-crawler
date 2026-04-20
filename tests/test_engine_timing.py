@@ -5,8 +5,9 @@ from types import SimpleNamespace
 
 import pytest
 
-from crawler.crawl import CrawlerEngine, _TimingAccumulator
+from crawler.crawl import CrawlerEngine
 from crawler.result import CrawlStageTimings
+from crawler.telemetry import TelemetryAccumulator
 from crawler.url_ledger import CrawlTask
 
 
@@ -85,7 +86,7 @@ class _FakeStorage:
 
 
 def test_timing_accumulator_summarizes_stage_percentiles():
-    timings = _TimingAccumulator()
+    timings = TelemetryAccumulator()
     timings.record("success", CrawlStageTimings(lease_ms=1.0, fetch_ms=10.0))
     timings.record("failed", CrawlStageTimings(lease_ms=3.0, fetch_ms=30.0))
     timings.record("skipped", CrawlStageTimings(lease_ms=2.0, fetch_ms=20.0))
@@ -102,10 +103,11 @@ def test_timing_accumulator_summarizes_stage_percentiles():
         "max": 3.0,
     }
     assert summary["stages"]["fetch_ms"]["p95"] == 30.0
+    assert "counts" in summary
 
 
 def test_timing_accumulator_handles_empty_samples():
-    summary = _TimingAccumulator().snapshot()
+    summary = TelemetryAccumulator().snapshot()
 
     assert summary["samples"] == 0
     assert summary["outcomes"] == {"success": 0, "skipped": 0, "failed": 0}
@@ -130,6 +132,11 @@ def test_runtime_stats_include_host_first_fallback_stats():
     )
 
     assert engine.snapshot_runtime_stats()["host_first_fallback"] == {
+        "attempts": 2,
+        "hits": 1,
+        "misses": 1,
+    }
+    assert engine.snapshot_runtime_stats()["active_cycle"]["host_first_fallback"] == {
         "attempts": 2,
         "hits": 1,
         "misses": 1,
@@ -178,6 +185,8 @@ async def test_crawler_engine_records_stage_timings():
     assert timing_summary["stages"]["robots_ms"]["count"] == 1
     assert timing_summary["stages"]["rate_limit_ms"]["count"] == 1
     assert timing_summary["stages"]["fetch_ms"]["count"] == 1
+    assert timing_summary["counts"]["fetch_outcomes"]["ok"] == 1
+    assert timing_summary["counts"]["lease_outcomes"]["leased"] == 1
     assert ledger.done == [("https://example.com/", "lease-1")]
     assert ledger.added
 

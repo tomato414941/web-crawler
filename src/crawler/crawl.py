@@ -7,7 +7,6 @@ import concurrent.futures
 from collections import Counter
 from dataclasses import dataclass
 import logging
-import math
 import re
 import time
 from typing import TYPE_CHECKING
@@ -37,6 +36,7 @@ from .url_ledger import (
 )
 from .output import StreamingOutputWriter
 from .result import CrawlFailure, CrawlResult, CrawlStageTimings
+from .telemetry import FetchTelemetry, LeaseTelemetry, PipelineTelemetry, TelemetryAccumulator
 from .urls import extract_links
 
 logger = logging.getLogger(__name__)
@@ -53,24 +53,6 @@ _TITLE_PATTERN = re.compile(r"<title[^>]*>(.*?)</title>", re.IGNORECASE | re.DOT
 _META_ROBOTS_PATTERN = re.compile(
     r'<meta[^>]+name=["\']robots["\'][^>]+content=["\']([^"\']+)["\']',
     re.IGNORECASE | re.DOTALL,
-)
-_TIMING_STAGE_FIELDS = (
-    "lease_ms",
-    "precheck_ms",
-    "robots_ms",
-    "rate_limit_ms",
-    "fetch_ms",
-    "fetch_request_ms",
-    "fetch_body_read_ms",
-    "parse_ms",
-    "scheduler_ms",
-    "persist_ms",
-    "output_ms",
-    "parse_queue_wait_ms",
-    "finalize_queue_wait_ms",
-    "publish_queue_wait_ms",
-    "process_ms",
-    "slot_ms",
 )
 
 
@@ -134,62 +116,6 @@ def _format_timings(timings: CrawlStageTimings | None) -> str:
         timings.finalize_queue_depth,
         timings.publish_queue_depth,
     )
-
-
-def _percentile(values: list[float], percentile: int) -> float:
-    """Return a nearest-rank percentile for small cycle-local timing samples."""
-    if not values:
-        return 0.0
-    ordered = sorted(values)
-    index = max(0, min(len(ordered) - 1, math.ceil(percentile / 100 * len(ordered)) - 1))
-    return round(ordered[index], 1)
-
-
-class _TimingAccumulator:
-    """Cycle-local per-result timing aggregation."""
-
-    def __init__(self) -> None:
-        self._outcomes: Counter[str] = Counter()
-        self._stages: dict[str, list[float]] = {field: [] for field in _TIMING_STAGE_FIELDS}
-
-    def record(self, outcome: str, timings: CrawlStageTimings | None) -> None:
-        """Record one finalized crawl attempt."""
-        self._outcomes[outcome] += 1
-        if timings is None:
-            return
-        for field in _TIMING_STAGE_FIELDS:
-            self._stages[field].append(float(getattr(timings, field)))
-
-    def snapshot(self) -> dict[str, object]:
-        """Return a runtime-safe summary of observed cycle timings."""
-        stages = {}
-        for field, values in self._stages.items():
-            if not values:
-                stages[field] = {
-                    "count": 0,
-                    "avg": 0.0,
-                    "p50": 0.0,
-                    "p95": 0.0,
-                    "max": 0.0,
-                }
-                continue
-            stages[field] = {
-                "count": len(values),
-                "avg": round(sum(values) / len(values), 1),
-                "p50": _percentile(values, 50),
-                "p95": _percentile(values, 95),
-                "max": round(max(values), 1),
-            }
-        outcomes = {
-            "success": int(self._outcomes.get("success", 0)),
-            "skipped": int(self._outcomes.get("skipped", 0)),
-            "failed": int(self._outcomes.get("failed", 0)),
-        }
-        return {
-            "samples": sum(outcomes.values()),
-            "outcomes": outcomes,
-            "stages": stages,
-        }
 
 
 def _format_timing_summary(summary: dict[str, object]) -> str:
@@ -392,7 +318,7 @@ class CrawlerEngine:
         self._parse_queue_depth_max = 0
         self._finalize_queue_depth_max = 0
         self._publish_queue_depth_max = 0
-        self._timing_summary = _TimingAccumulator()
+        self._timing_summary = TelemetryAccumulator()
 
     def _host_first_fallback_stats(self) -> dict[str, int]:
         stats_fn = getattr(self.scheduler, "host_first_fallback_stats", None)
@@ -405,8 +331,8 @@ class CrawlerEngine:
             "misses": int(raw.get("misses", 0)),
         }
 
-    def snapshot_runtime_stats(self) -> dict[str, object]:
-        """Return live queue/backpressure stats for external observers."""
+    def _active_cycle_payload(self) -> dict[str, object]:
+        """Return active cycle stats without completed-cycle fields."""
         return {
             "running": self._running,
             "pages_crawled": self.pages_crawled,
@@ -440,6 +366,14 @@ class CrawlerEngine:
             "host_first_fallback": self._host_first_fallback_stats(),
         }
 
+    def snapshot_runtime_stats(self) -> dict[str, object]:
+        """Return live queue/backpressure stats for external observers."""
+        active_cycle = self._active_cycle_payload()
+        return {
+            **active_cycle,
+            "active_cycle": active_cycle,
+        }
+
     def timing_summary(self) -> dict[str, object]:
         """Return the current cycle timing summary."""
         return self._timing_summary.snapshot()
@@ -450,6 +384,15 @@ class CrawlerEngine:
 
     def _record_timing(self, outcome: str, timings: CrawlStageTimings | None) -> None:
         """Record one finalized crawl attempt in cycle-local timing stats."""
+        if timings is not None and timings.pipeline is None:
+            timings.pipeline = PipelineTelemetry(
+                parse_queue_wait_ms=timings.parse_queue_wait_ms,
+                finalize_queue_wait_ms=timings.finalize_queue_wait_ms,
+                publish_queue_wait_ms=timings.publish_queue_wait_ms,
+                parse_queue_depth=timings.parse_queue_depth,
+                finalize_queue_depth=timings.finalize_queue_depth,
+                publish_queue_depth=timings.publish_queue_depth,
+            )
         self._timing_summary.record(outcome, timings)
 
     async def __aenter__(self) -> "CrawlerEngine":
@@ -666,8 +609,18 @@ class CrawlerEngine:
 
         precheck_started = time.perf_counter()
         robots_started = time.perf_counter()
-        if not await self.host_manager.is_allowed(url):
+        robots_decision = await self.host_manager.is_allowed(url)
+        robots_allowed = (
+            robots_decision.allowed
+            if hasattr(robots_decision, "allowed")
+            else bool(robots_decision)
+        )
+        if hasattr(robots_decision, "elapsed_ms"):
+            timings.robots = robots_decision
+            timings.robots_ms = robots_decision.elapsed_ms
+        else:
             timings.robots_ms = _elapsed_ms(robots_started)
+        if not robots_allowed:
             timings.precheck_ms = _elapsed_ms(precheck_started)
             return _SkippedTask(
                 task=task,
@@ -676,7 +629,8 @@ class CrawlerEngine:
                 process_started=process_started,
             )
 
-        timings.robots_ms = _elapsed_ms(robots_started)
+        if not hasattr(robots_decision, "elapsed_ms"):
+            timings.robots_ms = _elapsed_ms(robots_started)
         rate_limit_started = time.perf_counter()
         await self.host_manager.wait_for_rate_limit(url)
         timings.rate_limit_ms = _elapsed_ms(rate_limit_started)
@@ -691,6 +645,21 @@ class CrawlerEngine:
             timings.fetch_ms = _elapsed_ms(fetch_started)
             timings.fetch_request_ms = getattr(response, "fetch_request_ms", 0.0)
             timings.fetch_body_read_ms = getattr(response, "fetch_body_read_ms", 0.0)
+            timings.fetch = getattr(response, "telemetry", None)
+            if timings.fetch is None:
+                timings.fetch = FetchTelemetry(
+                    outcome="http_error" if response.status >= 400 else "ok",
+                    status=response.status,
+                    final_url=response.url,
+                    content_length=_response_content_length(response),
+                    bytes_read=len(response.content),
+                    metadata_only=getattr(response, "metadata_only", False),
+                    body_truncated=getattr(response, "body_truncated", False),
+                    admission_reason=getattr(response, "admission_reason", None),
+                    total_ms=timings.fetch_ms,
+                    response_headers_ms=timings.fetch_request_ms,
+                    body_read_ms=timings.fetch_body_read_ms,
+                )
 
             if response.status >= 400:
                 if 400 <= response.status < 500:
@@ -751,6 +720,12 @@ class CrawlerEngine:
 
         except (httpx.TimeoutException, asyncio.TimeoutError):
             timings.fetch_ms = _elapsed_ms(fetch_started)
+            timings.fetch = FetchTelemetry(
+                outcome="timeout",
+                final_url=url,
+                total_ms=timings.fetch_ms,
+                error="timeout",
+            )
             backoff_seconds = self._record_error_runtime(url)
             return _FailedTask(
                 task=task,
@@ -767,6 +742,12 @@ class CrawlerEngine:
 
         except httpx.ConnectError:
             timings.fetch_ms = _elapsed_ms(fetch_started)
+            timings.fetch = FetchTelemetry(
+                outcome="connect_error",
+                final_url=url,
+                total_ms=timings.fetch_ms,
+                error="connection_error",
+            )
             backoff_seconds = self._record_error_runtime(url)
             return _FailedTask(
                 task=task,
@@ -783,6 +764,12 @@ class CrawlerEngine:
 
         except Exception as e:
             timings.fetch_ms = _elapsed_ms(fetch_started)
+            timings.fetch = FetchTelemetry(
+                outcome="unexpected_error",
+                final_url=url,
+                total_ms=timings.fetch_ms,
+                error=str(e),
+            )
             backoff_seconds = self._record_error_runtime(url)
             retryable = self.host_manager.should_retry(url)
             return _FailedTask(
@@ -842,8 +829,11 @@ class CrawlerEngine:
 
             slot_started = time.perf_counter()
             lease_started = time.perf_counter()
-            task = await self._lease_task(lease_lane=lease_lane)
-            lease_ms = _elapsed_ms(lease_started)
+            task, lease_telemetry = await self._lease_task(
+                lease_lane=lease_lane,
+                lease_started=lease_started,
+            )
+            lease_ms = lease_telemetry.elapsed_ms
             if not task:
                 await self._release_page_slot(success=False)
                 idle_ticks += 1
@@ -863,6 +853,7 @@ class CrawlerEngine:
 
             if isinstance(result, _SkippedTask):
                 result.timings.lease_ms = lease_ms
+                result.timings.lease = lease_telemetry
                 result.timings.slot_ms = _elapsed_ms(slot_started)
                 await self._release_page_slot(success=False)
                 if self._finalize_queue is not None:
@@ -884,6 +875,7 @@ class CrawlerEngine:
                     )
             elif isinstance(result, _FailedTask):
                 result.failure.timings.lease_ms = lease_ms
+                result.failure.timings.lease = lease_telemetry
                 result.failure.timings.slot_ms = _elapsed_ms(slot_started)
                 await self._release_page_slot(success=False)
                 category = categorize_crawl_error(result.failure.error)
@@ -909,6 +901,7 @@ class CrawlerEngine:
             else:
                 await self._release_page_slot(success=True)
                 result.timings.lease_ms = lease_ms
+                result.timings.lease = lease_telemetry
                 result.timings.slot_ms = _elapsed_ms(slot_started)
                 if self._parse_queue is not None:
                     result.queue_depth = self._parse_queue.qsize()
@@ -1260,7 +1253,8 @@ class CrawlerEngine:
         self,
         *,
         lease_lane: _LeaseLane,
-    ) -> CrawlTask | None:
+        lease_started: float,
+    ) -> tuple[CrawlTask | None, LeaseTelemetry]:
         """Lease work for a specific runnable worker pool."""
         async with self._lease_lock:
             excluded_hosts = [
@@ -1268,15 +1262,35 @@ class CrawlerEngine:
                 for host, count in self._active_host_counts.items()
                 if count >= self._host_inflight_budget(host)
             ]
+            fallback_before = self._host_first_fallback_stats()
             task = self.scheduler.lease_next(
                 runnable_surface=lease_lane.runnable_surface,
                 lease_strategy=lease_lane.lease_strategy,
                 exclude_hosts=excluded_hosts or None,
             )
+            fallback_after = self._host_first_fallback_stats()
+            fallback = "none"
+            if fallback_after["attempts"] > fallback_before["attempts"]:
+                fallback = "hit" if fallback_after["hits"] > fallback_before["hits"] else "miss"
             if task is not None:
                 host_key = self._host_key_for_url(task.url)
                 self._active_host_counts[host_key] += 1
-            return task
+            read_model = "unknown"
+            if lease_lane.lease_strategy == LEASE_STRATEGY_HOST_FIRST:
+                if fallback == "none" and task is not None:
+                    read_model = "hit"
+                elif fallback != "none":
+                    read_model = "miss"
+            lease = LeaseTelemetry(
+                outcome="leased" if task is not None else "empty",
+                runnable_surface=lease_lane.runnable_surface,
+                lease_strategy=lease_lane.lease_strategy,
+                elapsed_ms=_elapsed_ms(lease_started),
+                excluded_hosts_count=len(excluded_hosts),
+                read_model=read_model,
+                fallback=fallback,
+            )
+            return task, lease
 
     async def crawl(self) -> list[dict]:
         """Run the crawler and return results."""
@@ -1294,7 +1308,7 @@ class CrawlerEngine:
         self._parse_queue_depth_max = 0
         self._finalize_queue_depth_max = 0
         self._publish_queue_depth_max = 0
-        self._timing_summary = _TimingAccumulator()
+        self._timing_summary = TelemetryAccumulator()
         reset_fallback_stats = getattr(self.scheduler, "reset_host_first_fallback_stats", None)
         if callable(reset_fallback_stats):
             reset_fallback_stats()

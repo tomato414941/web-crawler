@@ -5,6 +5,7 @@ import time
 
 from playwright.async_api import async_playwright, Browser, BrowserContext, Page
 
+from ..telemetry import FetchTelemetry
 from .protocols import Response
 
 
@@ -93,6 +94,7 @@ class BrowserFetcher:
         """Fetch a URL using a pooled browser page."""
         page = await self._pool.acquire()
         try:
+            total_started = time.perf_counter()
             request_started = time.perf_counter()
             response = await page.goto(url, timeout=self.timeout, wait_until="networkidle")
             fetch_request_ms = round((time.perf_counter() - request_started) * 1000, 1)
@@ -108,6 +110,16 @@ class BrowserFetcher:
                 headers = await response.all_headers()
                 status = response.status
 
+            telemetry = FetchTelemetry(
+                outcome="http_error" if status >= 400 else "ok",
+                status=status,
+                final_url=final_url,
+                content_length=len(content.encode("utf-8")),
+                bytes_read=len(content.encode("utf-8")),
+                total_ms=round((time.perf_counter() - total_started) * 1000, 1),
+                response_headers_ms=fetch_request_ms,
+                body_read_ms=fetch_body_read_ms,
+            )
             return Response(
                 url=final_url,
                 status=status,
@@ -115,6 +127,7 @@ class BrowserFetcher:
                 headers=headers,
                 fetch_request_ms=fetch_request_ms,
                 fetch_body_read_ms=fetch_body_read_ms,
+                telemetry=telemetry,
             )
         finally:
             await self._pool.release(page)
@@ -123,6 +136,7 @@ class BrowserFetcher:
         """Fetch URL and return accessibility tree snapshot for AI agents."""
         page = await self._pool.acquire()
         try:
+            total_started = time.perf_counter()
             request_started = time.perf_counter()
             response = await page.goto(url, timeout=self.timeout, wait_until="networkidle")
             fetch_request_ms = round((time.perf_counter() - request_started) * 1000, 1)
@@ -141,6 +155,16 @@ class BrowserFetcher:
                 headers = await response.all_headers()
                 status = response.status
 
+            telemetry = FetchTelemetry(
+                outcome="http_error" if status >= 400 else "ok",
+                status=status,
+                final_url=final_url,
+                content_length=len(content.encode("utf-8")),
+                bytes_read=len(content.encode("utf-8")),
+                total_ms=round((time.perf_counter() - total_started) * 1000, 1),
+                response_headers_ms=fetch_request_ms,
+                body_read_ms=fetch_body_read_ms,
+            )
             resp = Response(
                 url=final_url,
                 status=status,
@@ -148,6 +172,7 @@ class BrowserFetcher:
                 headers=headers,
                 fetch_request_ms=fetch_request_ms,
                 fetch_body_read_ms=fetch_body_read_ms,
+                telemetry=telemetry,
             )
 
             return resp, _format_a11y_tree(snapshot) if snapshot else ""

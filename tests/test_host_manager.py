@@ -159,7 +159,8 @@ class TestHostManagerIsAllowed:
         manager = HostManager()
         try:
             allowed = await manager.is_allowed("http://example.com/page")
-            assert allowed is True
+            assert allowed.allowed is True
+            assert allowed.robots_status == "http_4xx"
         finally:
             await manager.close()
 
@@ -178,7 +179,8 @@ Allow: /
         manager = HostManager()
         try:
             allowed = await manager.is_allowed("http://example.com/page")
-            assert allowed is True
+            assert allowed.allowed is True
+            assert allowed.robots_status == "ok"
         finally:
             await manager.close()
 
@@ -198,8 +200,9 @@ Disallow: /private/
         try:
             allowed_public = await manager.is_allowed("http://example.com/public")
             allowed_private = await manager.is_allowed("http://example.com/private/secret")
-            assert allowed_public is True
-            assert allowed_private is False
+            assert allowed_public.allowed is True
+            assert allowed_private.allowed is False
+            assert allowed_private.reason == "denied"
         finally:
             await manager.close()
 
@@ -221,7 +224,7 @@ Allow: /
         manager = HostManager(user_agent="TestBot")
         try:
             allowed = await manager.is_allowed("http://example.com/page")
-            assert allowed is False
+            assert allowed.allowed is False
         finally:
             await manager.close()
 
@@ -231,7 +234,8 @@ Allow: /
         try:
             # No HTTP mock needed since robots.txt won't be fetched
             allowed = await manager.is_allowed("http://example.com/private")
-            assert allowed is True
+            assert allowed.allowed is True
+            assert allowed.cache_status == "disabled"
         finally:
             await manager.close()
 
@@ -245,7 +249,8 @@ Allow: /
         manager = HostManager()
         try:
             allowed = await manager.is_allowed("http://example.com/page")
-            assert allowed is True  # Default to allow
+            assert allowed.allowed is True  # Default to allow
+            assert allowed.robots_status == "connect_error"
         finally:
             await manager.close()
 
@@ -510,7 +515,7 @@ class TestHostManagerCaching:
                 manager.is_allowed("http://example.com/page3"),
             )
 
-            assert allowed == [True, True, True]
+            assert [decision.allowed for decision in allowed] == [True, True, True]
             assert len(httpx_mock.get_requests()) == 1
         finally:
             await manager.close()

@@ -274,6 +274,17 @@ class CrawlDaemon:
                         ) = cycle_result
                     elapsed = time.time() - start
                     rate = pages / elapsed if elapsed > 0 else 0
+                    last_completed_cycle = {
+                        "running": False,
+                        "state": "cycle_complete",
+                        "cycle": cycle,
+                        "pages": pages,
+                        "elapsed_seconds": round(elapsed, 3),
+                        "pages_per_second": round(rate, 3),
+                        "errors": error_breakdown,
+                        "timing_summary": timing_summary,
+                        "host_first_fallback": host_first_fallback,
+                    }
                     logger.info(
                         "Cycle %d complete: %d pages in %.1fs (%.1f pages/s) | errors=%s | pending=%d runnable=%d | timings=%s",
                         cycle,
@@ -299,6 +310,18 @@ class CrawlDaemon:
                             "errors": error_breakdown,
                             "timing_summary": timing_summary,
                             "host_first_fallback": host_first_fallback,
+                            "active_cycle": {
+                                "running": False,
+                                "state": "cycle_complete",
+                                "cycle": cycle,
+                                "pages_crawled": pages,
+                                "claimed_pages": 0,
+                                "active_hosts": 0,
+                                "parse_queue_size": 0,
+                                "finalize_queue_size": 0,
+                                "publish_queue_size": 0,
+                            },
+                            "last_completed_cycle": last_completed_cycle,
                         }
                     )
                     cycle_payload.update(
@@ -366,9 +389,21 @@ class CrawlDaemon:
             "publish_queue_depth_max",
             "failure_breakdown",
             "timing_summary",
+            "host_first_fallback",
+            "last_completed_cycle",
         ):
             if key in self._last_runtime_snapshot:
                 payload[key] = self._last_runtime_snapshot[key]
+        payload["active_cycle"] = {
+            "running": False,
+            "state": state,
+            "cycle": cycle,
+            "pending": pending,
+            "runnable": runnable,
+            "parse_queue_size": 0,
+            "finalize_queue_size": 0,
+            "publish_queue_size": 0,
+        }
         return payload
 
     def _scheduler_runtime_views(

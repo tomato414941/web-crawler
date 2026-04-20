@@ -107,6 +107,16 @@ def _build_operator_summary(
 ) -> dict[str, object]:
     """Build a compact operator-facing metrics surface from detailed stats."""
     runtime_payload = runtime.get("payload") if isinstance(runtime.get("payload"), Mapping) else {}
+    active_cycle = (
+        runtime_payload.get("active_cycle")
+        if isinstance(runtime_payload.get("active_cycle"), Mapping)
+        else runtime_payload
+    )
+    last_completed_cycle = (
+        runtime_payload.get("last_completed_cycle")
+        if isinstance(runtime_payload.get("last_completed_cycle"), Mapping)
+        else {}
+    )
     scheduler_state_views = _scheduler_state_views(
         scheduler_status=scheduler_status,
         readiness=readiness,
@@ -116,7 +126,9 @@ def _build_operator_summary(
     state_counts = scheduler_state_views["readiness_state_counts"]
     cycle_errors = runtime_payload.get("errors")
     if not isinstance(cycle_errors, Mapping):
-        cycle_errors = runtime_payload.get("failure_breakdown")
+        cycle_errors = active_cycle.get("failure_breakdown")
+    if not isinstance(cycle_errors, Mapping):
+        cycle_errors = last_completed_cycle.get("errors")
     if not isinstance(cycle_errors, Mapping):
         cycle_errors = active_error_breakdown
 
@@ -139,18 +151,21 @@ def _build_operator_summary(
         "scheduler_intents": dict(scheduler_status.get("intent_counts", {})),
         "scheduler_blocked_reasons": dict(scheduler_state_views["blocked_reason_counts"]),
         "throughput": {
-            "pages_per_second": runtime_payload.get("pages_per_second"),
-            "cycle_pages": runtime_payload.get("pages"),
-            "active_hosts": int(runtime_payload.get("active_hosts", 0) or 0),
+            "pages_per_second": last_completed_cycle.get(
+                "pages_per_second",
+                runtime_payload.get("pages_per_second"),
+            ),
+            "cycle_pages": last_completed_cycle.get("pages", runtime_payload.get("pages")),
+            "active_hosts": int(active_cycle.get("active_hosts", 0) or 0),
             "errors": dict(cycle_errors),
         },
         "backpressure": {
-            "parse_queue_size": int(runtime_payload.get("parse_queue_size", 0) or 0),
-            "finalize_queue_size": int(runtime_payload.get("finalize_queue_size", 0) or 0),
-            "publish_queue_size": int(runtime_payload.get("publish_queue_size", 0) or 0),
-            "parse_queue_wait_max_ms": runtime_payload.get("parse_queue_wait_max_ms", 0.0),
-            "finalize_queue_wait_max_ms": runtime_payload.get("finalize_queue_wait_max_ms", 0.0),
-            "publish_queue_wait_max_ms": runtime_payload.get("publish_queue_wait_max_ms", 0.0),
+            "parse_queue_size": int(active_cycle.get("parse_queue_size", 0) or 0),
+            "finalize_queue_size": int(active_cycle.get("finalize_queue_size", 0) or 0),
+            "publish_queue_size": int(active_cycle.get("publish_queue_size", 0) or 0),
+            "parse_queue_wait_max_ms": active_cycle.get("parse_queue_wait_max_ms", 0.0),
+            "finalize_queue_wait_max_ms": active_cycle.get("finalize_queue_wait_max_ms", 0.0),
+            "publish_queue_wait_max_ms": active_cycle.get("publish_queue_wait_max_ms", 0.0),
         },
         "adaptive_budget": {
             "observed_hosts": int(host_budget_summary.get("observed_hosts", 0) or 0),
@@ -883,7 +898,9 @@ class PgStorage:
                         }
                         pending_surfaces = {}
                         blocked_surfaces = {}
-                        logger.warning("Scheduler diagnostics unavailable: %s", exc.__class__.__name__)
+                        logger.warning(
+                            "Scheduler diagnostics unavailable: %s", exc.__class__.__name__
+                        )
 
                 cur.execute(
                     """SELECT host, COUNT(*)

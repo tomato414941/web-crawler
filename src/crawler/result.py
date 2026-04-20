@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from typing import Any, Mapping
 
+from .telemetry import FetchTelemetry, LeaseTelemetry, PipelineTelemetry, RobotsDecision
+
 
 @dataclass(slots=True)
 class CrawlStageTimings:
@@ -31,6 +33,10 @@ class CrawlStageTimings:
     parse_queue_depth: int = 0
     finalize_queue_depth: int = 0
     publish_queue_depth: int = 0
+    fetch: FetchTelemetry | None = None
+    robots: RobotsDecision | None = None
+    lease: LeaseTelemetry | None = None
+    pipeline: PipelineTelemetry | None = None
 
 
 @dataclass(slots=True)

@@ -7,6 +7,7 @@ import httpx
 
 from ..config import settings
 from ..content_policy import should_fetch_body
+from ..telemetry import FetchTelemetry
 from ..tls import build_ssl_context
 from .protocols import Response
 
@@ -89,6 +90,7 @@ class HttpFetcher:
     async def fetch(self, url: str) -> Response:
         """Fetch a URL and return the response."""
         client = await self._get_client()
+        total_started = time.perf_counter()
         request_started = time.perf_counter()
         async with client.stream("GET", url) as resp:
             fetch_request_ms = round((time.perf_counter() - request_started) * 1000, 1)
@@ -101,6 +103,24 @@ class HttpFetcher:
                 max_body_bytes=self.max_body_bytes,
             )
             if not decision.should_read:
+                outcome = (
+                    "too_large"
+                    if decision.reason == "content_length_too_large"
+                    else "metadata_only"
+                )
+                telemetry = FetchTelemetry(
+                    outcome=outcome,
+                    status=resp.status_code,
+                    final_url=str(resp.url),
+                    redirect_count=len(getattr(resp, "history", [])),
+                    content_length=content_length,
+                    bytes_read=0,
+                    metadata_only=decision.metadata_only,
+                    admission_reason=decision.reason,
+                    total_ms=round((time.perf_counter() - total_started) * 1000, 1),
+                    response_headers_ms=fetch_request_ms,
+                    body_read_ms=0.0,
+                )
                 return Response(
                     url=str(resp.url),
                     status=resp.status_code,
@@ -111,6 +131,7 @@ class HttpFetcher:
                     content_length=content_length,
                     metadata_only=decision.metadata_only,
                     admission_reason=decision.reason,
+                    telemetry=telemetry,
                 )
 
             body_started = time.perf_counter()
@@ -119,6 +140,19 @@ class HttpFetcher:
                 timeout=self.body_timeout,
             )
             fetch_body_read_ms = round((time.perf_counter() - body_started) * 1000, 1)
+            telemetry = FetchTelemetry(
+                outcome="http_error" if resp.status_code >= 400 else "ok",
+                status=resp.status_code,
+                final_url=str(resp.url),
+                redirect_count=len(getattr(resp, "history", [])),
+                content_length=content_length if content_length is not None else len(content),
+                bytes_read=len(content),
+                body_truncated=body_truncated,
+                admission_reason="body_truncated" if body_truncated else None,
+                total_ms=round((time.perf_counter() - total_started) * 1000, 1),
+                response_headers_ms=fetch_request_ms,
+                body_read_ms=fetch_body_read_ms,
+            )
             return Response(
                 url=str(resp.url),
                 status=resp.status_code,
@@ -129,6 +163,7 @@ class HttpFetcher:
                 content_length=content_length if content_length is not None else len(content),
                 body_truncated=body_truncated,
                 admission_reason="body_truncated" if body_truncated else None,
+                telemetry=telemetry,
             )
 
     async def close(self):
