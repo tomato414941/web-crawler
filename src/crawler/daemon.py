@@ -253,13 +253,14 @@ class CrawlDaemon:
                     elapsed = time.time() - start
                     rate = pages / elapsed if elapsed > 0 else 0
                     logger.info(
-                        "Cycle %d complete: %d pages in %.1fs (%.1f pages/s) | errors=%s | %s",
+                        "Cycle %d complete: %d pages in %.1fs (%.1f pages/s) | errors=%s | pending=%d runnable=%d",
                         cycle,
                         pages,
                         elapsed,
                         rate,
                         _format_error_breakdown(error_breakdown),
-                        url_ledger.stats(),
+                        pending,
+                        runnable,
                     )
                     cycle_payload = self._idle_runtime_payload(
                         state="cycle_complete",
@@ -278,7 +279,7 @@ class CrawlDaemon:
                     cycle_payload.update(
                         self._scheduler_runtime_views(
                             url_ledger,
-                            readiness=url_ledger.readiness(),
+                            readiness=readiness,
                         )
                     )
                     self._persist_runtime_payload(storage, cycle_payload)
@@ -346,43 +347,19 @@ class CrawlDaemon:
 
     def _scheduler_runtime_views(
         self,
-        url_ledger: UrlLedger,
+        _url_ledger: UrlLedger,
         *,
         readiness,
-        now: float | None = None,
+        _now: float | None = None,
     ) -> dict[str, object]:
-        """Build runtime-facing scheduler views for daemon payloads."""
-        if hasattr(url_ledger, "scheduler_state_snapshot"):
-            snapshot = url_ledger.scheduler_state_snapshot(now=now)
-            blocked_reason_counts = dict(snapshot.get("blocked_reason_counts", {}))
-            readiness_state_counts = dict(snapshot.get("readiness_state_counts", {}))
-            effective_scheduler_states = dict(snapshot.get("effective_state_counts", {}))
-            return {
-                "scheduler_state_snapshot": {key: dict(value) for key, value in snapshot.items()},
-                "blocked_reason_counts": blocked_reason_counts,
-                "readiness_blocked": blocked_reason_counts,
-                "readiness_blocked_reasons": blocked_reason_counts,
-                "readiness_state_counts": readiness_state_counts,
-                "scheduler_state": readiness_state_counts,
-                "scheduler_readiness_states": readiness_state_counts,
-                "effective_scheduler_states": effective_scheduler_states,
-            }
-
+        """Build runtime-facing scheduler views without live full-queue diagnostics."""
         blocked_reason_counts = dict(getattr(readiness, "blocked", {}) or {})
-        if hasattr(url_ledger, "blocked_reason_counts"):
-            blocked_reason_counts = url_ledger.blocked_reason_counts(now=now)
-
         readiness_state_counts = dict(getattr(readiness, "state_counts", {}) or {})
-        if hasattr(url_ledger, "readiness_state_counts"):
-            readiness_state_counts = url_ledger.readiness_state_counts(now=now)
-
         effective_scheduler_states = {
             "scheduled": int(readiness_state_counts.get("scheduled", 0) or 0),
             "runnable": int(readiness_state_counts.get("runnable", 0) or 0),
             "blocked": sum(int(value or 0) for value in blocked_reason_counts.values()),
         }
-        if hasattr(url_ledger, "effective_state_counts"):
-            effective_scheduler_states = url_ledger.effective_state_counts(now=now)
 
         return {
             "scheduler_state_snapshot": {
