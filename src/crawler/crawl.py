@@ -55,6 +55,22 @@ _META_ROBOTS_PATTERN = re.compile(
 )
 
 
+def _response_content_length(response: Response) -> int:
+    """Return declared resource length when known, otherwise downloaded bytes."""
+    content_length = getattr(response, "content_length", None)
+    return content_length if content_length is not None else len(response.content)
+
+
+def _response_header(response: Response, name: str) -> str:
+    """Return a response header value using case-insensitive lookup."""
+    headers = getattr(response, "headers", {}) or {}
+    lower_name = name.lower()
+    for key, value in headers.items():
+        if key.lower() == lower_name:
+            return value
+    return ""
+
+
 def _split_worker_pools(concurrency: int) -> tuple[int, int]:
     """Split worker capacity into normal and refresh pools."""
     total = max(1, concurrency)
@@ -444,8 +460,7 @@ class CrawlerEngine:
 
     def _build_page_signals(self, response) -> PageSignals:
         """Extract lightweight ranking signals from a fetched page."""
-        headers = {key.lower(): value for key, value in response.headers.items()}
-        content_type = headers.get("content-type", "")
+        content_type = _response_header(response, "content-type")
         title = None
         meta_robots = None
 
@@ -457,7 +472,7 @@ class CrawlerEngine:
 
         return PageSignals(
             content_type=content_type,
-            content_length=len(response.content),
+            content_length=_response_content_length(response),
             title=title,
             meta_robots=meta_robots,
         )
@@ -536,7 +551,10 @@ class CrawlerEngine:
 
         fetch_started = time.perf_counter()
         try:
-            response = await self.fetcher.fetch(url)
+            response = await asyncio.wait_for(
+                self.fetcher.fetch(url),
+                timeout=settings.fetch_total_timeout,
+            )
             timings.fetch_ms = _elapsed_ms(fetch_started)
             timings.fetch_request_ms = getattr(response, "fetch_request_ms", 0.0)
             timings.fetch_body_read_ms = getattr(response, "fetch_body_read_ms", 0.0)
@@ -598,7 +616,7 @@ class CrawlerEngine:
                 process_started=process_started,
             )
 
-        except httpx.TimeoutException:
+        except (httpx.TimeoutException, asyncio.TimeoutError):
             timings.fetch_ms = _elapsed_ms(fetch_started)
             backoff_seconds = self._record_error_runtime(url)
             return _FailedTask(
@@ -785,10 +803,13 @@ class CrawlerEngine:
         response: Response,
     ) -> tuple[str, list[str], list[CrawlTask]]:
         """Prepare parsed content and discovered tasks away from the event loop."""
+        if getattr(response, "metadata_only", False):
+            return "", [], []
+
         content = (
             response.text
             if should_store_text_content(
-                response.headers.get("content-type"),
+                _response_header(response, "content-type"),
                 response.content,
             )
             else ""
@@ -797,7 +818,7 @@ class CrawlerEngine:
         new_tasks: list[CrawlTask] = []
 
         if should_extract_links(
-            response.headers.get("content-type"),
+            _response_header(response, "content-type"),
             response.content,
         ):
             links = extract_links(response.text, response.url)
@@ -832,7 +853,7 @@ class CrawlerEngine:
             result=CrawlResult(
                 url=response.url,
                 status=response.status,
-                content_length=len(response.content),
+                content_length=_response_content_length(response),
                 source_url=task.source_url,
                 timestamp=time.time(),
                 content=content,

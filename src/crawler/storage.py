@@ -593,56 +593,58 @@ class PgStorage:
                         }
 
                 if url_ledger_exists:
-                    assert_public_table_columns(
-                        self._conn,
-                        URL_LEDGER_TABLE,
-                        URL_LEDGER_STATS_REQUIRED_COLUMNS,
-                    )
+                    cur.execute("SAVEPOINT scheduler_diagnostics")
+                    try:
+                        assert_public_table_columns(
+                            self._conn,
+                            URL_LEDGER_TABLE,
+                            URL_LEDGER_STATS_REQUIRED_COLUMNS,
+                        )
 
-                    observability = SchedulerObservability(
-                        self._conn,
-                        physical_queue_tables=PHYSICAL_QUEUE_TABLES,
-                        physical_queue_order=PHYSICAL_QUEUE_ORDER,
-                        physical_queue_default_runnable_surface=PHYSICAL_QUEUE_DEFAULT_SCHEDULER_SURFACE,
-                        blocked_queue_table=BLOCKED_HOST_BACKOFF_TABLE,
-                        lease_table=LEASE_TABLE,
-                    )
+                        observability = SchedulerObservability(
+                            self._conn,
+                            physical_queue_tables=PHYSICAL_QUEUE_TABLES,
+                            physical_queue_order=PHYSICAL_QUEUE_ORDER,
+                            physical_queue_default_runnable_surface=PHYSICAL_QUEUE_DEFAULT_SCHEDULER_SURFACE,
+                            blocked_queue_table=BLOCKED_HOST_BACKOFF_TABLE,
+                            lease_table=LEASE_TABLE,
+                        )
 
-                    scheduler_status = observability.status_counts()
-                    pending_surfaces = dict(scheduler_status.get("pending_surfaces", {}))
-                    blocked_surfaces = dict(scheduler_status.get("blocked_surfaces", {}))
+                        scheduler_status = observability.status_counts()
+                        pending_surfaces = dict(scheduler_status.get("pending_surfaces", {}))
+                        blocked_surfaces = dict(scheduler_status.get("blocked_surfaces", {}))
 
-                    cur.execute(
-                        f"""SELECT host, COUNT(*)
+                        cur.execute(
+                            f"""SELECT host, COUNT(*)
                            FROM ({pending_queue_sql}) AS pending_queue_rows
                            GROUP BY host
                            ORDER BY COUNT(*) DESC, host ASC
                            LIMIT 10"""
-                    )
-                    top_pending_hosts = [
-                        {"host": host, "count": count} for host, count in cur.fetchall()
-                    ]
+                        )
+                        top_pending_hosts = [
+                            {"host": host, "count": count} for host, count in cur.fetchall()
+                        ]
 
-                    now = time.time()
-                    readiness_snapshot = observability.readiness(now=now)
-                    readiness = {
-                        "pending": readiness_snapshot.pending,
-                        "runnable": readiness_snapshot.runnable,
-                        "runnable_hosts": readiness_snapshot.runnable_hosts,
-                        "next_runnable_delay": readiness_snapshot.next_runnable_delay,
-                        "blocked": dict(readiness_snapshot.blocked),
-                        "state_counts": dict(
-                            scheduler_status.get(
-                                "readiness_state_counts", readiness_snapshot.state_counts
-                            )
-                        ),
-                    }
-                    effective_state_counts = dict(
-                        scheduler_status.get("effective_state_counts", {})
-                    )
+                        now = time.time()
+                        readiness_snapshot = observability.readiness(now=now)
+                        readiness = {
+                            "pending": readiness_snapshot.pending,
+                            "runnable": readiness_snapshot.runnable,
+                            "runnable_hosts": readiness_snapshot.runnable_hosts,
+                            "next_runnable_delay": readiness_snapshot.next_runnable_delay,
+                            "blocked": dict(readiness_snapshot.blocked),
+                            "state_counts": dict(
+                                scheduler_status.get(
+                                    "readiness_state_counts", readiness_snapshot.state_counts
+                                )
+                            ),
+                        }
+                        effective_state_counts = dict(
+                            scheduler_status.get("effective_state_counts", {})
+                        )
 
-                    cur.execute(
-                        f"""WITH pending_entries AS (
+                        cur.execute(
+                            f"""WITH pending_entries AS (
                                 SELECT physical_queue, url, host, next_fetch_at, FALSE AS forced_retry_quarantine
                                 FROM ({pending_queue_sql}) AS pending_queue_rows
                                 UNION ALL
@@ -694,48 +696,48 @@ class PgStorage:
                                 COUNT(*) DESC,
                                 pending_queue_rows.host ASC
                             LIMIT 10""",
-                        {"now": now},
-                    )
-                    top_blocked_hosts = []
-                    for blocked_row in cur.fetchall():
-                        (
-                            host,
-                            pending_count,
-                            blocked_next_request_count,
-                            blocked_host_backoff_count,
-                            retry_quarantine_count,
-                            next_request_wait_seconds,
-                            backoff_wait_seconds,
-                            consecutive_failures,
-                        ) = blocked_row
-                        dominant_reason = "retry_quarantine"
-                        wait_seconds = backoff_wait_seconds
-                        if retry_quarantine_count == 0 and blocked_host_backoff_count > 0:
-                            dominant_reason = "host_backoff"
-                        elif (
-                            retry_quarantine_count == 0
-                            and blocked_host_backoff_count == 0
-                            and blocked_next_request_count > 0
-                        ):
-                            dominant_reason = "host_next_request"
-                            wait_seconds = next_request_wait_seconds
-                        top_blocked_hosts.append(
-                            {
-                                "host": host,
-                                "pending_count": pending_count,
-                                "blocked_counts": {
-                                    "host_next_request": blocked_next_request_count,
-                                    "host_backoff": blocked_host_backoff_count,
-                                    "retry_quarantine": retry_quarantine_count,
-                                },
-                                "wait_seconds": round(wait_seconds, 3),
-                                "dominant_reason": dominant_reason,
-                                "consecutive_failures": consecutive_failures,
-                            }
+                            {"now": now},
                         )
+                        top_blocked_hosts = []
+                        for blocked_row in cur.fetchall():
+                            (
+                                host,
+                                pending_count,
+                                blocked_next_request_count,
+                                blocked_host_backoff_count,
+                                retry_quarantine_count,
+                                next_request_wait_seconds,
+                                backoff_wait_seconds,
+                                consecutive_failures,
+                            ) = blocked_row
+                            dominant_reason = "retry_quarantine"
+                            wait_seconds = backoff_wait_seconds
+                            if retry_quarantine_count == 0 and blocked_host_backoff_count > 0:
+                                dominant_reason = "host_backoff"
+                            elif (
+                                retry_quarantine_count == 0
+                                and blocked_host_backoff_count == 0
+                                and blocked_next_request_count > 0
+                            ):
+                                dominant_reason = "host_next_request"
+                                wait_seconds = next_request_wait_seconds
+                            top_blocked_hosts.append(
+                                {
+                                    "host": host,
+                                    "pending_count": pending_count,
+                                    "blocked_counts": {
+                                        "host_next_request": blocked_next_request_count,
+                                        "host_backoff": blocked_host_backoff_count,
+                                        "retry_quarantine": retry_quarantine_count,
+                                    },
+                                    "wait_seconds": round(wait_seconds, 3),
+                                    "dominant_reason": dominant_reason,
+                                    "consecutive_failures": consecutive_failures,
+                                }
+                            )
 
-                    cur.execute(
-                        f"""WITH pending_entries AS (
+                        cur.execute(
+                            f"""WITH pending_entries AS (
                                 SELECT physical_queue, url, host
                                 FROM ({pending_queue_sql}) AS pending_queue_rows
                                 UNION ALL
@@ -757,99 +759,100 @@ class PgStorage:
                                 COUNT(*) DESC,
                                 pending_entries.host ASC
                             LIMIT 10"""
-                    )
-                    top_slow_hosts = []
-                    for row in cur.fetchall():
-                        (
-                            host,
-                            pending_count,
-                            latency_ewma_ms,
-                            consecutive_failures,
-                            *queue_count_values,
-                        ) = row
-                        top_slow_hosts.append(
-                            {
-                                "host": host,
-                                "pending_count": pending_count,
-                                "latency_ewma_ms": round(latency_ewma_ms, 1),
-                                "consecutive_failures": consecutive_failures,
-                                "surface_counts": _surface_counts_from_physical_queue_count_values(
-                                    tuple(queue_count_values)
-                                ),
-                            }
                         )
-                    elevated_budget_hosts = []
-                    observed_hosts = 0
-                    ineligible_due_to_failures = 0
-                    ineligible_due_to_latency = 0
-                    for host_entry in top_slow_hosts:
-                        observed_hosts += 1
-                        host_budget = compute_host_budget(
-                            latency_ewma_ms=float(host_entry["latency_ewma_ms"]),
-                            consecutive_failures=int(host_entry["consecutive_failures"]),
-                            default_budget=settings.max_inflight_requests_per_host,
-                        )
-                        if host_budget <= settings.max_inflight_requests_per_host:
-                            if int(host_entry["consecutive_failures"]) > 0:
-                                ineligible_due_to_failures += 1
-                            else:
-                                ineligible_due_to_latency += 1
-                            continue
-                        elevated_budget_hosts.append(
-                            {
-                                **host_entry,
-                                "host_budget": host_budget,
-                            }
-                        )
-                    top_budget_hosts = elevated_budget_hosts[:10]
-                    host_budget_summary = {
-                        "observed_hosts": observed_hosts,
-                        "eligible_hosts": len(elevated_budget_hosts),
-                        "eligible_pending": sum(
-                            int(host_entry["pending_count"]) for host_entry in elevated_budget_hosts
-                        ),
-                        "ineligible_due_to_failures": ineligible_due_to_failures,
-                        "ineligible_due_to_latency": ineligible_due_to_latency,
-                        "max_budget": max(
+                        top_slow_hosts = []
+                        for row in cur.fetchall():
                             (
-                                int(host_entry["host_budget"])
+                                host,
+                                pending_count,
+                                latency_ewma_ms,
+                                consecutive_failures,
+                                *queue_count_values,
+                            ) = row
+                            top_slow_hosts.append(
+                                {
+                                    "host": host,
+                                    "pending_count": pending_count,
+                                    "latency_ewma_ms": round(latency_ewma_ms, 1),
+                                    "consecutive_failures": consecutive_failures,
+                                    "surface_counts": _surface_counts_from_physical_queue_count_values(
+                                        tuple(queue_count_values)
+                                    ),
+                                }
+                            )
+                        elevated_budget_hosts = []
+                        observed_hosts = 0
+                        ineligible_due_to_failures = 0
+                        ineligible_due_to_latency = 0
+                        for host_entry in top_slow_hosts:
+                            observed_hosts += 1
+                            host_budget = compute_host_budget(
+                                latency_ewma_ms=float(host_entry["latency_ewma_ms"]),
+                                consecutive_failures=int(host_entry["consecutive_failures"]),
+                                default_budget=settings.max_inflight_requests_per_host,
+                            )
+                            if host_budget <= settings.max_inflight_requests_per_host:
+                                if int(host_entry["consecutive_failures"]) > 0:
+                                    ineligible_due_to_failures += 1
+                                else:
+                                    ineligible_due_to_latency += 1
+                                continue
+                            elevated_budget_hosts.append(
+                                {
+                                    **host_entry,
+                                    "host_budget": host_budget,
+                                }
+                            )
+                        top_budget_hosts = elevated_budget_hosts[:10]
+                        host_budget_summary = {
+                            "observed_hosts": observed_hosts,
+                            "eligible_hosts": len(elevated_budget_hosts),
+                            "eligible_pending": sum(
+                                int(host_entry["pending_count"])
                                 for host_entry in elevated_budget_hosts
                             ),
-                            default=settings.max_inflight_requests_per_host,
-                        ),
-                    }
+                            "ineligible_due_to_failures": ineligible_due_to_failures,
+                            "ineligible_due_to_latency": ineligible_due_to_latency,
+                            "max_budget": max(
+                                (
+                                    int(host_entry["host_budget"])
+                                    for host_entry in elevated_budget_hosts
+                                ),
+                                default=settings.max_inflight_requests_per_host,
+                            ),
+                        }
 
-                    cur.execute(
-                        _retry_surface_sql()
-                        + """
+                        cur.execute(
+                            _retry_surface_sql()
+                            + """
                            SELECT url_ledger.last_error, COUNT(*)
                            FROM public.url_ledger AS url_ledger
                            LEFT JOIN retry_surface ON retry_surface.url = url_ledger.url
                            WHERE url_ledger.last_error IS NOT NULL
                              AND (url_ledger.terminal_reason IS NOT NULL OR retry_surface.url IS NOT NULL)
                            GROUP BY url_ledger.last_error"""
-                    )
-                    error_counts = Counter()
-                    for error, count in cur.fetchall():
-                        category = categorize_crawl_error(error)
-                        if category:
-                            error_counts[category] += count
-                    active_error_breakdown = {
-                        category: error_counts[category]
-                        for category in (
-                            "http_4xx",
-                            "http_5xx",
-                            "timeout",
-                            "connection_error",
-                            "http_other",
-                            "other",
                         )
-                        if error_counts.get(category)
-                    }
+                        error_counts = Counter()
+                        for error, count in cur.fetchall():
+                            category = categorize_crawl_error(error)
+                            if category:
+                                error_counts[category] += count
+                        active_error_breakdown = {
+                            category: error_counts[category]
+                            for category in (
+                                "http_4xx",
+                                "http_5xx",
+                                "timeout",
+                                "connection_error",
+                                "http_other",
+                                "other",
+                            )
+                            if error_counts.get(category)
+                        }
 
-                    cur.execute(
-                        _retry_surface_sql()
-                        + """
+                        cur.execute(
+                            _retry_surface_sql()
+                            + """
                            SELECT url_ledger.host, COUNT(*)
                            FROM public.url_ledger AS url_ledger
                            LEFT JOIN retry_surface ON retry_surface.url = url_ledger.url
@@ -858,10 +861,20 @@ class PgStorage:
                            GROUP BY url_ledger.host
                            ORDER BY COUNT(*) DESC, url_ledger.host ASC
                            LIMIT 10"""
-                    )
-                    top_error_hosts = [
-                        {"host": host, "count": count} for host, count in cur.fetchall()
-                    ]
+                        )
+                        top_error_hosts = [
+                            {"host": host, "count": count} for host, count in cur.fetchall()
+                        ]
+                        cur.execute("RELEASE SAVEPOINT scheduler_diagnostics")
+                    except psycopg2.Error as exc:
+                        cur.execute("ROLLBACK TO SAVEPOINT scheduler_diagnostics")
+                        scheduler_status = {
+                            "diagnostics_unavailable": True,
+                            "diagnostics_error": exc.__class__.__name__,
+                        }
+                        pending_surfaces = {}
+                        blocked_surfaces = {}
+                        logger.warning("Scheduler diagnostics unavailable: %s", exc.__class__.__name__)
 
                 cur.execute(
                     """SELECT host, COUNT(*)

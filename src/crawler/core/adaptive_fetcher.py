@@ -44,7 +44,7 @@ class AdaptiveFetcher:
         response = await self.http_fetcher.fetch(url)
 
         # Check if we need browser rendering
-        if self._needs_browser(response):
+        if not response.metadata_only and self._needs_browser(response):
             return await self.browser_fetcher.fetch(url), True
 
         return response, False

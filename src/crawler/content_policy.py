@@ -2,6 +2,18 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+from pathlib import PurePosixPath
+
+
+@dataclass(frozen=True, slots=True)
+class FetchBodyDecision:
+    """Decision for whether the fetcher should read a response body."""
+
+    should_read: bool
+    metadata_only: bool = False
+    reason: str | None = None
+
 
 _TEXTUAL_APPLICATION_TYPES = {
     "application/javascript",
@@ -33,6 +45,46 @@ _BINARY_TOP_LEVEL_TYPES = (
     "image/",
     "video/",
 )
+_BINARY_URL_SUFFIXES = {
+    ".7z",
+    ".aac",
+    ".avi",
+    ".bmp",
+    ".bz2",
+    ".dmg",
+    ".doc",
+    ".docx",
+    ".flac",
+    ".gif",
+    ".gz",
+    ".ico",
+    ".iso",
+    ".jpeg",
+    ".jpg",
+    ".m4a",
+    ".m4v",
+    ".mov",
+    ".mp3",
+    ".mp4",
+    ".mpeg",
+    ".mpg",
+    ".ogg",
+    ".ogv",
+    ".pdf",
+    ".png",
+    ".ppt",
+    ".pptx",
+    ".rar",
+    ".tar",
+    ".tgz",
+    ".webm",
+    ".webp",
+    ".woff",
+    ".woff2",
+    ".xls",
+    ".xlsx",
+    ".zip",
+}
 
 
 def normalize_content_type(content_type: str | None) -> str:
@@ -72,6 +124,31 @@ def is_binary_content_type(content_type: str | None) -> bool:
     if normalized.startswith(_BINARY_TOP_LEVEL_TYPES):
         return True
     return normalized.startswith(_BINARY_APPLICATION_PREFIXES)
+
+
+def has_binary_url_suffix(url: str | None) -> bool:
+    """Return True when the URL path has a known binary resource suffix."""
+    if not url:
+        return False
+    suffix = PurePosixPath(url.split("?", 1)[0]).suffix.lower()
+    return suffix in _BINARY_URL_SUFFIXES
+
+
+def should_fetch_body(
+    content_type: str | None,
+    content_length: int | None,
+    url: str | None = None,
+    *,
+    max_body_bytes: int,
+) -> FetchBodyDecision:
+    """Decide whether a response body is useful enough to read."""
+    if is_binary_content_type(content_type):
+        return FetchBodyDecision(False, metadata_only=True, reason="binary_content_type")
+    if content_length is not None and content_length > max_body_bytes:
+        return FetchBodyDecision(False, metadata_only=True, reason="content_length_too_large")
+    if not normalize_content_type(content_type) and has_binary_url_suffix(url):
+        return FetchBodyDecision(False, metadata_only=True, reason="binary_url_suffix")
+    return FetchBodyDecision(True)
 
 
 def should_store_text_content(content_type: str | None, content: bytes) -> bool:

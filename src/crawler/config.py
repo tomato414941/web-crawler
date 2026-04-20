@@ -7,6 +7,9 @@ class CrawlerSettings(BaseSettings):
     """Crawler configuration."""
 
     timeout: float = 10.0
+    fetch_body_timeout: float = 10.0
+    fetch_total_timeout: float = 35.0
+    max_response_body_bytes: int = 2_000_000
     user_agent: str = "WebCrawler/0.1 (+https://github.com/web-crawler)"
     max_connections: int = 100
     max_keepalive_connections: int = 20

@@ -339,6 +339,30 @@ def test_get_stats_includes_scheduler_breakdown(pg_storage):
     assert stats["top_error_hosts"] == []
 
 
+def test_get_stats_degrades_when_scheduler_diagnostics_time_out(pg_storage, monkeypatch):
+    result = {
+        "url": "https://example.com/page1",
+        "status": 200,
+        "content_length": 100,
+        "timestamp": 1710000000.0,
+        "content": "<html><title>Example</title></html>",
+        "outlinks": [],
+    }
+    pg_storage.save(result)
+
+    def raise_timeout(self):
+        raise psycopg2.errors.QueryCanceled("statement timeout")
+
+    monkeypatch.setattr("crawler.storage.SchedulerObservability.status_counts", raise_timeout)
+
+    stats = pg_storage.get_stats()
+
+    assert stats["total_pages"] == 1
+    assert stats["scheduler_status"]["diagnostics_unavailable"] is True
+    assert stats["scheduler_status"]["diagnostics_error"] == "QueryCanceled"
+    assert pg_storage._conn.info.transaction_status == TRANSACTION_STATUS_IDLE
+
+
 def test_get_stats_includes_runtime_snapshot(pg_storage):
     pg_storage.upsert_runtime_stats(
         "crawler",
