@@ -57,6 +57,27 @@ class HostRunnableHeadReadiness:
     next_runnable_at: float | None
 
 
+@dataclass(frozen=True)
+class HostRunnableHeadRepairSummary:
+    """Bounded repair result for the host-head projection."""
+
+    checked_heads: int = 0
+    orphan_heads: int = 0
+    stale_heads: int = 0
+    missing_heads: int = 0
+    repaired_hosts: int = 0
+
+    def as_dict(self) -> dict[str, int]:
+        """Return a stable runtime payload."""
+        return {
+            "checked_heads": self.checked_heads,
+            "orphan_heads": self.orphan_heads,
+            "stale_heads": self.stale_heads,
+            "missing_heads": self.missing_heads,
+            "repaired_hosts": self.repaired_hosts,
+        }
+
+
 class HostRunnableHeadStore:
     """Owns the loose host-level runnable-head projection."""
 
@@ -485,6 +506,7 @@ class HostRunnableHeadStore:
         exclude_hosts: list[str] | None = None,
         runnable_surface: str | None = None,
         physical_queues: list[str] | None = None,
+        execution_tiers: list[int] | None = None,
         now: float | None = None,
     ) -> list[HostRunnableHead]:
         """Read ready host-head candidates from the loose read model."""
@@ -516,6 +538,9 @@ class HostRunnableHeadStore:
         if exclude_hosts:
             conditions.append("NOT (heads.host = ANY(%s))")
             params.append(exclude_hosts)
+        if execution_tiers:
+            conditions.append("heads.execution_tier = ANY(%s)")
+            params.append([int(tier) for tier in execution_tiers])
 
         with self._conn.cursor() as cur:
             cur.execute(
@@ -576,6 +601,109 @@ class HostRunnableHeadStore:
                 refreshed_at,
             ) in rows
         ]
+
+    def repair(
+        self,
+        *,
+        limit: int,
+        runnable_surface: str | None = None,
+        physical_queues: list[str] | None = None,
+        now: float | None = None,
+    ) -> HostRunnableHeadRepairSummary:
+        """Repair a small sample of stale or missing host-head rows."""
+        if limit <= 0:
+            return HostRunnableHeadRepairSummary()
+
+        refreshed_at = time.time() if now is None else now
+        normalized_physical_queues = self._normalized_surface_queues(
+            runnable_surface=runnable_surface,
+            physical_queues=physical_queues,
+        )
+        checked_heads = 0
+        orphan_heads = 0
+        stale_heads = 0
+        missing_heads = 0
+        pairs: set[tuple[str, str]] = set()
+
+        try:
+            with self._conn.cursor() as cur:
+                for physical_queue in normalized_physical_queues:
+                    if len(pairs) >= limit:
+                        break
+                    remaining = limit - len(pairs)
+                    queue_table = self._queue_table_sql(physical_queue)
+                    cur.execute(
+                        f"""SELECT
+                                heads.host,
+                                heads.head_url,
+                                exact.url AS exact_url,
+                                best.url AS best_url
+                            FROM {self._table_name} AS heads
+                            LEFT JOIN {queue_table} AS exact
+                                ON exact.url = heads.head_url
+                            LEFT JOIN LATERAL (
+                                SELECT candidate.url
+                                FROM {queue_table} AS candidate
+                                WHERE candidate.host = heads.host
+                                ORDER BY
+                                    candidate.next_fetch_at ASC,
+                                    candidate.added_at ASC,
+                                    candidate.priority DESC,
+                                    candidate.url ASC
+                                LIMIT 1
+                            ) AS best ON TRUE
+                            WHERE heads.physical_queue = %s
+                              AND (exact.url IS NULL OR best.url IS DISTINCT FROM heads.head_url)
+                            ORDER BY heads.refreshed_at ASC
+                            LIMIT %s""",
+                        (physical_queue, remaining),
+                    )
+                    rows = cur.fetchall()
+                    checked_heads += len(rows)
+                    for host, head_url, exact_url, best_url in rows:
+                        pairs.add((physical_queue, host))
+                        if exact_url is None:
+                            orphan_heads += 1
+                        if best_url is not None and best_url != head_url:
+                            stale_heads += 1
+
+                    if len(pairs) >= limit:
+                        continue
+                    remaining = limit - len(pairs)
+                    cur.execute(
+                        f"""SELECT DISTINCT candidate.host
+                            FROM {queue_table} AS candidate
+                            LEFT JOIN {self._table_name} AS heads
+                                ON heads.physical_queue = %s
+                               AND heads.host = candidate.host
+                            WHERE heads.host IS NULL
+                            ORDER BY candidate.host ASC
+                            LIMIT %s""",
+                        (physical_queue, remaining),
+                    )
+                    for (host,) in cur.fetchall():
+                        pairs.add((physical_queue, host))
+                        missing_heads += 1
+
+                self.refresh_hosts_in_tx(
+                    cur,
+                    list(pairs),
+                    refreshed_at=refreshed_at,
+                )
+                repaired_hosts = len(pairs)
+            self._conn.commit()
+        except Exception:
+            self._conn.rollback()
+            logger.exception("Failed to repair host runnable heads")
+            raise
+
+        return HostRunnableHeadRepairSummary(
+            checked_heads=checked_heads,
+            orphan_heads=orphan_heads,
+            stale_heads=stale_heads,
+            missing_heads=missing_heads,
+            repaired_hosts=repaired_hosts,
+        )
 
     def readiness_summary(
         self,
