@@ -33,22 +33,29 @@ reintroducing dynamic global joins into lease selection.
   global warm-host sort.
 - Replaced aggregate-delta lease telemetry inference with per-lease scheduler diagnostics.
 - Suppressed noisy `httpx` request logs in daemon mode.
+- Added an indexed `execution_tier` to `host_runnable_heads`.
+- Derived tier from host runtime/history facts during read-model refresh:
+  warm, probing, slow, or deferred.
+- Preferred lower execution tiers in host-head reads before breadth and latency tie-breakers.
+- Exposed lease execution-tier counts in runtime telemetry.
+- Deployed commit `f99dc4b` and verified `/health`, active runtime stats, read-model hits, and tier
+  telemetry in production.
+- Backfilled existing production host-head tiers with a set-based update. A full global rebuild was
+  too expensive for the current production queue size.
 
 ## Current slice
 
-- Add an indexed `execution_tier` to `host_runnable_heads`.
-- Derive tier from host runtime/history facts during read-model refresh:
-  warm, probing, slow, or deferred.
-- Prefer lower execution tiers in host-head reads before breadth and latency tie-breakers.
-- Expose lease execution-tier counts in runtime telemetry.
-- Deploy, rebuild the host-head read model, and compare production crawl behavior.
+- Observe whether warm-tier leasing improves completed-cycle throughput once the active cycle
+  finishes.
+- Inspect why warm hosts still have high robots miss/connect-error rates.
+- Decide whether explicit warm/probing worker budgets are needed next.
 
 ## Acceptance
 
 - `/stats` continues to show host-first leases mostly coming from read-model hits rather than fallback.
 - `timing_summary.counts.lease_execution_tiers` shows whether leases are warm, probing, slow, or deferred.
 - Warm hosts are selected before probing hosts when both have ready normal work.
-- Related tests and lint pass before the next deploy.
+- Related tests and lint pass before deploy.
 
 ## Next checks after deploy
 
