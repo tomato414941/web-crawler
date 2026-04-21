@@ -7,6 +7,10 @@ from types import SimpleNamespace
 import psycopg2
 import pytest
 
+from crawler.host_runnable_heads import (
+    HOST_EXECUTION_TIER_PROBING,
+    HOST_EXECUTION_TIER_WARM,
+)
 from crawler.host_store import HostStore
 from crawler.host_ledger import HOST_LEDGER_TABLE
 from crawler.url_ledger import (
@@ -955,6 +959,164 @@ class TestUrlLedger:
         )
 
         assert [(head.host_key, head.url) for head in heads] == [("a.com", "http://a.com/1")]
+
+    def test_host_runnable_heads_read_model_filters_execution_tiers(self, ledger):
+        now = 1000.0
+        self.host_store.update_robots("warm.com", crawl_delay_seconds=1.0, checked_at=now - 10)
+        ledger.place(
+            CrawlTask(
+                url="http://warm.com/1",
+                next_fetch_at=now - 1,
+                runnable_surface=SCHEDULER_SURFACE_RUNNABLE,
+            )
+        )
+        ledger.place(
+            CrawlTask(
+                url="http://probing.com/1",
+                next_fetch_at=now - 1,
+                runnable_surface=SCHEDULER_SURFACE_RUNNABLE,
+            )
+        )
+
+        warm_heads = ledger.host_runnable_heads_from_read_model(
+            runnable_surface=SCHEDULER_SURFACE_RUNNABLE,
+            execution_tiers=[HOST_EXECUTION_TIER_WARM],
+            now=now,
+        )
+        probing_heads = ledger.host_runnable_heads_from_read_model(
+            runnable_surface=SCHEDULER_SURFACE_RUNNABLE,
+            execution_tiers=[HOST_EXECUTION_TIER_PROBING],
+            now=now,
+        )
+
+        assert [(head.host_key, head.execution_tier) for head in warm_heads] == [
+            ("warm.com", HOST_EXECUTION_TIER_WARM)
+        ]
+        assert [(head.host_key, head.execution_tier) for head in probing_heads] == [
+            ("probing.com", HOST_EXECUTION_TIER_PROBING)
+        ]
+
+    def test_lease_next_host_first_filters_execution_tiers(self, ledger):
+        now = 1000.0
+        self.host_store.update_robots("warm.com", crawl_delay_seconds=1.0, checked_at=now - 10)
+        ledger.place(
+            CrawlTask(
+                url="http://warm.com/1",
+                next_fetch_at=now - 1,
+                runnable_surface=SCHEDULER_SURFACE_RUNNABLE,
+            )
+        )
+        ledger.place(
+            CrawlTask(
+                url="http://probing.com/1",
+                next_fetch_at=now - 1,
+                runnable_surface=SCHEDULER_SURFACE_RUNNABLE,
+            )
+        )
+
+        leased = ledger.lease_next(
+            lease_strategy=LEASE_STRATEGY_HOST_FIRST,
+            runnable_surface=SCHEDULER_SURFACE_RUNNABLE,
+            execution_tiers=[HOST_EXECUTION_TIER_PROBING],
+        )
+
+        assert leased is not None
+        assert leased.url == "http://probing.com/1"
+        assert ledger.last_lease_diagnostics()["execution_tier"] == "probing"
+
+    def test_repair_host_runnable_heads_restores_missing_head(self, ledger):
+        now = 1000.0
+        ledger.place(
+            CrawlTask(
+                url="http://missing.com/1",
+                next_fetch_at=now - 1,
+                runnable_surface=SCHEDULER_SURFACE_RUNNABLE,
+            )
+        )
+        with ledger._conn.cursor() as cur:
+            cur.execute(
+                f"DELETE FROM {HOST_RUNNABLE_HEADS_TABLE} WHERE host = %s",
+                ("missing.com",),
+            )
+        ledger._conn.commit()
+
+        summary = ledger.repair_host_runnable_heads(limit=10, now=now)
+        heads = ledger.host_runnable_heads_from_read_model(
+            runnable_surface=SCHEDULER_SURFACE_RUNNABLE,
+            now=now,
+        )
+
+        assert summary.missing_heads == 1
+        assert summary.repaired_hosts == 1
+        assert [(head.host_key, head.url) for head in heads] == [
+            ("missing.com", "http://missing.com/1")
+        ]
+
+    def test_repair_host_runnable_heads_removes_orphan_head(self, ledger):
+        now = 1000.0
+        ledger.place(
+            CrawlTask(
+                url="http://orphan.com/1",
+                next_fetch_at=now - 1,
+                runnable_surface=SCHEDULER_SURFACE_RUNNABLE,
+            )
+        )
+        with ledger._conn.cursor() as cur:
+            cur.execute(
+                f"DELETE FROM {PHYSICAL_QUEUE_TABLES[QUEUE_RUNNABLE]} WHERE url = %s",
+                ("http://orphan.com/1",),
+            )
+        ledger._conn.commit()
+
+        summary = ledger.repair_host_runnable_heads(limit=10, now=now)
+        heads = ledger.host_runnable_heads_from_read_model(
+            runnable_surface=SCHEDULER_SURFACE_RUNNABLE,
+            now=now,
+        )
+
+        assert summary.orphan_heads == 1
+        assert summary.repaired_hosts == 1
+        assert heads == []
+
+    def test_repair_host_runnable_heads_refreshes_stale_head(self, ledger):
+        now = 1000.0
+        ledger.place(
+            CrawlTask(
+                url="http://stale.com/b",
+                added_at=1000,
+                next_fetch_at=now - 1,
+                runnable_surface=SCHEDULER_SURFACE_RUNNABLE,
+            )
+        )
+        ledger.place(
+            CrawlTask(
+                url="http://stale.com/a",
+                added_at=900,
+                next_fetch_at=now - 1,
+                runnable_surface=SCHEDULER_SURFACE_RUNNABLE,
+            )
+        )
+        with ledger._conn.cursor() as cur:
+            cur.execute(
+                f"""UPDATE {HOST_RUNNABLE_HEADS_TABLE}
+                    SET head_url = %s,
+                        head_added_at = %s
+                    WHERE host = %s""",
+                ("http://stale.com/b", 1000.0, "stale.com"),
+            )
+        ledger._conn.commit()
+
+        summary = ledger.repair_host_runnable_heads(limit=10, now=now)
+        heads = ledger.host_runnable_heads_from_read_model(
+            runnable_surface=SCHEDULER_SURFACE_RUNNABLE,
+            now=now,
+        )
+
+        assert summary.stale_heads == 1
+        assert summary.repaired_hosts == 1
+        assert [(head.host_key, head.url) for head in heads] == [
+            ("stale.com", "http://stale.com/a")
+        ]
 
     def test_daemon_readiness_uses_host_head_read_model_without_live_readiness(
         self, ledger, monkeypatch

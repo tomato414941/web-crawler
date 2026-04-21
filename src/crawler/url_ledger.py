@@ -15,6 +15,7 @@ import psycopg2.extras
 from .config import settings
 from .host_runnable_heads import (
     HostRunnableHead,
+    HostRunnableHeadRepairSummary,
     HostRunnableHeadStore,
     host_execution_tier_label,
 )
@@ -972,6 +973,22 @@ class UrlLedger:
             now=now,
         )
 
+    def repair_host_runnable_heads(
+        self,
+        *,
+        limit: int,
+        runnable_surface: str | None = None,
+        physical_queues: list[str] | None = None,
+        now: float | None = None,
+    ) -> HostRunnableHeadRepairSummary:
+        """Repair a bounded sample of the loose host-head read model."""
+        return self._host_heads.repair(
+            limit=limit,
+            runnable_surface=runnable_surface,
+            physical_queues=physical_queues,
+            now=now,
+        )
+
     def host_runnable_heads_from_read_model(
         self,
         *,
@@ -980,6 +997,7 @@ class UrlLedger:
         exclude_hosts: list[str] | None = None,
         runnable_surface: str | None = None,
         physical_queues: list[str] | None = None,
+        execution_tiers: list[int] | None = None,
         now: float | None = None,
     ) -> list[HostRunnableHead]:
         """Read ready host-head candidates from the loose read model."""
@@ -989,6 +1007,7 @@ class UrlLedger:
             exclude_hosts=exclude_hosts,
             runnable_surface=runnable_surface,
             physical_queues=physical_queues,
+            execution_tiers=execution_tiers,
             now=now,
         )
 
@@ -1546,6 +1565,7 @@ class UrlLedger:
         lease_strategy: str | None = None,
         exclude_hosts: list[str] | None = None,
         runnable_surface: str | None = None,
+        execution_tiers: list[int] | None = None,
     ) -> CrawlTask | None:
         """Lease the next runnable URL, optionally filtered by host."""
         normalized_physical_queues = self._normalized_surface_queues(
@@ -1560,6 +1580,7 @@ class UrlLedger:
                     lease_seconds=lease_seconds,
                     exclude_hosts=exclude_hosts,
                     physical_queues=normalized_physical_queues,
+                    execution_tiers=execution_tiers,
                 )
 
             for physical_queue in normalized_physical_queues:
@@ -1580,6 +1601,7 @@ class UrlLedger:
                 lease_seconds=lease_seconds,
                 exclude_hosts=exclude_hosts,
                 physical_queue=physical_queue,
+                execution_tiers=execution_tiers,
             )
 
         return self._lease_next_url_order(
@@ -1597,6 +1619,7 @@ class UrlLedger:
         exclude_hosts: list[str] | None,
         physical_queue: str | None = None,
         physical_queues: list[str] | None = None,
+        execution_tiers: list[int] | None = None,
     ) -> CrawlTask | None:
         """Lease from the next selected runnable host head."""
         if physical_queues is None:
@@ -1616,6 +1639,7 @@ class UrlLedger:
                 lease_seconds=lease_seconds,
                 exclude_hosts=exclude_hosts,
                 physical_queues=normalized_physical_queues,
+                execution_tiers=execution_tiers,
                 now=now,
             )
         except Exception:
@@ -1639,6 +1663,16 @@ class UrlLedger:
                 execution_tier=getattr(read_model_result, "execution_tier", None),
             )
             return read_model_result.task
+
+        if execution_tiers:
+            self._set_last_lease_diagnostics(
+                read_model=read_model_result.read_model,
+                fallback="tier_filtered",
+                read_model_candidates=read_model_result.candidates,
+                stale_candidates=read_model_result.stale_candidates,
+                execution_tier=getattr(read_model_result, "execution_tier", None),
+            )
+            return None
 
         fallback_task = self._lease_next_host_first_from_bounded_scan(
             host=host,
@@ -1665,6 +1699,7 @@ class UrlLedger:
         lease_seconds: float | None,
         exclude_hosts: list[str] | None,
         physical_queues: list[str],
+        execution_tiers: list[int] | None,
         now: float,
     ) -> _HostFirstReadModelResult:
         """Lease host-first candidates from the loose read model first."""
@@ -1673,6 +1708,7 @@ class UrlLedger:
             host=host,
             exclude_hosts=exclude_hosts,
             physical_queues=physical_queues,
+            execution_tiers=execution_tiers,
             now=now,
         )
         stale_candidates = 0
