@@ -11,6 +11,24 @@ import psycopg2.extras
 
 logger = logging.getLogger(__name__)
 
+HOST_EXECUTION_TIER_WARM = 0
+HOST_EXECUTION_TIER_PROBING = 1
+HOST_EXECUTION_TIER_SLOW = 2
+HOST_EXECUTION_TIER_DEFERRED = 3
+HOST_EXECUTION_TIER_LABELS = {
+    HOST_EXECUTION_TIER_WARM: "warm",
+    HOST_EXECUTION_TIER_PROBING: "probing",
+    HOST_EXECUTION_TIER_SLOW: "slow",
+    HOST_EXECUTION_TIER_DEFERRED: "deferred",
+}
+
+
+def host_execution_tier_label(execution_tier: int | None) -> str:
+    """Return a stable operator-facing label for a host execution tier."""
+    if execution_tier is None:
+        return "unknown"
+    return HOST_EXECUTION_TIER_LABELS.get(int(execution_tier), "unknown")
+
 
 @dataclass(frozen=True)
 class HostRunnableHead:
@@ -23,6 +41,7 @@ class HostRunnableHead:
     added_at: float
     priority: float
     runnable_url_count: int
+    execution_tier: int
     latency_penalty: int
     runnable_at: float
     refreshed_at: float
@@ -58,7 +77,28 @@ class HostRunnableHeadStore:
         self._normalized_surface_queues = normalized_surface_queues
         self._latency_penalty_sql = latency_penalty_sql
 
-    def _head_sql(self, *, physical_queue: str) -> tuple[str, str, str]:
+    def _execution_tier_sql(
+        self,
+        *,
+        host_state_alias: str,
+        host_ledger_alias: str,
+    ) -> str:
+        return (
+            "CASE "
+            f"WHEN COALESCE({host_state_alias}.consecutive_failures, 0) >= 4 "
+            f"OR COALESCE({host_state_alias}.latency_ewma_ms, 0) >= 5000.0 "
+            f"THEN {HOST_EXECUTION_TIER_DEFERRED} "
+            f"WHEN COALESCE({host_state_alias}.consecutive_failures, 0) >= 2 "
+            f"OR COALESCE({host_state_alias}.latency_ewma_ms, 0) >= 1000.0 "
+            f"THEN {HOST_EXECUTION_TIER_SLOW} "
+            f"WHEN COALESCE({host_ledger_alias}.last_success_at, 0) > 0 "
+            f"OR COALESCE({host_ledger_alias}.robots_last_checked_at, 0) > 0 "
+            f"OR COALESCE({host_state_alias}.robots_checked_at, 0) > 0 "
+            f"THEN {HOST_EXECUTION_TIER_WARM} "
+            f"ELSE {HOST_EXECUTION_TIER_PROBING} END"
+        )
+
+    def _head_sql(self, *, physical_queue: str) -> tuple[str, str, str, str]:
         normalized_physical_queue = self._normalize_physical_queue(physical_queue)
         queue_table = self._queue_table_sql(normalized_physical_queue)
         latency_penalty = self._latency_penalty_sql(
@@ -72,7 +112,11 @@ class HostRunnableHeadStore:
             "COALESCE(candidate_host_state.backoff_until, 0)"
             ")"
         )
-        return queue_table, latency_penalty, runnable_at
+        execution_tier = self._execution_tier_sql(
+            host_state_alias="candidate_host_state",
+            host_ledger_alias="candidate_host_ledger",
+        )
+        return queue_table, latency_penalty, runnable_at, execution_tier
 
     def refresh_host_in_tx(
         self,
@@ -87,7 +131,7 @@ class HostRunnableHeadStore:
             return 0
 
         normalized_physical_queue = self._normalize_physical_queue(physical_queue)
-        queue_table, latency_penalty, runnable_at = self._head_sql(
+        queue_table, latency_penalty, runnable_at, execution_tier = self._head_sql(
             physical_queue=normalized_physical_queue
         )
         timestamp = time.time() if refreshed_at is None else refreshed_at
@@ -105,13 +149,17 @@ class HostRunnableHeadStore:
                             FROM {queue_table} AS host_rows
                             WHERE host_rows.host = candidate.host
                         ) AS runnable_url_count,
+                        {execution_tier} AS execution_tier,
                         {latency_penalty} AS latency_penalty,
                         {runnable_at} AS runnable_at
                     FROM {queue_table} AS candidate
                     LEFT JOIN host_state AS candidate_host_state
                         ON candidate_host_state.host_key = candidate.host
+                    LEFT JOIN host_ledger AS candidate_host_ledger
+                        ON candidate_host_ledger.host = candidate.host
                     WHERE candidate.host = %s
                     ORDER BY
+                        execution_tier ASC,
                         runnable_at ASC,
                         latency_penalty ASC,
                         candidate.added_at ASC,
@@ -127,6 +175,7 @@ class HostRunnableHeadStore:
                     head_added_at,
                     head_priority,
                     runnable_url_count,
+                    execution_tier,
                     latency_penalty,
                     runnable_at,
                     refreshed_at
@@ -139,6 +188,7 @@ class HostRunnableHeadStore:
                     added_at,
                     priority,
                     runnable_url_count,
+                    execution_tier,
                     latency_penalty,
                     runnable_at,
                     %s
@@ -149,6 +199,7 @@ class HostRunnableHeadStore:
                     head_added_at = EXCLUDED.head_added_at,
                     head_priority = EXCLUDED.head_priority,
                     runnable_url_count = EXCLUDED.runnable_url_count,
+                    execution_tier = EXCLUDED.execution_tier,
                     latency_penalty = EXCLUDED.latency_penalty,
                     runnable_at = EXCLUDED.runnable_at,
                     refreshed_at = EXCLUDED.refreshed_at""",
@@ -255,6 +306,7 @@ class HostRunnableHeadStore:
                     head_added_at,
                     head_priority,
                     runnable_url_count,
+                    execution_tier,
                     latency_penalty,
                     runnable_at,
                     refreshed_at
@@ -267,6 +319,8 @@ class HostRunnableHeadStore:
                     incoming.head_added_at,
                     incoming.head_priority,
                     incoming.runnable_url_count,
+                    {self._execution_tier_sql(host_state_alias="host_state", host_ledger_alias="host_ledger")}
+                        AS execution_tier,
                     CASE
                         WHEN COALESCE(host_state.latency_ewma_ms, 0) >= 1000.0 THEN 3
                         WHEN COALESCE(host_state.latency_ewma_ms, 0) >= 400.0 THEN 2
@@ -281,22 +335,26 @@ class HostRunnableHeadStore:
                     incoming.refreshed_at
                 FROM incoming
                 LEFT JOIN host_state ON host_state.host_key = incoming.host
+                LEFT JOIN host_ledger ON host_ledger.host = incoming.host
                 ON CONFLICT (physical_queue, host) DO UPDATE SET
                     head_url = EXCLUDED.head_url,
                     head_next_fetch_at = EXCLUDED.head_next_fetch_at,
                     head_added_at = EXCLUDED.head_added_at,
                     head_priority = EXCLUDED.head_priority,
                     runnable_url_count = EXCLUDED.runnable_url_count,
+                    execution_tier = EXCLUDED.execution_tier,
                     latency_penalty = EXCLUDED.latency_penalty,
                     runnable_at = EXCLUDED.runnable_at,
                     refreshed_at = EXCLUDED.refreshed_at
                 WHERE (
+                    EXCLUDED.execution_tier,
                     EXCLUDED.runnable_at,
                     EXCLUDED.latency_penalty,
                     EXCLUDED.head_added_at,
                     0 - EXCLUDED.head_priority,
                     EXCLUDED.head_url
                 ) < (
+                    {self._table_name}.execution_tier,
                     {self._table_name}.runnable_at,
                     {self._table_name}.latency_penalty,
                     {self._table_name}.head_added_at,
@@ -342,7 +400,7 @@ class HostRunnableHeadStore:
 
     def _rebuild_queue(self, cur, *, physical_queue: str, refreshed_at: float) -> int:
         normalized_physical_queue = self._normalize_physical_queue(physical_queue)
-        queue_table, latency_penalty, runnable_at = self._head_sql(
+        queue_table, latency_penalty, runnable_at, execution_tier = self._head_sql(
             physical_queue=normalized_physical_queue
         )
 
@@ -359,11 +417,14 @@ class HostRunnableHeadStore:
                         candidate.added_at,
                         candidate.priority,
                         COUNT(*) OVER (PARTITION BY candidate.host) AS runnable_url_count,
+                        {execution_tier} AS execution_tier,
                         {latency_penalty} AS latency_penalty,
                         {runnable_at} AS runnable_at
                     FROM {queue_table} AS candidate
                     LEFT JOIN host_state AS candidate_host_state
                         ON candidate_host_state.host_key = candidate.host
+                    LEFT JOIN host_ledger AS candidate_host_ledger
+                        ON candidate_host_ledger.host = candidate.host
                 ),
                 selected AS (
                     SELECT DISTINCT ON (host)
@@ -373,11 +434,13 @@ class HostRunnableHeadStore:
                         added_at,
                         priority,
                         runnable_url_count,
+                        execution_tier,
                         latency_penalty,
                         runnable_at
                     FROM candidate_rows
                     ORDER BY
                         host,
+                        execution_tier ASC,
                         runnable_at ASC,
                         latency_penalty ASC,
                         added_at ASC,
@@ -392,6 +455,7 @@ class HostRunnableHeadStore:
                     head_added_at,
                     head_priority,
                     runnable_url_count,
+                    execution_tier,
                     latency_penalty,
                     runnable_at,
                     refreshed_at
@@ -404,6 +468,7 @@ class HostRunnableHeadStore:
                     added_at,
                     priority,
                     runnable_url_count,
+                    execution_tier,
                     latency_penalty,
                     runnable_at,
                     %s
@@ -462,6 +527,7 @@ class HostRunnableHeadStore:
                         heads.head_added_at,
                         heads.head_priority,
                         heads.runnable_url_count,
+                        heads.execution_tier,
                         heads.latency_penalty,
                         {effective_runnable_at} AS effective_runnable_at,
                         heads.refreshed_at
@@ -469,6 +535,7 @@ class HostRunnableHeadStore:
                     LEFT JOIN host_state ON host_state.host_key = heads.host
                     WHERE {" AND ".join(conditions)}
                     ORDER BY
+                        heads.execution_tier ASC,
                         heads.runnable_url_count ASC,
                         heads.latency_penalty ASC,
                         heads.head_next_fetch_at ASC,
@@ -490,6 +557,7 @@ class HostRunnableHeadStore:
                 added_at=added_at,
                 priority=priority,
                 runnable_url_count=runnable_url_count,
+                execution_tier=execution_tier,
                 latency_penalty=latency_penalty,
                 runnable_at=row_runnable_at,
                 refreshed_at=refreshed_at,
@@ -502,6 +570,7 @@ class HostRunnableHeadStore:
                 added_at,
                 priority,
                 runnable_url_count,
+                execution_tier,
                 latency_penalty,
                 row_runnable_at,
                 refreshed_at,

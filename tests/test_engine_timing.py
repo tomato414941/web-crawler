@@ -195,6 +195,7 @@ async def test_crawler_engine_records_stage_timings():
     assert timing_summary["stages"]["fetch_ms"]["count"] == 1
     assert timing_summary["counts"]["fetch_outcomes"]["ok"] == 1
     assert timing_summary["counts"]["lease_outcomes"]["leased"] == 1
+    assert timing_summary["counts"]["lease_execution_tiers"]["unknown"] == 1
     assert ledger.done == [("https://example.com/", "lease-1")]
     assert ledger.added
 

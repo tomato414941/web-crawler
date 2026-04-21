@@ -796,6 +796,66 @@ class TestUrlLedger:
             ("a.com", "http://a.com/1", 2),
         ]
 
+    def test_host_runnable_heads_prioritize_warm_hosts_by_execution_tier(self, ledger):
+        now = 1000.0
+        self.host_store.update_robots("warm.com", crawl_delay_seconds=1.0, checked_at=now - 10)
+        ledger.place(
+            CrawlTask(
+                url="http://probing.com/1",
+                added_at=900,
+                next_fetch_at=now - 1,
+                runnable_surface=SCHEDULER_SURFACE_RUNNABLE,
+            )
+        )
+        ledger.place(
+            CrawlTask(
+                url="http://warm.com/1",
+                added_at=1000,
+                next_fetch_at=now - 1,
+                runnable_surface=SCHEDULER_SURFACE_RUNNABLE,
+            )
+        )
+
+        heads = ledger.host_runnable_heads_from_read_model(
+            runnable_surface=SCHEDULER_SURFACE_RUNNABLE,
+            now=now,
+        )
+
+        assert [(head.host_key, head.execution_tier) for head in heads] == [
+            ("warm.com", 0),
+            ("probing.com", 1),
+        ]
+
+    def test_host_runnable_heads_defer_very_slow_hosts_by_execution_tier(self, ledger):
+        now = 1000.0
+        self.host_store.record_success("slow.com", now=now - 10, request_latency_ms=1200.0)
+        ledger.place(
+            CrawlTask(
+                url="http://slow.com/1",
+                added_at=800,
+                next_fetch_at=now - 1,
+                runnable_surface=SCHEDULER_SURFACE_RUNNABLE,
+            )
+        )
+        ledger.place(
+            CrawlTask(
+                url="http://probing.com/1",
+                added_at=900,
+                next_fetch_at=now - 1,
+                runnable_surface=SCHEDULER_SURFACE_RUNNABLE,
+            )
+        )
+
+        heads = ledger.host_runnable_heads_from_read_model(
+            runnable_surface=SCHEDULER_SURFACE_RUNNABLE,
+            now=now,
+        )
+
+        assert [(head.host_key, head.execution_tier) for head in heads] == [
+            ("probing.com", 1),
+            ("slow.com", 2),
+        ]
+
     def test_host_runnable_heads_advance_after_lease(self, ledger):
         now = 1000.0
         ledger.place(CrawlTask(url="http://a.com/1", added_at=1000, next_fetch_at=now - 1))
@@ -920,9 +980,30 @@ class TestUrlLedger:
         self, ledger, monkeypatch
     ):
         now = 1000.0
-        ledger.place(CrawlTask(url="http://a.com/1", added_at=1000, next_fetch_at=now - 1))
-        ledger.place(CrawlTask(url="http://a.com/2", added_at=1001, next_fetch_at=now - 1))
-        ledger.place(CrawlTask(url="http://b.com/1", added_at=900, next_fetch_at=now - 1))
+        ledger.place(
+            CrawlTask(
+                url="http://a.com/1",
+                added_at=1000,
+                next_fetch_at=now - 1,
+                runnable_surface=SCHEDULER_SURFACE_RUNNABLE,
+            )
+        )
+        ledger.place(
+            CrawlTask(
+                url="http://a.com/2",
+                added_at=1001,
+                next_fetch_at=now - 1,
+                runnable_surface=SCHEDULER_SURFACE_RUNNABLE,
+            )
+        )
+        ledger.place(
+            CrawlTask(
+                url="http://b.com/1",
+                added_at=900,
+                next_fetch_at=now - 1,
+                runnable_surface=SCHEDULER_SURFACE_RUNNABLE,
+            )
+        )
         ledger.rebuild_host_runnable_heads(
             runnable_surface=SCHEDULER_SURFACE_RUNNABLE,
             now=now,
@@ -942,6 +1023,7 @@ class TestUrlLedger:
         assert result.url == "http://b.com/1"
         assert ledger.last_lease_diagnostics()["read_model"] == "hit"
         assert ledger.last_lease_diagnostics()["fallback"] == "none"
+        assert ledger.last_lease_diagnostics()["execution_tier"] == "probing"
 
     def test_lease_next_host_first_uses_normal_surface_read_model_without_empty_queue_fallback(
         self, ledger

@@ -13,7 +13,11 @@ from urllib.parse import urlparse
 import psycopg2.extras
 
 from .config import settings
-from .host_runnable_heads import HostRunnableHead, HostRunnableHeadStore
+from .host_runnable_heads import (
+    HostRunnableHead,
+    HostRunnableHeadStore,
+    host_execution_tier_label,
+)
 from .host_ledger import HostLedgerStore
 from .scheduler_membership import (
     PHYSICAL_QUEUE_DEFAULT_SCHEDULER_SURFACE,
@@ -95,6 +99,7 @@ HOST_RUNNABLE_HEADS_REQUIRED_COLUMNS = {
     "head_added_at",
     "head_priority",
     "runnable_url_count",
+    "execution_tier",
     "latency_penalty",
     "runnable_at",
     "refreshed_at",
@@ -225,6 +230,7 @@ class _HostFirstReadModelResult:
     read_model: str
     candidates: int = 0
     stale_candidates: int = 0
+    execution_tier: int | None = None
 
 
 class UrlLedger:
@@ -302,6 +308,7 @@ class UrlLedger:
             "fallback": "none",
             "read_model_candidates": 0,
             "stale_candidates": 0,
+            "execution_tier": "unknown",
         }
 
     def host_first_fallback_stats(self) -> dict[str, int]:
@@ -346,6 +353,7 @@ class UrlLedger:
         fallback: str,
         read_model_candidates: int = 0,
         stale_candidates: int = 0,
+        execution_tier: int | None = None,
     ) -> None:
         """Store per-lease scheduler diagnostics for the crawler telemetry layer."""
         self._last_lease_diagnostics = {
@@ -353,6 +361,7 @@ class UrlLedger:
             "fallback": fallback,
             "read_model_candidates": int(read_model_candidates),
             "stale_candidates": int(stale_candidates),
+            "execution_tier": host_execution_tier_label(execution_tier),
         }
 
     def last_lease_diagnostics(self) -> dict[str, object]:
@@ -366,6 +375,7 @@ class UrlLedger:
                     "fallback": "none",
                     "read_model_candidates": 0,
                     "stale_candidates": 0,
+                    "execution_tier": "unknown",
                 },
             )
         )
@@ -1626,6 +1636,7 @@ class UrlLedger:
                 fallback="none",
                 read_model_candidates=read_model_result.candidates,
                 stale_candidates=read_model_result.stale_candidates,
+                execution_tier=getattr(read_model_result, "execution_tier", None),
             )
             return read_model_result.task
 
@@ -1643,6 +1654,7 @@ class UrlLedger:
             fallback=fallback,
             read_model_candidates=read_model_result.candidates,
             stale_candidates=read_model_result.stale_candidates,
+            execution_tier=getattr(read_model_result, "execution_tier", None),
         )
         return fallback_task
 
@@ -1679,6 +1691,7 @@ class UrlLedger:
                     read_model="hit",
                     candidates=len(candidate_heads),
                     stale_candidates=stale_candidates,
+                    execution_tier=head.execution_tier,
                 )
             stale_candidates += 1
             self._delete_host_runnable_head_candidate(

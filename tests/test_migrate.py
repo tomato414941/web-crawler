@@ -152,6 +152,23 @@ def test_apply_migrations_creates_current_url_ledger_columns(migrated_dsn):
 
     assert "depth" not in page_columns
 
+    conn = psycopg2.connect(migrated_dsn)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT column_name
+                FROM information_schema.columns
+                WHERE table_schema = 'public' AND table_name = 'host_runnable_heads'
+                ORDER BY ordinal_position
+                """
+            )
+            host_head_columns = [column_name for (column_name,) in cur.fetchall()]
+    finally:
+        conn.close()
+
+    assert "execution_tier" in host_head_columns
+
 
 def test_apply_migrations_is_idempotent(migrated_dsn):
     apply_migrations(migrated_dsn)
