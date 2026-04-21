@@ -631,7 +631,9 @@ class HostRunnableHeadStore:
                     if len(pairs) >= limit:
                         break
                     remaining = limit - len(pairs)
-                    queue_table = self._queue_table_sql(physical_queue)
+                    queue_table, latency_penalty, runnable_at, execution_tier = self._head_sql(
+                        physical_queue=physical_queue
+                    )
                     cur.execute(
                         f"""SELECT
                                 heads.host,
@@ -644,9 +646,15 @@ class HostRunnableHeadStore:
                             LEFT JOIN LATERAL (
                                 SELECT candidate.url
                                 FROM {queue_table} AS candidate
+                                LEFT JOIN host_state AS candidate_host_state
+                                    ON candidate_host_state.host_key = candidate.host
+                                LEFT JOIN host_ledger AS candidate_host_ledger
+                                    ON candidate_host_ledger.host = candidate.host
                                 WHERE candidate.host = heads.host
                                 ORDER BY
-                                    candidate.next_fetch_at ASC,
+                                    {execution_tier} ASC,
+                                    {runnable_at} ASC,
+                                    {latency_penalty} ASC,
                                     candidate.added_at ASC,
                                     candidate.priority DESC,
                                     candidate.url ASC
