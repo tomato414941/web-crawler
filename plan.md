@@ -29,7 +29,8 @@ execution path and measure the before/after effect in production.
 - Deployed telemetry commits `a05c657` and `5af97c3`, then verified active and completed cycle telemetry in production.
 - Changed normal host-first leasing to read across the combined normal surface instead of recording
   an empty runnable-queue fallback before trying scheduled work.
-- Made host-head reads recheck `host_state` dynamically and prefer warm hosts with robots/history.
+- Made host-head reads recheck `host_state` dynamically without turning the lease path into a
+  global warm-host sort.
 - Replaced aggregate-delta lease telemetry inference with per-lease scheduler diagnostics.
 - Suppressed noisy `httpx` request logs in daemon mode.
 
@@ -50,6 +51,8 @@ execution path and measure the before/after effect in production.
 ## Next checks after deploy
 
 - Inspect whether `lease_fallbacks.miss` drops after per-lease diagnostics and normal-surface read.
+- If warm-host ranking is still needed, add it only with an indexed/stored host-head field; do not
+  reintroduce dynamic joins into the lease hot path.
 - Inspect whether robots timeout/connect errors justify more aggressive robots policy.
 - Inspect whether fetch p95 is caused by timeout/connect/http-error distribution or successful slow hosts.
 - Keep changes schema-free unless runtime evidence shows a durable metrics table is needed.

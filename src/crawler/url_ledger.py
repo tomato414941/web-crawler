@@ -1077,13 +1077,7 @@ class UrlLedger:
     ) -> None:
         """Insert scheduler-pending rows into the appropriate physical queue tables."""
         self._membership.insert_pending_rows(cur, rows)
-        self._refresh_host_runnable_heads_for_pairs(
-            cur,
-            [
-                (self._normalize_physical_queue(physical_queue), host)
-                for _url, host, _priority, _next_fetch_at, _added_at, physical_queue in rows
-            ],
-        )
+        self._host_heads.upsert_candidates_in_tx(cur, rows)
 
     def _insert_blocked_host_backoff_rows(
         self,
