@@ -635,12 +635,22 @@ class HostRunnableHeadStore:
                         physical_queue=physical_queue
                     )
                     cur.execute(
-                        f"""SELECT
+                        f"""WITH sampled_heads AS (
+                                SELECT
+                                    heads.host,
+                                    heads.head_url,
+                                    heads.refreshed_at
+                                FROM {self._table_name} AS heads
+                                WHERE heads.physical_queue = %s
+                                ORDER BY heads.refreshed_at ASC
+                                LIMIT %s
+                            )
+                            SELECT
                                 heads.host,
                                 heads.head_url,
                                 exact.url AS exact_url,
                                 best.url AS best_url
-                            FROM {self._table_name} AS heads
+                            FROM sampled_heads AS heads
                             LEFT JOIN {queue_table} AS exact
                                 ON exact.url = heads.head_url
                             LEFT JOIN LATERAL (
@@ -660,15 +670,14 @@ class HostRunnableHeadStore:
                                     candidate.url ASC
                                 LIMIT 1
                             ) AS best ON TRUE
-                            WHERE heads.physical_queue = %s
-                              AND (exact.url IS NULL OR best.url IS DISTINCT FROM heads.head_url)
-                            ORDER BY heads.refreshed_at ASC
-                            LIMIT %s""",
+                            ORDER BY heads.refreshed_at ASC""",
                         (physical_queue, remaining),
                     )
                     rows = cur.fetchall()
                     checked_heads += len(rows)
                     for host, head_url, exact_url, best_url in rows:
+                        if exact_url is not None and best_url == head_url:
+                            continue
                         pairs.add((physical_queue, host))
                         if exact_url is None:
                             orphan_heads += 1
