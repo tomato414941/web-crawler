@@ -21,6 +21,12 @@ from .core import HttpFetcher, Response
 from .discovery import PageSignals, rank_discovered_url, rank_seed_url, seed_hosts_from_urls
 from .error_stats import categorize_crawl_error
 from .host_manager import HostManager
+from .host_runnable_heads import (
+    HOST_EXECUTION_TIER_DEFERRED,
+    HOST_EXECUTION_TIER_PROBING,
+    HOST_EXECUTION_TIER_SLOW,
+    HOST_EXECUTION_TIER_WARM,
+)
 from .host_store import HostStore
 from .url_ledger import (
     CrawlTask,
@@ -78,6 +84,17 @@ def _split_worker_pools(concurrency: int) -> tuple[int, int]:
     refresh = 1 if total >= 4 else 0
     normal = total - refresh
     return normal, refresh
+
+
+def _split_execution_worker_pools(normal_workers: int, probing_ratio: float) -> tuple[int, int]:
+    """Split normal worker capacity into warm and probing host lanes."""
+    total = max(0, normal_workers)
+    ratio = max(0.0, min(1.0, probing_ratio))
+    if total <= 1 or ratio <= 0:
+        return total, 0
+    probing = max(1, round(total * ratio))
+    probing = min(total - 1, probing)
+    return total - probing, probing
 
 
 def _elapsed_ms(started_at: float) -> float:
@@ -161,6 +178,7 @@ class _LeaseLane:
     runnable_surface: str
     lease_strategy: str
     intent: str | None = None
+    execution_tiers: tuple[int, ...] | None = None
 
 
 @dataclass(slots=True)
@@ -244,6 +262,10 @@ class CrawlerEngine:
         self.parser_workers = max(1, min(concurrency, 4))
         self.max_inflight_requests_per_host = max(1, settings.max_inflight_requests_per_host)
         self.normal_workers, self.refresh_workers = _split_worker_pools(concurrency)
+        self.warm_workers, self.probing_workers = _split_execution_worker_pools(
+            self.normal_workers,
+            settings.execution_probing_worker_ratio,
+        )
         # Compatibility fields for older runtime consumers; execution uses normal_workers.
         self.runnable_workers = self.normal_workers
         self.scheduled_workers = 0
@@ -354,9 +376,16 @@ class CrawlerEngine:
             "concurrency": self.concurrency,
             "parser_workers": self.parser_workers,
             "normal_workers": self.normal_workers,
+            "warm_workers": self.warm_workers,
+            "probing_workers": self.probing_workers,
             "runnable_workers": self.runnable_workers,
             "scheduled_workers": self.scheduled_workers,
             "refresh_workers": self.refresh_workers,
+            "execution_workers": {
+                "warm": self.warm_workers,
+                "probing": self.probing_workers,
+                "refresh": self.refresh_workers,
+            },
             "active_hosts": len(self._active_host_counts),
             "parse_queue_size": self._parse_queue.qsize() if self._parse_queue is not None else 0,
             "finalize_queue_size": self._finalize_queue.qsize()
@@ -1283,6 +1312,9 @@ class CrawlerEngine:
                 runnable_surface=lease_lane.runnable_surface,
                 lease_strategy=lease_lane.lease_strategy,
                 exclude_hosts=excluded_hosts or None,
+                execution_tiers=list(lease_lane.execution_tiers)
+                if lease_lane.execution_tiers is not None
+                else None,
             )
             if task is not None:
                 host_key = self._host_key_for_url(task.url)
@@ -1368,22 +1400,43 @@ class CrawlerEngine:
 
         workers: list[asyncio.Task] = []
         worker_id = 0
-        normal_lane = _LeaseLane(
+        warm_lane = _LeaseLane(
             runnable_surface=SCHEDULER_SURFACE_NORMAL,
             lease_strategy=LEASE_STRATEGY_HOST_FIRST,
             intent=INTENT_EXPLORE,
+            execution_tiers=(HOST_EXECUTION_TIER_WARM,),
+        )
+        probing_lane = _LeaseLane(
+            runnable_surface=SCHEDULER_SURFACE_NORMAL,
+            lease_strategy=LEASE_STRATEGY_HOST_FIRST,
+            intent=INTENT_EXPLORE,
+            execution_tiers=(
+                HOST_EXECUTION_TIER_PROBING,
+                HOST_EXECUTION_TIER_SLOW,
+                HOST_EXECUTION_TIER_DEFERRED,
+            ),
         )
         refresh_lane = _LeaseLane(
             runnable_surface=SCHEDULER_SURFACE_REFRESH,
             lease_strategy=LEASE_STRATEGY_URL_ORDER,
             intent=INTENT_REFRESH,
         )
-        for _ in range(self.normal_workers):
+        for _ in range(self.warm_workers):
             workers.append(
                 asyncio.create_task(
                     self._worker(
                         worker_id,
-                        lease_lane=normal_lane,
+                        lease_lane=warm_lane,
+                    )
+                )
+            )
+            worker_id += 1
+        for _ in range(self.probing_workers):
+            workers.append(
+                asyncio.create_task(
+                    self._worker(
+                        worker_id,
+                        lease_lane=probing_lane,
                     )
                 )
             )

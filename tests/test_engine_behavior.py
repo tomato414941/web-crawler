@@ -39,6 +39,7 @@ class FakeLedger:
                 "lease_strategy": lease_strategy,
                 "runnable_surface": runnable_surface,
                 "exclude_hosts": sorted(exclude_hosts),
+                "execution_tiers": kwargs.get("execution_tiers"),
             }
         )
         for index, task in enumerate(self.tasks):
@@ -605,11 +606,13 @@ async def test_crawler_reserves_some_leases_for_breadth():
             "lease_strategy": "host_first",
             "runnable_surface": "normal",
             "exclude_hosts": [],
+            "execution_tiers": [0],
         },
         {
             "lease_strategy": "host_first",
             "runnable_surface": "normal",
             "exclude_hosts": [],
+            "execution_tiers": [0],
         },
     ]
 
@@ -733,10 +736,53 @@ async def test_crawler_uses_normal_workers_for_scheduled_work():
         engine.fetcher = fetcher
         runtime = engine.snapshot_runtime_stats()
         assert runtime["normal_workers"] == 5
+        assert runtime["warm_workers"] == 4
+        assert runtime["probing_workers"] == 1
         assert runtime["runnable_workers"] == 5
         assert runtime["scheduled_workers"] == 0
         assert runtime["refresh_workers"] == 1
+        assert runtime["execution_workers"] == {"warm": 4, "probing": 1, "refresh": 1}
         await engine.crawl()
 
     assert ledger.lease_calls[0]["runnable_surface"] == "normal"
     assert engine.pages_crawled == 1
+
+
+@pytest.mark.asyncio
+async def test_crawler_splits_normal_workers_into_execution_tier_lanes():
+    ledger = FakeLedger(
+        [
+            CrawlTask(url=f"https://example{i}.com/page", runnable_surface=SCHEDULER_SURFACE_RUNNABLE)
+            for i in range(5)
+        ]
+    )
+    host_manager = FakeHostManager()
+    fetcher = FakeFetcher(
+        [
+            Response(
+                url=f"https://example{i}.com/page",
+                status=200,
+                content=b"<html></html>",
+                headers={},
+            )
+            for i in range(5)
+        ],
+        delay=0.05,
+    )
+
+    async with CrawlerEngine(
+        max_pages=5,
+        concurrency=6,
+        url_ledger=ledger,
+        host_manager=host_manager,
+    ) as engine:
+        engine.fetcher = fetcher
+        await engine.crawl()
+
+    tier_calls = [
+        tuple(call["execution_tiers"] or [])
+        for call in ledger.lease_calls
+        if call["runnable_surface"] == SCHEDULER_SURFACE_NORMAL
+    ]
+    assert (0,) in tier_calls
+    assert (1, 2, 3) in tier_calls

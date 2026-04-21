@@ -42,25 +42,30 @@ reintroducing dynamic global joins into lease selection.
   telemetry in production.
 - Backfilled existing production host-head tiers with a set-based update. A full global rebuild was
   too expensive for the current production queue size.
+- Added bounded `host_runnable_heads` repair so stale, orphaned, or missing host heads can be
+  corrected without a full global rebuild.
+- Split normal host-first workers into warm and probing execution lanes. Warm hosts get most of the
+  normal capacity, while probing/slow/deferred hosts keep a thin discovery budget.
+- Exposed execution worker allocation and last host-head repair summary in runtime stats.
 
 ## Current slice
 
-- Observe whether warm-tier leasing improves completed-cycle throughput once the active cycle
-  finishes.
-- Inspect why warm hosts still have high robots miss/connect-error rates.
-- Decide whether explicit warm/probing worker budgets are needed next.
+- Deploy bounded host-head repair and thin tier budgets to production.
+- Verify `/health` and runtime stats after deployment.
+- Inspect whether warm workers dominate successful leases while probing continues to make progress.
 
 ## Acceptance
 
 - `/stats` continues to show host-first leases mostly coming from read-model hits rather than fallback.
 - `timing_summary.counts.lease_execution_tiers` shows whether leases are warm, probing, slow, or deferred.
 - Warm hosts are selected before probing hosts when both have ready normal work.
+- `active_cycle.execution_workers` shows warm/probing/refresh worker allocation.
+- `host_head_repair` shows bounded repair activity without requiring a full rebuild.
 - Related tests and lint pass before deploy.
 
 ## Next checks after deploy
 
-- Inspect whether warm tier leases dominate once enough warm hosts exist.
-- If probing still consumes too much capacity, add explicit warm/probing worker budgets next.
+- Inspect whether warm tier leases dominate without starving probing.
 - Inspect whether robots timeout/connect errors justify more aggressive robots policy.
 - Inspect whether fetch p95 is caused by timeout/connect/http-error distribution or successful slow hosts.
 - Keep future host ranking changes on stored/indexed read-model fields rather than dynamic lease joins.

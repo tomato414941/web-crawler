@@ -117,9 +117,17 @@ class CrawlDaemon:
         self._quarantine_retire_after_seconds = max(
             0.0, settings.daemon_quarantine_retire_after_seconds
         )
+        self._host_head_repair_limit = max(0, settings.daemon_host_head_repair_limit)
         self._shutdown = False
         self._engine: CrawlerEngine | None = None
         self._last_runtime_snapshot: dict[str, object] = {}
+        self._last_host_head_repair: dict[str, int] = {
+            "checked_heads": 0,
+            "orphan_heads": 0,
+            "stale_heads": 0,
+            "missing_heads": 0,
+            "repaired_hosts": 0,
+        }
         self._host_store: HostStore | None = None
         self._host_manager = HostManager(
             user_agent=settings.user_agent,
@@ -203,6 +211,7 @@ class CrawlDaemon:
                             "Promoted %d blocked-host-backoff URLs for retry",
                             maintenance["promoted"],
                         )
+                    self._repair_host_runnable_heads(url_ledger)
 
                     readiness = _daemon_readiness(url_ledger)
                     pending = readiness.pending
@@ -381,6 +390,7 @@ class CrawlDaemon:
             "parse_queue_size": 0,
             "finalize_queue_size": 0,
             "publish_queue_size": 0,
+            "host_head_repair": dict(self._last_host_head_repair),
         }
         for key in (
             "pages_crawled",
@@ -444,6 +454,23 @@ class CrawlDaemon:
             "scheduler_readiness_states": readiness_state_counts,
             "effective_scheduler_states": effective_scheduler_states,
         }
+
+    def _repair_host_runnable_heads(self, url_ledger: UrlLedger) -> None:
+        """Run bounded host-head repair before daemon cycle gating."""
+        if self._host_head_repair_limit <= 0:
+            return
+        repair_fn = getattr(url_ledger, "repair_host_runnable_heads", None)
+        if not callable(repair_fn):
+            return
+        try:
+            summary = repair_fn(limit=self._host_head_repair_limit)
+        except Exception:
+            logger.debug("Host runnable-head repair failed", exc_info=True)
+            return
+        as_dict = getattr(summary, "as_dict", None)
+        self._last_host_head_repair = (
+            as_dict() if callable(as_dict) else dict(summary) if isinstance(summary, dict) else {}
+        )
 
     def _report_runtime_stats(self, stop_event: threading.Event, engine: CrawlerEngine) -> None:
         """Persist crawler runtime stats for API consumers.
