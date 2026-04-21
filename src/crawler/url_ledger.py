@@ -17,9 +17,9 @@ from .host_runnable_heads import (
     HostRunnableHead,
     HostRunnableHeadRepairSummary,
     HostRunnableHeadStore,
-    host_execution_tier_label,
 )
 from .host_ledger import HostLedgerStore
+from .scheduler_lease_telemetry import HostFirstLeaseTelemetry
 from .scheduler_membership import (
     PHYSICAL_QUEUE_DEFAULT_SCHEDULER_SURFACE,
     PHYSICAL_QUEUE_ORDER,
@@ -37,6 +37,7 @@ from .scheduler_membership import (
 )
 from .scheduler_observability import SchedulerObservability, SchedulerReadiness
 from .scheduler_quarantine import SchedulerQuarantine
+from .scheduler_retry_policy import SchedulerRetryPolicy
 from .schema import assert_public_table_columns
 from .urls import normalize_url, url_branch_key
 
@@ -55,8 +56,6 @@ LEASE_STRATEGY_HOST_FIRST = "host_first"
 DEFAULT_LEASE_SECONDS = 300.0
 DEFAULT_RETRY_BACKOFF_SECONDS = 30.0
 MAX_RETRY_BACKOFF_SECONDS = 1800.0
-RETRY_PRIORITY_DECAY = 0.6
-MIN_RETRY_PRIORITY = 0.25
 LATENCY_BUCKET_FAST_MS = 150.0
 LATENCY_BUCKET_SLOW_MS = 400.0
 LATENCY_BUCKET_VERY_SLOW_MS = 1000.0
@@ -258,6 +257,11 @@ class UrlLedger:
             if max_retry_backoff_seconds is None
             else max_retry_backoff_seconds
         )
+        self._retry_policy = SchedulerRetryPolicy(
+            retry_backoff_seconds=self._retry_backoff_seconds,
+            max_retry_backoff_seconds=self._max_retry_backoff_seconds,
+            retry_intent=INTENT_RETRY,
+        )
         self._host_store: HostStore | None = None
         self._host_ledger = HostLedgerStore(conn)
         self._membership = SchedulerMembershipStore(
@@ -273,7 +277,7 @@ class UrlLedger:
             normalized_surface_queues=self._normalized_surface_queues,
             latency_penalty_sql=self._latency_penalty_sql,
         )
-        self.reset_host_first_fallback_stats()
+        self._lease_telemetry = HostFirstLeaseTelemetry()
         self._observability = SchedulerObservability(
             conn,
             physical_queue_tables=PHYSICAL_QUEUE_TABLES,
@@ -297,55 +301,26 @@ class UrlLedger:
 
     def reset_host_first_fallback_stats(self) -> None:
         """Reset cycle-local host-first fallback counters."""
-        self._host_first_fallback_attempts = 0
-        self._host_first_fallback_hits = 0
-        self._host_first_fallback_misses = 0
-        self._host_first_read_model_hits = 0
-        self._host_first_read_model_stale = 0
-        self._host_first_read_model_misses = 0
-        self._host_first_read_model_errors = 0
-        self._last_lease_diagnostics = {
-            "read_model": "unknown",
-            "fallback": "none",
-            "read_model_candidates": 0,
-            "stale_candidates": 0,
-            "execution_tier": "unknown",
-        }
+        self._host_first_lease_telemetry().reset()
 
     def host_first_fallback_stats(self) -> dict[str, int]:
         """Return cycle-local host-first fallback counters."""
-        return {
-            "attempts": int(getattr(self, "_host_first_fallback_attempts", 0)),
-            "hits": int(getattr(self, "_host_first_fallback_hits", 0)),
-            "misses": int(getattr(self, "_host_first_fallback_misses", 0)),
-            "read_model_hits": int(getattr(self, "_host_first_read_model_hits", 0)),
-            "read_model_stale": int(getattr(self, "_host_first_read_model_stale", 0)),
-            "read_model_misses": int(getattr(self, "_host_first_read_model_misses", 0)),
-            "read_model_errors": int(getattr(self, "_host_first_read_model_errors", 0)),
-        }
+        return self._host_first_lease_telemetry().fallback_stats()
 
     def _record_host_first_fallback(self, task: CrawlTask | None) -> None:
         """Record that host-first leasing fell back to bounded scanning."""
-        self._host_first_fallback_attempts = (
-            int(getattr(self, "_host_first_fallback_attempts", 0)) + 1
-        )
-        if task is None:
-            self._host_first_fallback_misses = (
-                int(getattr(self, "_host_first_fallback_misses", 0)) + 1
-            )
-        else:
-            self._host_first_fallback_hits = int(getattr(self, "_host_first_fallback_hits", 0)) + 1
+        self._host_first_lease_telemetry().record_fallback(hit=task is not None)
 
     def _record_host_first_read_model(self, status: str) -> None:
         """Record the read-model result for one host-first lease attempt."""
-        if status == "hit":
-            self._host_first_read_model_hits += 1
-        elif status == "stale":
-            self._host_first_read_model_stale += 1
-        elif status == "error":
-            self._host_first_read_model_errors += 1
-        else:
-            self._host_first_read_model_misses += 1
+        self._host_first_lease_telemetry().record_read_model(status)
+
+    def _host_first_lease_telemetry(self) -> HostFirstLeaseTelemetry:
+        telemetry = getattr(self, "_lease_telemetry", None)
+        if telemetry is None:
+            telemetry = HostFirstLeaseTelemetry()
+            self._lease_telemetry = telemetry
+        return telemetry
 
     def _set_last_lease_diagnostics(
         self,
@@ -357,29 +332,17 @@ class UrlLedger:
         execution_tier: int | None = None,
     ) -> None:
         """Store per-lease scheduler diagnostics for the crawler telemetry layer."""
-        self._last_lease_diagnostics = {
-            "read_model": read_model,
-            "fallback": fallback,
-            "read_model_candidates": int(read_model_candidates),
-            "stale_candidates": int(stale_candidates),
-            "execution_tier": host_execution_tier_label(execution_tier),
-        }
+        self._host_first_lease_telemetry().set_last_lease_diagnostics(
+            read_model=read_model,
+            fallback=fallback,
+            read_model_candidates=read_model_candidates,
+            stale_candidates=stale_candidates,
+            execution_tier=execution_tier,
+        )
 
     def last_lease_diagnostics(self) -> dict[str, object]:
         """Return diagnostics for the most recent lease_next call on this ledger."""
-        return dict(
-            getattr(
-                self,
-                "_last_lease_diagnostics",
-                {
-                    "read_model": "unknown",
-                    "fallback": "none",
-                    "read_model_candidates": 0,
-                    "stale_candidates": 0,
-                    "execution_tier": "unknown",
-                },
-            )
-        )
+        return self._host_first_lease_telemetry().last_lease_diagnostics()
 
     def attach_host_store(self, host_store: "HostStore | None") -> None:
         """Attach the persistent host scheduler used for lease selection."""
@@ -392,17 +355,28 @@ class UrlLedger:
 
     def _compute_retry_backoff(self, fail_streak: int) -> float:
         """Compute exponential retry backoff for a failed URL."""
-        base = max(self._retry_backoff_seconds, 0.0)
-        if fail_streak <= 1:
-            return base
-        delay = base * (2 ** (fail_streak - 1))
-        return min(delay, self._max_retry_backoff_seconds)
+        return self._scheduler_retry_policy().compute_backoff(fail_streak)
 
     def _compute_retry_priority(self, priority: float, fail_streak: int) -> float:
         """Lower retry priority so repeatedly failing URLs do not dominate the queue."""
-        if fail_streak <= 0:
-            return priority
-        return max(MIN_RETRY_PRIORITY, round(priority * (RETRY_PRIORITY_DECAY**fail_streak), 2))
+        return self._scheduler_retry_policy().compute_priority(priority, fail_streak)
+
+    def _scheduler_retry_policy(self) -> SchedulerRetryPolicy:
+        policy = getattr(self, "_retry_policy", None)
+        if policy is None:
+            policy = SchedulerRetryPolicy(
+                retry_backoff_seconds=getattr(
+                    self, "_retry_backoff_seconds", settings.scheduler_retry_backoff_seconds
+                ),
+                max_retry_backoff_seconds=getattr(
+                    self,
+                    "_max_retry_backoff_seconds",
+                    settings.scheduler_max_retry_backoff_seconds,
+                ),
+                retry_intent=INTENT_RETRY,
+            )
+            self._retry_policy = policy
+        return policy
 
     def _lease_match_sql(self, table_alias: str, lease_token: str | None) -> tuple[str, tuple]:
         """Build an optional lease-table predicate for completion updates."""
@@ -2136,14 +2110,16 @@ class UrlLedger:
                 self._conn.rollback()
                 return False
 
-            next_fail_streak = row[0] + 1
-            next_priority = self._compute_retry_priority(row[1], next_fail_streak)
-            retry_delay = backoff_seconds
-            if retryable and retry_delay is None:
-                retry_delay = self._compute_retry_backoff(next_fail_streak)
+            transition = self._scheduler_retry_policy().failure_transition(
+                fail_streak=row[0],
+                priority=row[1],
+                retryable=retryable,
+                error=error,
+                backoff_seconds=backoff_seconds,
+                now=now,
+            )
 
-            if retryable:
-                next_fetch_at = now + (retry_delay or 0.0)
+            if transition.retryable:
                 cur.execute(
                     f"""UPDATE {URL_LEDGER_TABLE} AS ledger
                         SET next_fetch_at = %s,
@@ -2156,11 +2132,11 @@ class UrlLedger:
                         WHERE url = %s{lease_sql}
                         RETURNING url, host, priority, next_fetch_at, added_at""",
                     (
-                        next_fetch_at,
-                        INTENT_RETRY,
-                        next_fail_streak,
-                        next_priority,
-                        error,
+                        transition.next_fetch_at,
+                        transition.current_intent,
+                        transition.next_fail_streak,
+                        transition.next_priority,
+                        transition.last_error,
                         normalized,
                         *lease_params,
                     ),
@@ -2188,12 +2164,12 @@ class UrlLedger:
                         WHERE url = %s{lease_sql}
                         RETURNING url, host""",
                     (
-                        now,
-                        next_fail_streak,
-                        next_priority,
-                        error,
-                        error or "failed",
-                        now,
+                        transition.next_fetch_at,
+                        transition.next_fail_streak,
+                        transition.next_priority,
+                        transition.last_error,
+                        transition.terminal_reason,
+                        transition.terminalized_at,
                         normalized,
                         *lease_params,
                     ),
