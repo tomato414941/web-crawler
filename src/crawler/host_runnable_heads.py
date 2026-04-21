@@ -438,23 +438,12 @@ class HostRunnableHeadStore:
             "COALESCE(host_state.backoff_until, 0)"
             ")"
         )
-        latency_penalty = self._latency_penalty_sql(
-            "heads",
-            latency_ms_sql="COALESCE(host_state.latency_ewma_ms, 0)",
-        )
-        warm_robots_penalty = (
-            "CASE WHEN GREATEST("
-            "COALESCE(host_state.robots_checked_at, 0), "
-            "COALESCE(host_ledger.robots_last_checked_at, 0)"
-            ") > 0 THEN 0 ELSE 1 END"
-        )
-        warm_success_penalty = (
-            "CASE WHEN COALESCE(host_ledger.success_count, 0) > 0 "
-            "OR COALESCE(host_ledger.last_success_at, 0) > 0 "
-            "THEN 0 ELSE 1 END"
-        )
-        conditions = ["heads.physical_queue = ANY(%s)", f"{effective_runnable_at} <= %s"]
-        params: list[object] = [normalized_physical_queues, runnable_at]
+        conditions = [
+            "heads.physical_queue = ANY(%s)",
+            "heads.runnable_at <= %s",
+            f"{effective_runnable_at} <= %s",
+        ]
+        params: list[object] = [normalized_physical_queues, runnable_at, runnable_at]
 
         if host:
             conditions.append("heads.host = %s")
@@ -473,19 +462,15 @@ class HostRunnableHeadStore:
                         heads.head_added_at,
                         heads.head_priority,
                         heads.runnable_url_count,
-                        {latency_penalty} AS effective_latency_penalty,
+                        heads.latency_penalty,
                         {effective_runnable_at} AS effective_runnable_at,
                         heads.refreshed_at
                     FROM {self._table_name} AS heads
                     LEFT JOIN host_state ON host_state.host_key = heads.host
-                    LEFT JOIN host_ledger ON host_ledger.host = heads.host
                     WHERE {" AND ".join(conditions)}
                     ORDER BY
-                        {warm_robots_penalty} ASC,
-                        {warm_success_penalty} ASC,
-                        COALESCE(host_state.consecutive_failures, 0) ASC,
-                        {latency_penalty} ASC,
                         heads.runnable_url_count ASC,
+                        heads.latency_penalty ASC,
                         heads.head_next_fetch_at ASC,
                         heads.head_added_at ASC,
                         heads.head_priority DESC,

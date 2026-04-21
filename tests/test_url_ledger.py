@@ -878,35 +878,6 @@ class TestUrlLedger:
             == []
         )
 
-    def test_host_runnable_heads_read_model_prefers_warm_hosts(self, ledger):
-        now = 1000.0
-        ledger.place(
-            CrawlTask(
-                url="http://cold.com/1",
-                added_at=900,
-                next_fetch_at=now - 1,
-                runnable_surface=SCHEDULER_SURFACE_RUNNABLE,
-            )
-        )
-        ledger.place(
-            CrawlTask(
-                url="http://warm.com/1",
-                added_at=1000,
-                next_fetch_at=now - 1,
-                runnable_surface=SCHEDULER_SURFACE_RUNNABLE,
-            )
-        )
-
-        self.host_store.update_robots("warm.com", crawl_delay_seconds=1.0, checked_at=now - 10)
-        ledger.host_ledger_store.record_success("warm.com", at=now - 5)
-
-        heads = ledger.host_runnable_heads_from_read_model(
-            runnable_surface=SCHEDULER_SURFACE_RUNNABLE,
-            now=now,
-        )
-
-        assert [head.host_key for head in heads] == ["warm.com", "cold.com"]
-
     def test_host_runnable_heads_read_model_supports_limit_and_exclude_hosts(self, ledger):
         now = 1000.0
         ledger.place(CrawlTask(url="http://a.com/1", added_at=1000, next_fetch_at=now - 1))
