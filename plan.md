@@ -1,71 +1,35 @@
 # web-crawler plan
 
-## Current milestone: prioritize host execution tiers
+## Current milestone: simplify scheduler boundaries
 
-The project now has a single greenfield schema baseline and no known active migration bridge.
-Production telemetry showed that normal host-first leases now come from `host_runnable_heads`, but
-overall crawl latency is still dominated by robots and HTTP request time. The immediate priority is
-to make the worker hot path prefer hosts that are more likely to produce useful pages, without
-reintroducing dynamic global joins into lease selection.
+The crawler is now past the migration cleanup and host-first read-model deployment work. Speed is
+not the immediate priority. The current priority is to keep the design understandable while moving
+closer to the crawler concepts:
 
-## Completed
+- URL ledger should keep durable URL facts.
+- Scheduler membership should own live queue membership.
+- Execution ownership should stay explicit in leases.
+- Runtime read models should remain derived and repairable.
+- Policy and telemetry should not keep accumulating inside `UrlLedger`.
 
-- Added host latency observations: EWMA, last observed latency, observed timestamp, and sample count.
-- Deployed the host latency observation fields to production.
-- Reset database migrations to a single `001_schema.sql` baseline.
-- Reset production `schema_migrations` to the new baseline.
-- Removed archived migration history from the repo.
-- Removed the one-time migration baseline bridge.
-- Removed test cleanup for obsolete scheduler table names.
-- Renamed the remaining internal refresh queue constant to refresh vocabulary.
-- Split cycle timing enough to show that current production latency is mostly robots/precheck and
-  fetch cost, not only lease selection.
-- Shortened the robots fetch timeout and verified production still runs.
-- Exposed host-first read-model fallback counters in runtime stats.
-- Added a per-host robots fetch lock so concurrent workers share one robots.txt check.
-- Deployed commit `88359ef` and verified `/health`, `/stats`, and `/stats/diagnostics`.
-- Added cause-oriented telemetry for fetch, robots, lease, and pipeline waits.
-- Split runtime payload into `active_cycle` and `last_completed_cycle`.
-- Deployed telemetry commits `a05c657` and `5af97c3`, then verified active and completed cycle telemetry in production.
-- Changed normal host-first leasing to read across the combined normal surface instead of recording
-  an empty runnable-queue fallback before trying scheduled work.
-- Made host-head reads recheck `host_state` dynamically without turning the lease path into a
-  global warm-host sort.
-- Replaced aggregate-delta lease telemetry inference with per-lease scheduler diagnostics.
-- Suppressed noisy `httpx` request logs in daemon mode.
-- Added an indexed `execution_tier` to `host_runnable_heads`.
-- Derived tier from host runtime/history facts during read-model refresh:
-  warm, probing, slow, or deferred.
-- Preferred lower execution tiers in host-head reads before breadth and latency tie-breakers.
-- Exposed lease execution-tier counts in runtime telemetry.
-- Deployed commit `f99dc4b` and verified `/health`, active runtime stats, read-model hits, and tier
-  telemetry in production.
-- Backfilled existing production host-head tiers with a set-based update. A full global rebuild was
-  too expensive for the current production queue size.
-- Added bounded `host_runnable_heads` repair so stale, orphaned, or missing host heads can be
-  corrected without a full global rebuild.
-- Split normal host-first workers into warm and probing execution lanes. Warm hosts get most of the
-  normal capacity, while probing/slow/deferred hosts keep a thin discovery budget.
-- Exposed execution worker allocation and last host-head repair summary in runtime stats.
+## Completed in this slice
 
-## Current slice
+- Replaced the stale deployment-oriented plan with the current design-simplification milestone.
+- Moved cycle-local host-first lease telemetry out of `UrlLedger`.
+- Moved retry failure transition policy out of `UrlLedger`.
+- Preserved existing public scheduler telemetry methods and runtime payload behavior.
 
-- Deploy bounded host-head repair and thin tier budgets to production.
-- Verify `/health` and runtime stats after deployment.
-- Inspect whether warm workers dominate successful leases while probing continues to make progress.
+## Verification
 
-## Acceptance
+- `UrlLedger` no longer directly owns host-first fallback counters or last lease diagnostic fields.
+- `UrlLedger` no longer computes retry backoff, retry priority, or terminal/retry failure
+  transitions inline.
+- Existing tests covering scheduler stats, lease diagnostics, retry transitions, and runtime stats pass.
+- No production speed change was required for this slice.
 
-- `/stats` continues to show host-first leases mostly coming from read-model hits rather than fallback.
-- `timing_summary.counts.lease_execution_tiers` shows whether leases are warm, probing, slow, or deferred.
-- Warm hosts are selected before probing hosts when both have ready normal work.
-- `active_cycle.execution_workers` shows warm/probing/refresh worker allocation.
-- `host_head_repair` shows bounded repair activity without requiring a full rebuild.
-- Related tests and lint pass before deploy.
+## Next candidates
 
-## Next checks after deploy
-
-- Inspect whether warm tier leases dominate without starving probing.
-- Inspect whether robots timeout/connect errors justify more aggressive robots policy.
-- Inspect whether fetch p95 is caused by timeout/connect/http-error distribution or successful slow hosts.
-- Keep future host ranking changes on stored/indexed read-model fields rather than dynamic lease joins.
+- Clarify whether `priority` is value, urgency, retry decay, or queue ranking.
+- Keep `host_runnable_heads` as a derived read model, but consider moving ranking policy out of the
+  read-model store.
+- Keep detailed speed investigation separate from this design-simplification milestone.
