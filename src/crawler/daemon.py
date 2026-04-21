@@ -366,6 +366,11 @@ class CrawlDaemon:
 
     def _persist_runtime_payload(self, storage: object, payload: dict[str, object]) -> None:
         """Persist runtime snapshots when the storage backend supports it."""
+        payload = dict(payload)
+        payload.setdefault("host_head_repair", dict(self._last_host_head_repair))
+        active_cycle = payload.get("active_cycle")
+        if isinstance(active_cycle, dict):
+            active_cycle.setdefault("host_head_repair", dict(self._last_host_head_repair))
         self._last_runtime_snapshot.update(payload)
         if hasattr(storage, "upsert_runtime_stats"):
             storage.upsert_runtime_stats("crawler", dict(self._last_runtime_snapshot))
