@@ -1,12 +1,12 @@
 # web-crawler plan
 
-## Current milestone: make host-first execution real
+## Current milestone: prioritize host execution tiers
 
 The project now has a single greenfield schema baseline and no known active migration bridge.
-Production telemetry showed that crawl latency is dominated by robots and HTTP request time, and
-that host-first read-model reporting was too coarse to tell whether the read model was actually
-serving leases. The immediate priority is to make `host_runnable_heads` the normal host-first
-execution path and measure the before/after effect in production.
+Production telemetry showed that normal host-first leases now come from `host_runnable_heads`, but
+overall crawl latency is still dominated by robots and HTTP request time. The immediate priority is
+to make the worker hot path prefer hosts that are more likely to produce useful pages, without
+reintroducing dynamic global joins into lease selection.
 
 ## Completed
 
@@ -36,23 +36,24 @@ execution path and measure the before/after effect in production.
 
 ## Current slice
 
-- Deploy the host-first read-model fix.
-- Evaluate whether `read_model_hits` becomes the dominant host-first path and fallback stops being
-  reported for normal scheduled work.
-- Compare before/after `pages_per_second`, `robots_cache_statuses`, `fetch_p95`, `robots_p95`,
-  and `scheduler_p95`.
+- Add an indexed `execution_tier` to `host_runnable_heads`.
+- Derive tier from host runtime/history facts during read-model refresh:
+  warm, probing, slow, or deferred.
+- Prefer lower execution tiers in host-head reads before breadth and latency tie-breakers.
+- Expose lease execution-tier counts in runtime telemetry.
+- Deploy, rebuild the host-head read model, and compare production crawl behavior.
 
 ## Acceptance
 
-- `/stats` shows host-first leases mostly coming from read-model hits rather than fallback.
-- Normal scheduled work no longer creates fallback misses only because the runnable queue is empty.
+- `/stats` continues to show host-first leases mostly coming from read-model hits rather than fallback.
+- `timing_summary.counts.lease_execution_tiers` shows whether leases are warm, probing, slow, or deferred.
+- Warm hosts are selected before probing hosts when both have ready normal work.
 - Related tests and lint pass before the next deploy.
 
 ## Next checks after deploy
 
-- Inspect whether `lease_fallbacks.miss` drops after per-lease diagnostics and normal-surface read.
-- If warm-host ranking is still needed, add it only with an indexed/stored host-head field; do not
-  reintroduce dynamic joins into the lease hot path.
+- Inspect whether warm tier leases dominate once enough warm hosts exist.
+- If probing still consumes too much capacity, add explicit warm/probing worker budgets next.
 - Inspect whether robots timeout/connect errors justify more aggressive robots policy.
 - Inspect whether fetch p95 is caused by timeout/connect/http-error distribution or successful slow hosts.
-- Keep changes schema-free unless runtime evidence shows a durable metrics table is needed.
+- Keep future host ranking changes on stored/indexed read-model fields rather than dynamic lease joins.

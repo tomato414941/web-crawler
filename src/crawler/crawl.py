@@ -1295,6 +1295,11 @@ class CrawlerEngine:
                     diagnostics = diagnostics_fn()
                     read_model = str(diagnostics.get("read_model", "unknown"))
                     fallback = str(diagnostics.get("fallback", "none"))
+                    execution_tier = str(diagnostics.get("execution_tier", "unknown"))
+                else:
+                    execution_tier = "unknown"
+            else:
+                execution_tier = "unknown"
             lease = LeaseTelemetry(
                 outcome="leased" if task is not None else "empty",
                 runnable_surface=lease_lane.runnable_surface,
@@ -1303,6 +1308,7 @@ class CrawlerEngine:
                 excluded_hosts_count=len(excluded_hosts),
                 read_model=read_model,
                 fallback=fallback,
+                execution_tier=execution_tier,
             )
             return task, lease
 

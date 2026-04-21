@@ -79,6 +79,7 @@ class LeaseTelemetry:
     excluded_hosts_count: int = 0
     read_model: str = "unknown"
     fallback: str = "none"
+    execution_tier: str = "unknown"
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -125,6 +126,7 @@ class TelemetryAccumulator:
         self._lease_outcomes: Counter[str] = Counter()
         self._lease_read_models: Counter[str] = Counter()
         self._lease_fallbacks: Counter[str] = Counter()
+        self._lease_execution_tiers: Counter[str] = Counter()
 
     def record(self, outcome: str, timings: object | None) -> None:
         """Record one finalized crawl attempt."""
@@ -153,6 +155,7 @@ class TelemetryAccumulator:
             self._lease_outcomes[str(getattr(lease, "outcome", "unknown"))] += 1
             self._lease_read_models[str(getattr(lease, "read_model", "unknown"))] += 1
             self._lease_fallbacks[str(getattr(lease, "fallback", "unknown"))] += 1
+            self._lease_execution_tiers[str(getattr(lease, "execution_tier", "unknown"))] += 1
 
     def snapshot(self) -> dict[str, object]:
         """Return a runtime-safe summary of observed cycle telemetry."""
@@ -193,5 +196,6 @@ class TelemetryAccumulator:
                 "lease_outcomes": dict(self._lease_outcomes),
                 "lease_read_models": dict(self._lease_read_models),
                 "lease_fallbacks": dict(self._lease_fallbacks),
+                "lease_execution_tiers": dict(self._lease_execution_tiers),
             },
         }

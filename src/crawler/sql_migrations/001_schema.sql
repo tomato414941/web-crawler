@@ -224,6 +224,7 @@ CREATE TABLE public.host_runnable_heads (
     head_added_at double precision NOT NULL,
     head_priority real NOT NULL,
     runnable_url_count bigint DEFAULT 0 NOT NULL,
+    execution_tier integer DEFAULT 1 NOT NULL,
     latency_penalty integer DEFAULT 0 NOT NULL,
     runnable_at double precision NOT NULL,
     refreshed_at double precision NOT NULL,
@@ -235,6 +236,7 @@ CREATE TABLE public.host_runnable_heads (
 CREATE INDEX idx_host_runnable_heads_ready
     ON public.host_runnable_heads(
         physical_queue,
+        execution_tier,
         runnable_at,
         runnable_url_count,
         latency_penalty,
