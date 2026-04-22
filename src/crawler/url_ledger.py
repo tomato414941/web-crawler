@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import logging
 import time
-import uuid
 from collections import Counter
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
@@ -36,6 +35,11 @@ from .scheduler_membership import (
     SchedulerMembershipStore,
     SchedulerQueueRow,
     SchedulerQueueRowInput,
+)
+from .scheduler_leases import (
+    ACTIVE_LEASES_TABLE,
+    LEASE_REQUIRED_COLUMNS,
+    ExecutionLeaseStore,
 )
 from .scheduler_observability import SchedulerObservability, SchedulerReadiness
 from .scheduler_quarantine import SchedulerQuarantine
@@ -84,15 +88,8 @@ QUEUE_REQUIRED_COLUMNS = {
     "added_at",
     "branch_key",
 }
-LEASE_TABLE = "active_leases"
+LEASE_TABLE = ACTIVE_LEASES_TABLE
 HOST_RUNNABLE_HEADS_TABLE = "host_runnable_heads"
-LEASE_REQUIRED_COLUMNS = {
-    "url",
-    "host",
-    "physical_queue",
-    "lease_token",
-    "lease_expires_at",
-}
 HOST_RUNNABLE_HEADS_REQUIRED_COLUMNS = {
     "physical_queue",
     "host",
@@ -274,6 +271,10 @@ class UrlLedger:
             blocked_queue_table=BLOCKED_HOST_BACKOFF_TABLE,
             host_runnable_heads_table=HOST_RUNNABLE_HEADS_TABLE,
         )
+        self._leases = ExecutionLeaseStore(
+            conn,
+            normalize_physical_queue=self._normalize_physical_queue,
+        )
         self._host_heads = HostRunnableHeadStore(
             conn,
             table_name=HOST_RUNNABLE_HEADS_TABLE,
@@ -363,13 +364,9 @@ class UrlLedger:
         """Compute exponential retry backoff for a failed URL."""
         return self._scheduler_retry_policy().compute_backoff(fail_streak)
 
-    def _compute_retry_scheduler_score(
-        self, discovery_value: float, fail_streak: int
-    ) -> float:
+    def _compute_retry_scheduler_score(self, discovery_value: float, fail_streak: int) -> float:
         """Lower retry score so repeatedly failing URLs do not dominate the queue."""
-        return self._scheduler_retry_policy().compute_scheduler_score(
-            discovery_value, fail_streak
-        )
+        return self._scheduler_retry_policy().compute_scheduler_score(discovery_value, fail_streak)
 
     def _scheduler_retry_policy(self) -> SchedulerRetryPolicy:
         policy = getattr(self, "_retry_policy", None)
@@ -387,18 +384,6 @@ class UrlLedger:
             )
             self._retry_policy = policy
         return policy
-
-    def _lease_match_sql(self, table_alias: str, lease_token: str | None) -> tuple[str, tuple]:
-        """Build an optional lease-table predicate for completion updates."""
-        if lease_token is None:
-            return "", ()
-        return (
-            " AND EXISTS ("
-            f"SELECT 1 FROM {LEASE_TABLE} AS active "
-            f"WHERE active.url = {table_alias}.url AND active.lease_token = %s"
-            ")",
-            (lease_token,),
-        )
 
     def _physical_queues(self) -> list[str]:
         """Return physical queues in stable scheduler order."""
@@ -421,8 +406,14 @@ class UrlLedger:
         if not hasattr(self, "_membership"):
             if not physical_queues:
                 return list(PHYSICAL_QUEUE_ORDER)
-            allowed = {self._normalize_physical_queue(physical_queue) for physical_queue in physical_queues}
-            return [physical_queue for physical_queue in PHYSICAL_QUEUE_ORDER if physical_queue in allowed]
+            allowed = {
+                self._normalize_physical_queue(physical_queue) for physical_queue in physical_queues
+            }
+            return [
+                physical_queue
+                for physical_queue in PHYSICAL_QUEUE_ORDER
+                if physical_queue in allowed
+            ]
         return self._membership.normalized_physical_queues(physical_queues)
 
     def _normalized_surface_queues(
@@ -547,21 +538,13 @@ class UrlLedger:
 
     def _recover_leased_locked(self, now: float, expired_only: bool) -> int:
         """Reset leased URLs back to pending inside an open transaction."""
-        if expired_only:
-            where = "lease_expires_at <= %s"
-            params = (now,)
-        else:
-            where = "TRUE"
-            params = ()
-
         with self._conn.cursor() as cur:
-            cur.execute(
-                f"""WITH recovered AS (
-                        DELETE FROM {LEASE_TABLE}
-                        WHERE {where}
-                        RETURNING url, host, physical_queue
-                    )
-                    SELECT ledger.url,
+            recovered_rows = self._leases.recover_rows(cur, now=now, expired_only=expired_only)
+            if not recovered_rows:
+                return 0
+            psycopg2.extras.execute_values(
+                cur,
+                f"""SELECT ledger.url,
                            ledger.host,
                            ledger.discovery_value,
                            ledger.fail_streak,
@@ -569,8 +552,9 @@ class UrlLedger:
                            ledger.added_at,
                            recovered.physical_queue
                     FROM {URL_LEDGER_TABLE} AS ledger
-                    JOIN recovered ON recovered.url = ledger.url""",
-                params,
+                    JOIN (VALUES %s) AS recovered(url, host, physical_queue)
+                      ON recovered.url = ledger.url""",
+                recovered_rows,
             )
             rows = cur.fetchall()
             pending_rows = [
@@ -1115,45 +1099,6 @@ class UrlLedger:
             page_size=200,
         )
 
-    def _delete_active_leases(self, cur, urls: list[str]) -> None:
-        """Remove URLs from the physical active lease table."""
-        if not urls:
-            return
-        cur.execute(f"DELETE FROM {LEASE_TABLE} WHERE url = ANY(%s)", (urls,))
-
-    def _upsert_active_leases(
-        self,
-        cur,
-        rows: list[tuple[str, str, str, str, float]],
-    ) -> None:
-        """Replace active lease rows using explicit lease-table state."""
-        normalized_urls = sorted({normalize_url(url) for url, *_ in rows if url})
-        if not normalized_urls:
-            return
-        self._delete_active_leases(cur, normalized_urls)
-        psycopg2.extras.execute_values(
-            cur,
-            f"""INSERT INTO {LEASE_TABLE}
-                    (url, host, physical_queue, lease_token, lease_expires_at)
-                VALUES %s
-                ON CONFLICT (url) DO UPDATE
-                SET host = EXCLUDED.host,
-                    physical_queue = EXCLUDED.physical_queue,
-                    lease_token = EXCLUDED.lease_token,
-                    lease_expires_at = EXCLUDED.lease_expires_at""",
-            [
-                (
-                    normalize_url(url),
-                    host,
-                    self._normalize_physical_queue(physical_queue),
-                    lease_token,
-                    lease_expires_at,
-                )
-                for url, host, physical_queue, lease_token, lease_expires_at in rows
-            ],
-            page_size=200,
-        )
-
     def _admission_physical_queue_by_url(
         self,
         tasks: list[CrawlTask],
@@ -1193,9 +1138,7 @@ class UrlLedger:
             (normalized_urls,),
         )
         existing_urls = {url for (url,) in cur.fetchall()}
-        return Counter(
-            urlparse(task.url).netloc for task in tasks if task.url not in existing_urls
-        )
+        return Counter(urlparse(task.url).netloc for task in tasks if task.url not in existing_urls)
 
     def requeue_urls(
         self,
@@ -1250,7 +1193,7 @@ class UrlLedger:
                 for url, host, discovery_value, next_fetch_at, added_at in rows
             ]
             self._membership.replace_pending_rows(cur, pending_rows)
-            self._delete_active_leases(cur, self._membership.row_urls(pending_rows))
+            self._leases.delete(cur, self._membership.row_urls(pending_rows))
             count = len(pending_rows)
 
         self._conn.commit()
@@ -1359,7 +1302,7 @@ class UrlLedger:
                     default_physical_queue=self._default_scheduled_physical_queue(),
                 )
                 self._membership.replace_pending_rows(cur, pending_rows)
-                self._delete_active_leases(cur, self._membership.row_urls(pending_rows))
+                self._leases.delete(cur, self._membership.row_urls(pending_rows))
                 count = len(pending_rows)
         except Exception:
             self._conn.rollback()
@@ -1820,7 +1763,7 @@ class UrlLedger:
         now: float,
     ) -> CrawlTask | None:
         """Lease one concrete candidate URL when it is still runnable and unlocked."""
-        lease_token = uuid.uuid4().hex
+        lease_token = self._leases.new_token()
         duration = self._lease_seconds if lease_seconds is None else lease_seconds
         lease_expires_at = now + duration
         runnable_sql = self._queue_runnable_sql(
@@ -1854,7 +1797,7 @@ class UrlLedger:
                 row = cur.fetchone()
                 if row:
                     self._delete_queue_entries(cur, [row[0]])
-                    self._upsert_active_leases(
+                    self._leases.upsert(
                         cur,
                         [(row[0], row[6], physical_queue, lease_token, lease_expires_at)],
                     )
@@ -1925,7 +1868,7 @@ class UrlLedger:
             return tasks
 
         now = time.time()
-        lease_token = uuid.uuid4().hex
+        lease_token = self._leases.new_token()
         duration = self._lease_seconds if lease_seconds is None else lease_seconds
         lease_expires_at = now + duration
         runnable_sql = self._queue_runnable_sql(
@@ -1982,7 +1925,7 @@ class UrlLedger:
                 rows = cur.fetchall()
                 if rows:
                     self._delete_queue_entries(cur, [row[0] for row in rows])
-                    self._upsert_active_leases(
+                    self._leases.upsert(
                         cur,
                         [
                             (
@@ -2027,7 +1970,7 @@ class UrlLedger:
         """Mark a URL as successfully crawled."""
         normalized = normalize_url(url)
         now = time.time()
-        lease_sql, lease_params = self._lease_match_sql("ledger", lease_token)
+        lease_sql, lease_params = self._leases.match_sql("ledger", lease_token)
 
         with self._conn.cursor() as cur:
             cur.execute(
@@ -2045,7 +1988,7 @@ class UrlLedger:
             )
             rows = cur.fetchall()
             self._delete_queue_entries(cur, [row[0] for row in rows])
-            self._delete_active_leases(cur, [row[0] for row in rows])
+            self._leases.delete(cur, [row[0] for row in rows])
             for _url, host in rows:
                 self._host_ledger.record_success_in_tx(cur, host, at=now)
             updated = bool(rows)
@@ -2063,7 +2006,7 @@ class UrlLedger:
         """Mark a URL as failed, optionally scheduling a retry."""
         normalized = normalize_url(url)
         now = time.time()
-        lease_sql, lease_params = self._lease_match_sql("ledger", lease_token)
+        lease_sql, lease_params = self._leases.match_sql("ledger", lease_token)
 
         with self._conn.cursor() as cur:
             cur.execute(
@@ -2113,7 +2056,7 @@ class UrlLedger:
                     self._single_physical_queue_for_surface(SCHEDULER_SURFACE_SCHEDULED),
                 )
                 self._membership.replace_pending_rows(cur, pending_rows)
-                self._delete_active_leases(cur, self._membership.row_urls(pending_rows))
+                self._leases.delete(cur, self._membership.row_urls(pending_rows))
                 updated = bool(rows)
             else:
                 cur.execute(
@@ -2139,7 +2082,7 @@ class UrlLedger:
                 rows = cur.fetchall()
                 urls = [row[0] for row in rows]
                 self._delete_queue_entries(cur, urls)
-                self._delete_active_leases(cur, urls)
+                self._leases.delete(cur, urls)
                 for _url, host in rows:
                     self._host_ledger.record_failure_in_tx(cur, host, at=now)
                 updated = bool(rows)
@@ -2166,7 +2109,7 @@ class UrlLedger:
                 self._single_physical_queue_for_surface(SCHEDULER_SURFACE_SCHEDULED),
             )
             self._membership.replace_pending_rows(cur, pending_rows)
-            self._delete_active_leases(cur, self._membership.row_urls(pending_rows))
+            self._leases.delete(cur, self._membership.row_urls(pending_rows))
             count = len(pending_rows)
         self._conn.commit()
         return count
@@ -2409,7 +2352,7 @@ class UrlLedger:
                 self._single_physical_queue_for_surface(SCHEDULER_SURFACE_RUNNABLE),
             )
             self._membership.replace_pending_rows(cur, pending_rows)
-            self._delete_active_leases(cur, self._membership.row_urls(pending_rows))
+            self._leases.delete(cur, self._membership.row_urls(pending_rows))
             affected = len(ledger_rows)
         self._conn.commit()
         return affected
