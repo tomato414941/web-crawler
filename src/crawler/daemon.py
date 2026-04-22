@@ -22,6 +22,11 @@ logger = logging.getLogger(__name__)
 
 _MAX_RECONNECT_ATTEMPTS = 5
 _RECONNECT_DELAY = 5.0
+_PIPELINE_LIVENESS_KEYS = (
+    "parser_liveness",
+    "finalizer_liveness",
+    "publisher_liveness",
+)
 
 
 def _format_error_breakdown(error_breakdown: dict[str, int]) -> str:
@@ -337,6 +342,7 @@ class CrawlDaemon:
                                 "parse_queue_size": 0,
                                 "finalize_queue_size": 0,
                                 "publish_queue_size": 0,
+                                **self._last_pipeline_liveness(),
                             },
                             "last_completed_cycle": last_completed_cycle,
                         }
@@ -414,6 +420,7 @@ class CrawlDaemon:
             "timing_summary",
             "host_first_fallback",
             "last_completed_cycle",
+            *_PIPELINE_LIVENESS_KEYS,
         ):
             if key in self._last_runtime_snapshot:
                 payload[key] = self._last_runtime_snapshot[key]
@@ -426,8 +433,17 @@ class CrawlDaemon:
             "parse_queue_size": 0,
             "finalize_queue_size": 0,
             "publish_queue_size": 0,
+            **self._last_pipeline_liveness(),
         }
         return payload
+
+    def _last_pipeline_liveness(self) -> dict[str, object]:
+        """Return the latest stage liveness payloads for idle/cycle-complete snapshots."""
+        return {
+            key: self._last_runtime_snapshot[key]
+            for key in _PIPELINE_LIVENESS_KEYS
+            if key in self._last_runtime_snapshot
+        }
 
     def _scheduler_runtime_views(
         self,
