@@ -10,14 +10,15 @@ import pytest
 from crawler.crawl import (
     CrawlerEngine,
     _FINALIZER_SENTINEL,
+    _FailedTask,
     _PUBLISHER_SENTINEL,
     _FinalizeItem,
     _ParsedPage,
     _PublishItem,
     _SkippedTask,
 )
-from crawler.result import CrawlResult, CrawlStageTimings
-from crawler.telemetry import TelemetryAccumulator
+from crawler.result import CrawlFailure, CrawlResult, CrawlStageTimings
+from crawler.telemetry import FinalizerTelemetry, TelemetryAccumulator
 from crawler.url_ledger import CrawlTask
 
 
@@ -95,6 +96,18 @@ class _FakeStorage:
         return True
 
 
+class _RecordingHostStore:
+    def __init__(self):
+        self.successes = []
+        self.failures = []
+
+    def record_success(self, host, request_latency_ms=None):
+        self.successes.append((host, request_latency_ms))
+
+    def record_failure(self, host, backoff_seconds=0.0):
+        self.failures.append((host, backoff_seconds))
+
+
 def _crawl_result(url="https://example.com/"):
     return CrawlResult(
         url=url,
@@ -115,7 +128,21 @@ async def _stop_queue_worker(queue, sentinel, worker):
 
 def test_timing_accumulator_summarizes_stage_percentiles():
     timings = TelemetryAccumulator()
-    timings.record("success", CrawlStageTimings(lease_ms=1.0, fetch_ms=10.0))
+    timings.record(
+        "success",
+        CrawlStageTimings(
+            lease_ms=1.0,
+            fetch_ms=10.0,
+            finalizer=FinalizerTelemetry(
+                kind="success",
+                new_tasks_count=3,
+                discover_ms=2.0,
+                admit_ms=4.0,
+                mark_done_ms=1.0,
+                total_ms=8.0,
+            ),
+        ),
+    )
     timings.record("failed", CrawlStageTimings(lease_ms=3.0, fetch_ms=30.0))
     timings.record("skipped", CrawlStageTimings(lease_ms=2.0, fetch_ms=20.0))
 
@@ -131,6 +158,15 @@ def test_timing_accumulator_summarizes_stage_percentiles():
         "max": 3.0,
     }
     assert summary["stages"]["fetch_ms"]["p95"] == 30.0
+    assert summary["finalizer"]["discover_ms"]["count"] == 1
+    assert summary["finalizer"]["discover_ms"]["p95"] == 2.0
+    assert summary["finalizer"]["admit_ms"]["p95"] == 4.0
+    assert summary["finalizer"]["total_ms"]["p95"] == 8.0
+    assert summary["counts"]["finalizer_kinds"] == {"success": 1}
+    assert summary["counts"]["finalizer_new_tasks"] == {
+        "total": 3,
+        "nonzero_items": 1,
+    }
     assert "counts" in summary
 
 
@@ -140,6 +176,13 @@ def test_timing_accumulator_handles_empty_samples():
     assert summary["samples"] == 0
     assert summary["outcomes"] == {"success": 0, "skipped": 0, "failed": 0}
     assert summary["stages"]["lease_ms"] == {
+        "count": 0,
+        "avg": 0.0,
+        "p50": 0.0,
+        "p95": 0.0,
+        "max": 0.0,
+    }
+    assert summary["finalizer"]["total_ms"] == {
         "count": 0,
         "avg": 0.0,
         "p50": 0.0,
@@ -328,6 +371,105 @@ async def test_publisher_survives_item_error_and_drains_next_item():
 
 
 @pytest.mark.asyncio
+async def test_success_finalizer_records_operation_breakdown():
+    ledger = _FakeLedger(None)
+    engine = CrawlerEngine(
+        max_pages=1,
+        url_ledger=ledger,
+        host_manager=_FakeHostManager(),
+    )
+    host_store = _RecordingHostStore()
+    engine.host_manager._host_store = host_store
+    result = _crawl_result()
+    parsed = _ParsedPage(
+        task=CrawlTask(url=result.url, lease_token="lease-1"),
+        result=result,
+        new_tasks=[CrawlTask(url="https://example.com/next")],
+        process_started=time.perf_counter(),
+    )
+
+    finalized = await engine._finalize_parsed_page(parsed)
+
+    assert finalized.timings.finalizer is not None
+    assert finalized.timings.finalizer.kind == "success"
+    assert finalized.timings.finalizer.new_tasks_count == 1
+    assert finalized.timings.finalizer.discover_ms >= 0
+    assert finalized.timings.finalizer.admit_ms >= 0
+    assert finalized.timings.finalizer.host_success_ms >= 0
+    assert finalized.timings.finalizer.mark_done_ms >= 0
+    assert finalized.timings.finalizer.total_ms >= 0
+    assert host_store.successes == [("example.com", 0.0)]
+
+
+@pytest.mark.asyncio
+async def test_skipped_finalizer_records_mark_done_breakdown():
+    ledger = _FakeLedger(None)
+    engine = CrawlerEngine(
+        max_pages=1,
+        url_ledger=ledger,
+        host_manager=_FakeHostManager(),
+    )
+    skipped = _SkippedTask(
+        task=CrawlTask(url="https://example.com/skip", lease_token="lease-1"),
+        reason="robots_denied",
+        timings=CrawlStageTimings(),
+        process_started=time.perf_counter(),
+    )
+
+    finalized = await engine._finalize_skipped_task(skipped)
+
+    assert finalized.timings.finalizer is not None
+    assert finalized.timings.finalizer.kind == "skipped"
+    assert finalized.timings.finalizer.mark_done_ms >= 0
+    assert finalized.timings.finalizer.total_ms >= 0
+    assert ledger.done == [("https://example.com/skip", "lease-1")]
+
+
+@pytest.mark.asyncio
+async def test_failed_finalizer_records_mark_failed_breakdown():
+    class FailedLedger(_FakeLedger):
+        def __init__(self):
+            super().__init__(None)
+            self.failed = []
+
+        def mark_failed(self, url, retryable, error, backoff_seconds=None, lease_token=None):
+            self.failed.append((url, retryable, error, backoff_seconds, lease_token))
+
+    ledger = FailedLedger()
+    engine = CrawlerEngine(
+        max_pages=1,
+        url_ledger=ledger,
+        host_manager=_FakeHostManager(),
+    )
+    host_store = _RecordingHostStore()
+    engine.host_manager._host_store = host_store
+    failed = _FailedTask(
+        task=CrawlTask(url="https://example.com/fail", lease_token="lease-1"),
+        failure=CrawlFailure(
+            url="https://example.com/fail",
+            error="timeout",
+            retryable=True,
+            timings=CrawlStageTimings(),
+        ),
+        process_started=time.perf_counter(),
+        record_error=True,
+        backoff_seconds=2.0,
+    )
+
+    finalized = await engine._finalize_failed_task(failed)
+
+    assert finalized.timings.finalizer is not None
+    assert finalized.timings.finalizer.kind == "failed"
+    assert finalized.timings.finalizer.host_failure_ms >= 0
+    assert finalized.timings.finalizer.mark_failed_ms >= 0
+    assert finalized.timings.finalizer.total_ms >= 0
+    assert host_store.failures == [("example.com", 2.0)]
+    assert ledger.failed == [
+        ("https://example.com/fail", True, "timeout", 2.0, "lease-1")
+    ]
+
+
+@pytest.mark.asyncio
 async def test_crawler_engine_records_stage_timings():
     ledger = _FakeLedger(CrawlTask(url="https://example.com/", lease_token="lease-1"))
     engine = CrawlerEngine(
@@ -345,6 +487,13 @@ async def test_crawler_engine_records_stage_timings():
     assert len(storage.saved) == 1
     result = storage.saved[0]
     assert result.timings is not None
+    assert result.timings.finalizer is not None
+    assert result.timings.finalizer.kind == "success"
+    assert result.timings.finalizer.new_tasks_count == 1
+    assert result.timings.finalizer.discover_ms >= 0
+    assert result.timings.finalizer.admit_ms >= 0
+    assert result.timings.finalizer.mark_done_ms >= 0
+    assert result.timings.finalizer.total_ms >= 0
     assert result.timings.lease_ms >= 0
     assert result.timings.precheck_ms >= 0
     assert result.timings.robots_ms >= 0
@@ -376,6 +525,9 @@ async def test_crawler_engine_records_stage_timings():
     assert timing_summary["stages"]["robots_ms"]["count"] == 1
     assert timing_summary["stages"]["rate_limit_ms"]["count"] == 1
     assert timing_summary["stages"]["fetch_ms"]["count"] == 1
+    assert timing_summary["finalizer"]["total_ms"]["count"] == 1
+    assert timing_summary["counts"]["finalizer_kinds"] == {"success": 1}
+    assert timing_summary["counts"]["finalizer_new_tasks"]["total"] == 1
     assert timing_summary["counts"]["fetch_outcomes"]["ok"] == 1
     assert timing_summary["counts"]["lease_outcomes"]["leased"] == 1
     assert timing_summary["counts"]["lease_execution_tiers"]["unknown"] == 1
