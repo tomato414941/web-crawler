@@ -60,3 +60,31 @@ def test_report_runtime_stats_waits_for_engine_to_start(monkeypatch):
     finally:
         stop_event.set()
         reporter.join(timeout=2.0)
+
+
+def test_idle_runtime_payload_preserves_pipeline_liveness():
+    daemon = CrawlDaemon(
+        seeds=["https://example.com/"],
+        postgres_dsn="postgresql://unused",
+    )
+    daemon._last_runtime_snapshot.update(
+        {
+            "parser_liveness": {"started": 2, "completed": 2, "failed": 0},
+            "finalizer_liveness": {"started": 2, "completed": 2, "failed": 0},
+            "publisher_liveness": {"started": 1, "completed": 1, "failed": 0},
+        }
+    )
+
+    payload = daemon._idle_runtime_payload(
+        state="cycle_complete",
+        pending=10,
+        runnable=8,
+        cycle=3,
+    )
+
+    assert payload["parser_liveness"] == {"started": 2, "completed": 2, "failed": 0}
+    assert payload["finalizer_liveness"] == {"started": 2, "completed": 2, "failed": 0}
+    assert payload["publisher_liveness"] == {"started": 1, "completed": 1, "failed": 0}
+    assert payload["active_cycle"]["parser_liveness"] == payload["parser_liveness"]
+    assert payload["active_cycle"]["finalizer_liveness"] == payload["finalizer_liveness"]
+    assert payload["active_cycle"]["publisher_liveness"] == payload["publisher_liveness"]
