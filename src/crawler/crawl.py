@@ -1253,6 +1253,8 @@ class CrawlerEngine:
                         failure.error,
                         _format_timings(failure.timings),
                     )
+            except Exception:
+                logger.exception("Finalizer failed while processing queued crawl result")
             finally:
                 self._finalize_queue.task_done()
 
