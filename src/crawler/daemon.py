@@ -133,6 +133,11 @@ class CrawlDaemon:
             "missing_heads": 0,
             "repaired_hosts": 0,
         }
+        self._last_host_head_dirty_refresh: dict[str, int] = {
+            "selected_hosts": 0,
+            "refreshed_hosts": 0,
+            "remaining_hosts": 0,
+        }
         self._host_store: HostStore | None = None
         self._host_manager = HostManager(
             user_agent=settings.user_agent,
@@ -216,6 +221,7 @@ class CrawlDaemon:
                             "Promoted %d blocked-host-backoff URLs for retry",
                             maintenance["promoted"],
                         )
+                    self._refresh_dirty_host_runnable_heads(url_ledger)
                     self._repair_host_runnable_heads(url_ledger)
 
                     readiness = _daemon_readiness(url_ledger)
@@ -374,9 +380,17 @@ class CrawlDaemon:
         """Persist runtime snapshots when the storage backend supports it."""
         payload = dict(payload)
         payload.setdefault("host_head_repair", dict(self._last_host_head_repair))
+        payload.setdefault(
+            "host_head_dirty_refresh",
+            dict(self._last_host_head_dirty_refresh),
+        )
         active_cycle = payload.get("active_cycle")
         if isinstance(active_cycle, dict):
             active_cycle.setdefault("host_head_repair", dict(self._last_host_head_repair))
+            active_cycle.setdefault(
+                "host_head_dirty_refresh",
+                dict(self._last_host_head_dirty_refresh),
+            )
         self._last_runtime_snapshot.update(payload)
         if hasattr(storage, "upsert_runtime_stats"):
             storage.upsert_runtime_stats("crawler", dict(self._last_runtime_snapshot))
@@ -402,6 +416,7 @@ class CrawlDaemon:
             "finalize_queue_size": 0,
             "publish_queue_size": 0,
             "host_head_repair": dict(self._last_host_head_repair),
+            "host_head_dirty_refresh": dict(self._last_host_head_dirty_refresh),
         }
         for key in (
             "pages_crawled",
@@ -433,6 +448,7 @@ class CrawlDaemon:
             "parse_queue_size": 0,
             "finalize_queue_size": 0,
             "publish_queue_size": 0,
+            "host_head_dirty_refresh": dict(self._last_host_head_dirty_refresh),
             **self._last_pipeline_liveness(),
         }
         return payload
@@ -490,6 +506,23 @@ class CrawlDaemon:
             return
         as_dict = getattr(summary, "as_dict", None)
         self._last_host_head_repair = (
+            as_dict() if callable(as_dict) else dict(summary) if isinstance(summary, dict) else {}
+        )
+
+    def _refresh_dirty_host_runnable_heads(self, url_ledger: UrlLedger) -> None:
+        """Refresh bounded dirty host-head rows before daemon cycle gating."""
+        if self._host_head_repair_limit <= 0:
+            return
+        refresh_fn = getattr(url_ledger, "refresh_dirty_host_runnable_heads", None)
+        if not callable(refresh_fn):
+            return
+        try:
+            summary = refresh_fn(limit=self._host_head_repair_limit)
+        except Exception:
+            logger.debug("Dirty host runnable-head refresh failed", exc_info=True)
+            return
+        as_dict = getattr(summary, "as_dict", None)
+        self._last_host_head_dirty_refresh = (
             as_dict() if callable(as_dict) else dict(summary) if isinstance(summary, dict) else {}
         )
 

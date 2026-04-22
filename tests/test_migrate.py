@@ -10,6 +10,7 @@ from crawler.migrate import (
 )
 from crawler.url_ledger import (
     BLOCKED_HOST_BACKOFF_TABLE,
+    HOST_RUNNABLE_HEAD_DIRTY_HOSTS_TABLE,
     HOST_RUNNABLE_HEADS_TABLE,
     LEASE_TABLE,
     PHYSICAL_QUEUE_TABLES,
@@ -34,6 +35,7 @@ def _reset_schema(dsn: str) -> None:
     try:
         with conn.cursor() as cur:
             cur.execute("DROP TABLE IF EXISTS public.schema_migrations")
+            cur.execute(f"DROP TABLE IF EXISTS public.{HOST_RUNNABLE_HEAD_DIRTY_HOSTS_TABLE}")
             cur.execute(f"DROP TABLE IF EXISTS public.{HOST_RUNNABLE_HEADS_TABLE}")
             cur.execute("DROP TABLE IF EXISTS public.host_ledger")
             cur.execute("DROP TABLE IF EXISTS public.host_state")
@@ -61,7 +63,7 @@ def migrated_dsn():
 def test_apply_migrations_creates_expected_tables(migrated_dsn):
     applied = apply_migrations(migrated_dsn)
 
-    assert applied == ["001_schema.sql"]
+    assert applied == ["001_schema.sql", "002_host_runnable_head_dirty_hosts.sql"]
 
     conn = psycopg2.connect(migrated_dsn)
     try:
@@ -80,8 +82,10 @@ def test_apply_migrations_creates_expected_tables(migrated_dsn):
                        to_regclass('public.{BLOCKED_HOST_BACKOFF_TABLE}'),
                        to_regclass('public.{LEASE_TABLE}'),
                        to_regclass('public.{HOST_RUNNABLE_HEADS_TABLE}'),
+                       to_regclass('public.{HOST_RUNNABLE_HEAD_DIRTY_HOSTS_TABLE}'),
                        to_regclass('public.idx_host_runnable_heads_ready'),
                        to_regclass('public.idx_host_runnable_heads_head_url'),
+                       to_regclass('public.idx_host_runnable_head_dirty_hosts_marked_at'),
                        to_regclass('public.idx_scheduler_queue_runnable_host_head'),
                        to_regclass('public.idx_scheduler_queue_scheduled_host_head'),
                        to_regclass('public.idx_scheduler_queue_refresh_host_head')
@@ -100,8 +104,10 @@ def test_apply_migrations_creates_expected_tables(migrated_dsn):
                 BLOCKED_HOST_BACKOFF_TABLE,
                 LEASE_TABLE,
                 HOST_RUNNABLE_HEADS_TABLE,
+                HOST_RUNNABLE_HEAD_DIRTY_HOSTS_TABLE,
                 "idx_host_runnable_heads_ready",
                 "idx_host_runnable_heads_head_url",
+                "idx_host_runnable_head_dirty_hosts_marked_at",
                 "idx_scheduler_queue_runnable_host_head",
                 "idx_scheduler_queue_scheduled_host_head",
                 "idx_scheduler_queue_refresh_host_head",

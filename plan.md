@@ -39,11 +39,15 @@ stall by making crawl pipeline stages explicit, observable, and testable:
   state transitions.
 - Added admission operation timing breakdown for intent updates, row fetches, queue membership
   replacement, host-head updates, lease cleanup, and commit time.
+- Moved admission host-head maintenance out of the synchronous admission path:
+  - admission now marks dirty host-head pairs instead of refreshing the read model inline.
+  - daemon maintenance refreshes dirty host-head rows in bounded batches.
 - Extracted fetch-stage queue handoff orchestration out of `CrawlerEngine`.
 - Added pipeline contract tests for queue metrics, liveness, finalizer error survival, and publisher
   error survival.
 - Added parser-stage contract tests for success, parse-error conversion, and worker survival.
 - Added fetch-stage contract tests for success, skipped, and failed queue routing.
+- Added dirty host-head refresh tests and runtime payload coverage.
 - Preserved existing public scheduler telemetry methods and runtime payload behavior.
 
 ## Verification
@@ -62,6 +66,9 @@ stall by making crawl pipeline stages explicit, observable, and testable:
   details in `CrawlerEngine` callbacks.
 - `timing_summary["finalizer"]` now exposes finalizer sub-stage p50/p95/max values.
 - `timing_summary["finalizer"]` now exposes admission sub-stage p50/p95/max values.
+- `admit_host_heads_ms` now measures dirty marking instead of full host-head refresh for admission.
+- Runtime stats expose `host_head_dirty_refresh` alongside bounded host-head repair.
+  `remaining_hosts` shows whether dirty refresh is keeping up.
 - Pipeline boundaries are documented in `docs/system-architecture.md` and
   `docs/system-architecture.ja.md`.
 - Existing tests covering scheduler stats, lease diagnostics, retry transitions, and runtime stats pass.
@@ -75,6 +82,6 @@ stall by making crawl pipeline stages explicit, observable, and testable:
   operations.
 - Continue slimming `CrawlerEngine` by extracting reusable fetch failure classification if it starts
   obscuring HTTP behavior changes.
-- Use admission operation timing to decide whether the next speed fix belongs in queue membership
-  replacement, host-head read-model maintenance, or lease cleanup.
+- Evaluate whether dirty host-head refresh keeps up under production crawl load before adding any
+  larger scheduler projection.
 - Keep detailed speed investigation separate from this design-simplification milestone.

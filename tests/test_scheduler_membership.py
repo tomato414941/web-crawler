@@ -11,6 +11,7 @@ def _store():
         None,
         blocked_queue_table="scheduler_queue_retry_quarantine",
         host_runnable_heads_table="host_runnable_heads",
+        host_runnable_head_dirty_hosts_table="host_runnable_head_dirty_hosts",
     )
 
 

@@ -248,3 +248,13 @@ CREATE INDEX idx_host_runnable_heads_ready
 
 CREATE INDEX idx_host_runnable_heads_head_url
     ON public.host_runnable_heads(head_url);
+
+CREATE TABLE public.host_runnable_head_dirty_hosts (
+    physical_queue text NOT NULL,
+    host text NOT NULL,
+    marked_at double precision NOT NULL,
+    CONSTRAINT host_runnable_head_dirty_hosts_pkey PRIMARY KEY (physical_queue, host)
+);
+
+CREATE INDEX idx_host_runnable_head_dirty_hosts_marked_at
+    ON public.host_runnable_head_dirty_hosts(marked_at);

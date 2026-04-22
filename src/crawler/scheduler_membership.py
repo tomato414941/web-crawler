@@ -49,6 +49,8 @@ PHYSICAL_QUEUE_DEFAULT_SCHEDULER_SURFACE = {
     QUEUE_SCHEDULED: SCHEDULER_SURFACE_SCHEDULED,
     QUEUE_REFRESH: SCHEDULER_SURFACE_REFRESH,
 }
+HOST_HEAD_UPDATE_DIRTY = "dirty"
+HOST_HEAD_UPDATE_SYNC = "sync"
 
 
 @dataclass(frozen=True)
@@ -92,10 +94,12 @@ class SchedulerMembershipStore:
         *,
         blocked_queue_table: str,
         host_runnable_heads_table: str,
+        host_runnable_head_dirty_hosts_table: str,
     ):
         self._conn = conn
         self._blocked_queue_table = blocked_queue_table
         self._host_runnable_heads_table = host_runnable_heads_table
+        self._host_runnable_head_dirty_hosts_table = host_runnable_head_dirty_hosts_table
         self._host_heads = None
 
     def attach_host_heads(self, host_heads) -> None:
@@ -241,11 +245,44 @@ class SchedulerMembershipStore:
             return
         self._host_heads.refresh_hosts_in_tx(cur, pairs)
 
+    def mark_dirty_host_heads(
+        self,
+        cur,
+        pairs: list[tuple[str, str]],
+        *,
+        marked_at: float | None = None,
+    ) -> int:
+        dirty_pairs = sorted(
+            {
+                (self.normalize_physical_queue(physical_queue), host)
+                for physical_queue, host in pairs
+                if host
+            }
+        )
+        if not dirty_pairs:
+            return 0
+        timestamp = time.time() if marked_at is None else marked_at
+        psycopg2.extras.execute_values(
+            cur,
+            f"""INSERT INTO {self._host_runnable_head_dirty_hosts_table}
+                    (physical_queue, host, marked_at)
+                VALUES %s
+                ON CONFLICT (physical_queue, host) DO UPDATE
+                SET marked_at = LEAST(
+                    {self._host_runnable_head_dirty_hosts_table}.marked_at,
+                    EXCLUDED.marked_at
+                )""",
+            [(physical_queue, host, timestamp) for physical_queue, host in dirty_pairs],
+            page_size=200,
+        )
+        return len(dirty_pairs)
+
     def delete_queue_entries(
         self,
         cur,
         urls: list[str],
         *,
+        host_head_update: str = HOST_HEAD_UPDATE_SYNC,
         timings: dict[str, float] | None = None,
     ) -> None:
         if not urls:
@@ -262,7 +299,10 @@ class SchedulerMembershipStore:
             f"DELETE FROM {self._host_runnable_heads_table} WHERE head_url = ANY(%s)",
             (urls,),
         )
-        self.refresh_host_heads_for_pairs(cur, affected_pairs)
+        if host_head_update == HOST_HEAD_UPDATE_DIRTY:
+            self.mark_dirty_host_heads(cur, affected_pairs)
+        else:
+            self.refresh_host_heads_for_pairs(cur, affected_pairs)
         _add_timing(timings, "host_heads_ms", _elapsed_ms(host_heads_started))
 
     def insert_pending_rows(
@@ -270,6 +310,7 @@ class SchedulerMembershipStore:
         cur,
         rows: list[SchedulerQueueRowInput],
         *,
+        host_head_update: str = HOST_HEAD_UPDATE_SYNC,
         timings: dict[str, float] | None = None,
     ) -> None:
         row_tuples = self._row_tuples(rows)
@@ -309,8 +350,18 @@ class SchedulerMembershipStore:
             )
         _add_timing(timings, "insert_membership_ms", _elapsed_ms(started))
 
-        if self._host_heads is not None:
-            host_heads_started = time.perf_counter()
+        host_heads_started = time.perf_counter()
+        if host_head_update == HOST_HEAD_UPDATE_DIRTY:
+            self.mark_dirty_host_heads(
+                cur,
+                [
+                    (physical_queue, host)
+                    for _url, host, _scheduler_score, _next_fetch_at, _added_at, physical_queue
+                    in row_tuples
+                ],
+            )
+            _add_timing(timings, "host_heads_ms", _elapsed_ms(host_heads_started))
+        elif self._host_heads is not None:
             self._host_heads.upsert_candidates_in_tx(cur, row_tuples)
             _add_timing(timings, "host_heads_ms", _elapsed_ms(host_heads_started))
 
@@ -318,6 +369,8 @@ class SchedulerMembershipStore:
         self,
         cur,
         rows: list[SchedulerQueueRowInput],
+        *,
+        host_head_update: str = HOST_HEAD_UPDATE_SYNC,
     ) -> dict[str, float]:
         timings = {
             "delete_membership_ms": 0.0,
@@ -328,6 +381,16 @@ class SchedulerMembershipStore:
         normalized_urls = sorted({normalize_url(url) for url, *_ in row_tuples if url})
         if not normalized_urls:
             return timings
-        self.delete_queue_entries(cur, normalized_urls, timings=timings)
-        self.insert_pending_rows(cur, row_tuples, timings=timings)
+        self.delete_queue_entries(
+            cur,
+            normalized_urls,
+            host_head_update=host_head_update,
+            timings=timings,
+        )
+        self.insert_pending_rows(
+            cur,
+            row_tuples,
+            host_head_update=host_head_update,
+            timings=timings,
+        )
         return timings
