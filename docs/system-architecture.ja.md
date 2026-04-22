@@ -165,6 +165,17 @@ project はすでに次の段へ収束しつつある。
 
 pipeline stage は operational boundary であり、durable URL identity boundary ではない。
 
+runtime の stage code はこの境界を明示すべきである。
+
+- queue ownership と backpressure は pipeline runtime が持つ
+- stage ごとの liveness は pipeline runtime が持つ
+- finalize は parse 後の scheduler mutation を持つ
+- persist は blocking な storage / output write を持つ
+- crawler orchestration は stage を接続するが、stage policy を溜め込まない
+
+stage に入った item は必ず complete するか、失敗として観測できる必要がある。
+silent worker death と unbounded queue は、偶発的な実装詳細ではなく architecture bug である。
+
 ## 8. Read Models And Operator Surfaces
 
 operator view は primary state から導出されるべきであり、scheduler truth として扱うべきではない。
