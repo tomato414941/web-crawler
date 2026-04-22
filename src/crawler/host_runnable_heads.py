@@ -85,13 +85,15 @@ class HostRunnableHeadDirtyRefreshSummary:
     selected_hosts: int = 0
     refreshed_hosts: int = 0
     remaining_hosts: int = 0
+    elapsed_ms: float = 0.0
 
-    def as_dict(self) -> dict[str, int]:
+    def as_dict(self) -> dict[str, int | float]:
         """Return a stable runtime payload."""
         return {
             "selected_hosts": self.selected_hosts,
             "refreshed_hosts": self.refreshed_hosts,
             "remaining_hosts": self.remaining_hosts,
+            "elapsed_ms": self.elapsed_ms,
         }
 
 
@@ -288,125 +290,20 @@ class HostRunnableHeadStore:
         *,
         refreshed_at: float | None = None,
     ) -> int:
-        """Offer inserted queue rows as host heads without host-local rescans."""
+        """Refresh host heads affected by inserted queue rows in one set-based pass."""
         if not rows:
             return 0
 
         timestamp = time.time() if refreshed_at is None else refreshed_at
-        grouped: dict[tuple[str, str], list[tuple[str, str, float, float, float, str]]] = {}
-        for row in rows:
-            url, host, scheduler_score, next_fetch_at, added_at, physical_queue = row
-            if not url or not host:
-                continue
-            key = (self._normalize_physical_queue(physical_queue), host)
-            grouped.setdefault(key, []).append(
-                (url, host, scheduler_score, next_fetch_at, added_at, key[0])
-            )
-
-        candidate_rows = []
-        for (physical_queue, host), host_rows in grouped.items():
-            best = min(
-                host_rows,
-                key=lambda row: (row[3], row[4], -row[2], row[0]),
-            )
-            url, _host, scheduler_score, next_fetch_at, added_at, _physical_queue = best
-            candidate_rows.append(
-                (
-                    physical_queue,
-                    host,
-                    url,
-                    next_fetch_at,
-                    added_at,
-                    scheduler_score,
-                    len(host_rows),
-                    timestamp,
-                )
-            )
-
-        if not candidate_rows:
-            return 0
-
-        psycopg2.extras.execute_values(
+        return self._refresh_pairs_in_tx(
             cur,
-            f"""WITH incoming (
-                    physical_queue,
-                    host,
-                    head_url,
-                    head_next_fetch_at,
-                    head_added_at,
-                    head_scheduler_score,
-                    runnable_url_count,
-                    refreshed_at
-                ) AS (VALUES %s)
-                INSERT INTO {self._table_name} (
-                    physical_queue,
-                    host,
-                    head_url,
-                    head_next_fetch_at,
-                    head_added_at,
-                    head_scheduler_score,
-                    runnable_url_count,
-                    execution_tier,
-                    latency_penalty,
-                    runnable_at,
-                    refreshed_at
-                )
-                SELECT
-                    incoming.physical_queue,
-                    incoming.host,
-                    incoming.head_url,
-                    incoming.head_next_fetch_at,
-                    incoming.head_added_at,
-                    incoming.head_scheduler_score,
-                    incoming.runnable_url_count,
-                    {self._execution_tier_sql(host_state_alias="host_state", host_ledger_alias="host_ledger")}
-                        AS execution_tier,
-                    CASE
-                        WHEN COALESCE(host_state.latency_ewma_ms, 0) >= 1000.0 THEN 3
-                        WHEN COALESCE(host_state.latency_ewma_ms, 0) >= 400.0 THEN 2
-                        WHEN COALESCE(host_state.latency_ewma_ms, 0) >= 150.0 THEN 1
-                        ELSE 0
-                    END AS latency_penalty,
-                    GREATEST(
-                        incoming.head_next_fetch_at,
-                        COALESCE(host_state.next_request_at, 0),
-                        COALESCE(host_state.backoff_until, 0)
-                    ) AS runnable_at,
-                    incoming.refreshed_at
-                FROM incoming
-                LEFT JOIN host_state ON host_state.host_key = incoming.host
-                LEFT JOIN host_ledger ON host_ledger.host = incoming.host
-                ON CONFLICT (physical_queue, host) DO UPDATE SET
-                    head_url = EXCLUDED.head_url,
-                    head_next_fetch_at = EXCLUDED.head_next_fetch_at,
-                    head_added_at = EXCLUDED.head_added_at,
-                    head_scheduler_score = EXCLUDED.head_scheduler_score,
-                    runnable_url_count = EXCLUDED.runnable_url_count,
-                    execution_tier = EXCLUDED.execution_tier,
-                    latency_penalty = EXCLUDED.latency_penalty,
-                    runnable_at = EXCLUDED.runnable_at,
-                    refreshed_at = EXCLUDED.refreshed_at
-                WHERE (
-                    EXCLUDED.execution_tier,
-                    EXCLUDED.runnable_at,
-                    EXCLUDED.latency_penalty,
-                    EXCLUDED.head_added_at,
-                    0 - EXCLUDED.head_scheduler_score,
-                    EXCLUDED.head_url
-                ) < (
-                    {self._table_name}.execution_tier,
-                    {self._table_name}.runnable_at,
-                    {self._table_name}.latency_penalty,
-                    {self._table_name}.head_added_at,
-                    0 - {self._table_name}.head_scheduler_score,
-                    {self._table_name}.head_url
-                )""",
-            candidate_rows,
-            template="(%s, %s, %s, %s, %s, %s, %s, %s)",
-            page_size=200,
-            fetch=False,
+            [
+                (physical_queue, host)
+                for _url, host, _scheduler_score, _next_fetch_at, _added_at, physical_queue
+                in rows
+            ],
+            refreshed_at=timestamp,
         )
-        return len(candidate_rows)
 
     def rebuild(
         self,
@@ -450,6 +347,7 @@ class HostRunnableHeadStore:
         if limit <= 0:
             return HostRunnableHeadDirtyRefreshSummary()
 
+        started = time.perf_counter()
         refreshed_at = time.time() if now is None else now
         normalized_physical_queues = self._normalized_surface_queues(
             runnable_surface=runnable_surface,
@@ -471,7 +369,7 @@ class HostRunnableHeadStore:
                     (self._normalize_physical_queue(physical_queue), host)
                     for physical_queue, host in cur.fetchall()
                 ]
-                refreshed_hosts = self.refresh_hosts_in_tx(
+                refreshed_hosts = self._refresh_pairs_in_tx(
                     cur,
                     pairs,
                     refreshed_at=refreshed_at,
@@ -504,7 +402,152 @@ class HostRunnableHeadStore:
             selected_hosts=len(pairs),
             refreshed_hosts=refreshed_hosts,
             remaining_hosts=int(remaining_hosts or 0),
+            elapsed_ms=round((time.perf_counter() - started) * 1000, 1),
         )
+
+    def _refresh_pairs_in_tx(
+        self,
+        cur,
+        pairs: list[tuple[str, str]],
+        *,
+        refreshed_at: float,
+    ) -> int:
+        """Refresh host-head rows in queue-level batches."""
+        normalized_pairs = sorted(
+            {
+                (self._normalize_physical_queue(physical_queue), host)
+                for physical_queue, host in pairs
+                if host
+            }
+        )
+        if not normalized_pairs:
+            return 0
+
+        refreshed = 0
+        for physical_queue in self._normalized_surface_queues(
+            runnable_surface=None,
+            physical_queues=[physical_queue for physical_queue, _host in normalized_pairs],
+        ):
+            queue_pairs = [
+                (physical_queue, host)
+                for pair_physical_queue, host in normalized_pairs
+                if pair_physical_queue == physical_queue
+            ]
+            if not queue_pairs:
+                continue
+            queue_table, latency_penalty, runnable_at, execution_tier = self._head_sql(
+                physical_queue=physical_queue
+            )
+            upserted = psycopg2.extras.execute_values(
+                cur,
+                f"""WITH dirty(physical_queue, host, refreshed_at) AS (VALUES %s),
+                    candidate_rows AS (
+                        SELECT
+                            dirty.physical_queue,
+                            dirty.refreshed_at,
+                            candidate.host,
+                            candidate.url,
+                            candidate.next_fetch_at,
+                            candidate.added_at,
+                            candidate.scheduler_score,
+                            COUNT(*) OVER (PARTITION BY dirty.physical_queue, candidate.host)
+                                AS runnable_url_count,
+                            {execution_tier} AS execution_tier,
+                            {latency_penalty} AS latency_penalty,
+                            {runnable_at} AS runnable_at
+                        FROM dirty
+                        JOIN {queue_table} AS candidate
+                            ON candidate.host = dirty.host
+                        LEFT JOIN host_state AS candidate_host_state
+                            ON candidate_host_state.host_key = candidate.host
+                        LEFT JOIN host_ledger AS candidate_host_ledger
+                            ON candidate_host_ledger.host = candidate.host
+                    ),
+                    selected AS (
+                        SELECT DISTINCT ON (physical_queue, host)
+                            physical_queue,
+                            refreshed_at,
+                            host,
+                            url,
+                            next_fetch_at,
+                            added_at,
+                            scheduler_score,
+                            runnable_url_count,
+                            execution_tier,
+                            latency_penalty,
+                            runnable_at
+                        FROM candidate_rows
+                        ORDER BY
+                            physical_queue,
+                            host,
+                            refreshed_at,
+                            execution_tier ASC,
+                            runnable_at ASC,
+                            latency_penalty ASC,
+                            added_at ASC,
+                            scheduler_score DESC,
+                            url ASC
+                    )
+                    INSERT INTO {self._table_name} (
+                        physical_queue,
+                        host,
+                        head_url,
+                        head_next_fetch_at,
+                        head_added_at,
+                        head_scheduler_score,
+                        runnable_url_count,
+                        execution_tier,
+                        latency_penalty,
+                        runnable_at,
+                        refreshed_at
+                    )
+                    SELECT
+                        physical_queue,
+                        host,
+                        url,
+                        next_fetch_at,
+                        added_at,
+                        scheduler_score,
+                        runnable_url_count,
+                        execution_tier,
+                        latency_penalty,
+                        runnable_at,
+                        refreshed_at
+                    FROM selected
+                    ON CONFLICT (physical_queue, host) DO UPDATE SET
+                        head_url = EXCLUDED.head_url,
+                        head_next_fetch_at = EXCLUDED.head_next_fetch_at,
+                        head_added_at = EXCLUDED.head_added_at,
+                        head_scheduler_score = EXCLUDED.head_scheduler_score,
+                        runnable_url_count = EXCLUDED.runnable_url_count,
+                        execution_tier = EXCLUDED.execution_tier,
+                        latency_penalty = EXCLUDED.latency_penalty,
+                        runnable_at = EXCLUDED.runnable_at,
+                        refreshed_at = EXCLUDED.refreshed_at
+                    RETURNING host""",
+                [(physical_queue, host, refreshed_at) for physical_queue, host in queue_pairs],
+                template="(%s, %s, %s)",
+                page_size=500,
+                fetch=True,
+            )
+            refreshed += len(upserted)
+            psycopg2.extras.execute_values(
+                cur,
+                f"""WITH dirty(physical_queue, host) AS (VALUES %s)
+                    DELETE FROM {self._table_name} AS heads
+                    USING dirty
+                    WHERE heads.physical_queue = dirty.physical_queue
+                      AND heads.host = dirty.host
+                      AND NOT EXISTS (
+                          SELECT 1
+                          FROM {queue_table} AS candidate
+                          WHERE candidate.host = dirty.host
+                      )""",
+                queue_pairs,
+                template="(%s, %s)",
+                page_size=500,
+            )
+        return refreshed
 
     def _rebuild_queue(self, cur, *, physical_queue: str, refreshed_at: float) -> int:
         normalized_physical_queue = self._normalize_physical_queue(physical_queue)
