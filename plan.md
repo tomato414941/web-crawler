@@ -21,6 +21,9 @@ moving closer to the crawler concepts:
   - `url_ledger.discovery_value` records how valuable a URL is to discover.
   - scheduler queues use `scheduler_score` for execution ordering.
   - `host_runnable_heads.head_scheduler_score` reflects the derived head row ordering.
+- Moved scheduler admission projection into `SchedulerMembershipStore`:
+  - `UrlLedger` still reads and updates durable URL rows.
+  - scheduler membership now owns queue-row projection and queue replacement.
 - Preserved existing public scheduler telemetry methods and runtime payload behavior.
 
 ## Verification
@@ -29,6 +32,7 @@ moving closer to the crawler concepts:
 - `UrlLedger` no longer computes retry backoff, retry score decay, or terminal/retry failure
   transitions inline.
 - Retry failure decay changes queue `scheduler_score`; it no longer rewrites URL discovery value.
+- Admission projection now uses membership-store APIs instead of ledger-local queue projection helpers.
 - Existing tests covering scheduler stats, lease diagnostics, retry transitions, and runtime stats pass.
 - No production speed change was required for this slice.
 
@@ -36,5 +40,5 @@ moving closer to the crawler concepts:
 
 - Keep `host_runnable_heads` as a derived read model, but consider moving ranking policy out of the
   read-model store.
-- Continue separating discovery/admission from live scheduler membership.
+- Continue reducing `UrlLedger` facade breadth around requeue, lease, and host-head operations.
 - Keep detailed speed investigation separate from this design-simplification milestone.

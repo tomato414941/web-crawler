@@ -34,6 +34,8 @@ from .scheduler_membership import (
     SCHEDULER_SURFACE_RUNNABLE,
     SCHEDULER_SURFACE_SCHEDULED,
     SchedulerMembershipStore,
+    SchedulerQueueRow,
+    SchedulerQueueRowInput,
 )
 from .scheduler_observability import SchedulerObservability, SchedulerReadiness
 from .scheduler_quarantine import SchedulerQuarantine
@@ -280,6 +282,7 @@ class UrlLedger:
             normalized_surface_queues=self._normalized_surface_queues,
             latency_penalty_sql=self._latency_penalty_sql,
         )
+        self._membership.attach_host_heads(self._host_heads)
         self._lease_telemetry = HostFirstLeaseTelemetry()
         self._observability = SchedulerObservability(
             conn,
@@ -442,12 +445,9 @@ class UrlLedger:
         self,
         rows: list[tuple[str, str, float, float, float]],
         physical_queue: str,
-    ) -> list[tuple[str, str, float, float, float, str]]:
+    ) -> list[SchedulerQueueRow]:
         """Project ledger rows into one pending physical queue."""
-        return [
-            (url, host, scheduler_score, next_fetch_at, added_at, physical_queue)
-            for url, host, scheduler_score, next_fetch_at, added_at in rows
-        ]
+        return self._membership.rows_for_physical_queue(rows, physical_queue)
 
     def _normalize_intent(self, intent: str | None) -> str | None:
         """Return a normalized scheduling intent when present."""
@@ -592,7 +592,7 @@ class UrlLedger:
                     physical_queue,
                 ) in rows
             ]
-            self._replace_pending_queue_rows(cur, pending_rows)
+            self._membership.replace_pending_rows(cur, pending_rows)
             return len(rows)
 
     def _assert_current_schema(self) -> None:
@@ -1058,46 +1058,9 @@ class UrlLedger:
             return PHYSICAL_QUEUE_TABLES[self._normalize_physical_queue(physical_queue)]
         return self._membership.queue_table_sql(physical_queue)
 
-    def _queue_head_pairs_for_urls(self, cur, urls: list[str]) -> list[tuple[str, str]]:
-        """Return affected read-model queue/host pairs before queue rows are mutated."""
-        normalized_urls = sorted({normalize_url(url) for url in urls if url})
-        if not normalized_urls:
-            return []
-
-        pairs: list[tuple[str, str]] = []
-        for physical_queue in self._physical_queues():
-            cur.execute(
-                f"""SELECT DISTINCT host
-                    FROM {self._queue_table_sql(physical_queue)}
-                    WHERE url = ANY(%s)""",
-                (normalized_urls,),
-            )
-            pairs.extend((physical_queue, host) for (host,) in cur.fetchall())
-        cur.execute(
-            f"""SELECT DISTINCT physical_queue, host
-                FROM {HOST_RUNNABLE_HEADS_TABLE}
-                WHERE head_url = ANY(%s)""",
-            (normalized_urls,),
-        )
-        pairs.extend(
-            (self._normalize_physical_queue(physical_queue), host)
-            for physical_queue, host in cur.fetchall()
-        )
-        return pairs
-
-    def _refresh_host_runnable_heads_for_pairs(
-        self,
-        cur,
-        pairs: list[tuple[str, str]],
-    ) -> None:
-        """Refresh the host-first read model for changed queue/host pairs."""
-        self._host_heads.refresh_hosts_in_tx(cur, pairs)
-
     def _delete_queue_entries(self, cur, urls: list[str]) -> None:
         """Remove URLs from all physical scheduler queue tables."""
-        affected_pairs = self._queue_head_pairs_for_urls(cur, urls)
         self._membership.delete_queue_entries(cur, urls)
-        self._refresh_host_runnable_heads_for_pairs(cur, affected_pairs)
 
     def _delete_host_runnable_head_candidate(self, *, physical_queue: str, url: str) -> None:
         """Drop a stale read-model candidate after source-of-truth revalidation misses."""
@@ -1106,11 +1069,10 @@ class UrlLedger:
     def _insert_pending_queue_rows(
         self,
         cur,
-        rows: list[tuple[str, str, float, float, float, str]],
+        rows: list[SchedulerQueueRowInput],
     ) -> None:
         """Insert scheduler-pending rows into the appropriate physical queue tables."""
         self._membership.insert_pending_rows(cur, rows)
-        self._host_heads.upsert_candidates_in_tx(cur, rows)
 
     def _insert_blocked_host_backoff_rows(
         self,
@@ -1192,71 +1154,34 @@ class UrlLedger:
             page_size=200,
         )
 
-    def _replace_pending_queue_rows(
+    def _admission_physical_queue_by_url(
         self,
-        cur,
-        rows: list[tuple[str, str, float, float, float, str]],
-    ) -> None:
-        """Replace physical pending queue rows using returned scheduler state."""
-        normalized_urls = sorted({normalize_url(url) for url, *_ in rows if url})
-        if not normalized_urls:
-            return
-        self._delete_queue_entries(cur, normalized_urls)
-        self._insert_pending_queue_rows(cur, rows)
-
-    def _project_pending_queue_rows(
-        self,
-        rows: list[tuple[object, ...]],
-    ) -> list[tuple[str, str, float, float, float, str]]:
-        """Project URL ledger rows into the queue-table row shape."""
-        projected: list[tuple[str, str, float, float, float, str]] = []
-        for row in rows:
-            if len(row) == 6:
-                projected.append(row)  # type: ignore[arg-type]
-                continue
-            if len(row) >= 8:
-                projected.append((row[0], row[1], row[2], row[3], row[4], row[5]))  # type: ignore[arg-type]
-                continue
-            raise ValueError(f"unexpected url ledger row shape: {len(row)}")
-        return projected
-
-    def _fetch_pending_rows_for_tasks(
-        self,
-        cur,
         tasks: list[CrawlTask],
-    ) -> list[tuple[str, str, float, float, float, str]]:
-        """Load queue-table rows for known ledger URLs using admission tasks."""
-        prepared_tasks = self._prepare_tasks(tasks)
-        normalized_urls = sorted({task.url for task in prepared_tasks if task.url})
-        if not normalized_urls:
-            return []
-        physical_queue_by_url = {
-            url: self._physical_queue_for_model(
+    ) -> dict[str, str]:
+        return {
+            task.url: self._physical_queue_for_model(
                 runnable_surface=task.runnable_surface,
                 intent=task.intent,
             )
-            for url, task in ((task.url, task) for task in prepared_tasks)
+            for task in tasks
         }
+
+    def _fetch_admission_ledger_rows_for_tasks(
+        self,
+        cur,
+        tasks: list[CrawlTask],
+    ) -> list[tuple[str, str, float, float, float]]:
+        """Load known ledger rows used by scheduler admission."""
+        normalized_urls = sorted({task.url for task in tasks if task.url})
+        if not normalized_urls:
+            return []
         cur.execute(
             f"""SELECT url, host, discovery_value, next_fetch_at, added_at
                 FROM {URL_LEDGER_TABLE}
                 WHERE url = ANY(%s)""",
             (normalized_urls,),
         )
-        pending_rows: list[tuple[str, str, float, float, float, str]] = []
-        for url, host, discovery_value, next_fetch_at, added_at in cur.fetchall():
-            physical_queue = physical_queue_by_url.get(url, self._default_scheduled_physical_queue())
-            pending_rows.append(
-                (
-                    url,
-                    host,
-                    discovery_value,
-                    next_fetch_at,
-                    added_at,
-                    self._normalize_physical_queue(physical_queue),
-                )
-            )
-        return pending_rows
+        return list(cur.fetchall())
 
     def _new_host_counts_for_tasks(self, cur, tasks: list[CrawlTask]) -> Counter[str]:
         """Return per-host counts for task URLs that are not already known."""
@@ -1324,8 +1249,8 @@ class UrlLedger:
                 (url, host, discovery_value, next_fetch_at, added_at, normalized_physical_queue)
                 for url, host, discovery_value, next_fetch_at, added_at in rows
             ]
-            self._replace_pending_queue_rows(cur, pending_rows)
-            self._delete_active_leases(cur, [row[0] for row in pending_rows])
+            self._membership.replace_pending_rows(cur, pending_rows)
+            self._delete_active_leases(cur, self._membership.row_urls(pending_rows))
             count = len(pending_rows)
 
         self._conn.commit()
@@ -1427,9 +1352,14 @@ class UrlLedger:
         try:
             with self._conn.cursor() as cur:
                 self._update_task_intents(cur, prepared_tasks)
-                pending_rows = self._fetch_pending_rows_for_tasks(cur, prepared_tasks)
-                self._replace_pending_queue_rows(cur, pending_rows)
-                self._delete_active_leases(cur, [row[0] for row in pending_rows])
+                ledger_rows = self._fetch_admission_ledger_rows_for_tasks(cur, prepared_tasks)
+                pending_rows = self._membership.rows_for_ledger_rows(
+                    ledger_rows,
+                    physical_queue_by_url=self._admission_physical_queue_by_url(prepared_tasks),
+                    default_physical_queue=self._default_scheduled_physical_queue(),
+                )
+                self._membership.replace_pending_rows(cur, pending_rows)
+                self._delete_active_leases(cur, self._membership.row_urls(pending_rows))
                 count = len(pending_rows)
         except Exception:
             self._conn.rollback()
@@ -1530,11 +1460,11 @@ class UrlLedger:
                             WHERE url = ANY(%s)""",
                         (resolved_intent, [row[0] for row in candidate_rows]),
                     )
-                pending_rows = [
-                    (url, host, discovery_value, next_fetch_at, added_at, normalized_physical_queue)
-                    for url, host, discovery_value, next_fetch_at, added_at in candidate_rows
-                ]
-                self._replace_pending_queue_rows(cur, pending_rows)
+                pending_rows = self._membership.rows_for_physical_queue(
+                    candidate_rows,
+                    normalized_physical_queue,
+                )
+                self._membership.replace_pending_rows(cur, pending_rows)
                 count = len(pending_rows)
         except Exception:
             self._conn.rollback()
@@ -2182,8 +2112,8 @@ class UrlLedger:
                     rows,
                     self._single_physical_queue_for_surface(SCHEDULER_SURFACE_SCHEDULED),
                 )
-                self._replace_pending_queue_rows(cur, pending_rows)
-                self._delete_active_leases(cur, [row[0] for row in pending_rows])
+                self._membership.replace_pending_rows(cur, pending_rows)
+                self._delete_active_leases(cur, self._membership.row_urls(pending_rows))
                 updated = bool(rows)
             else:
                 cur.execute(
@@ -2235,8 +2165,8 @@ class UrlLedger:
                 rows,
                 self._single_physical_queue_for_surface(SCHEDULER_SURFACE_SCHEDULED),
             )
-            self._replace_pending_queue_rows(cur, pending_rows)
-            self._delete_active_leases(cur, [row[0] for row in pending_rows])
+            self._membership.replace_pending_rows(cur, pending_rows)
+            self._delete_active_leases(cur, self._membership.row_urls(pending_rows))
             count = len(pending_rows)
         self._conn.commit()
         return count
@@ -2351,7 +2281,7 @@ class UrlLedger:
                 rows,
                 self._single_physical_queue_for_surface(SCHEDULER_SURFACE_SCHEDULED),
             )
-            self._replace_pending_queue_rows(cur, pending_rows)
+            self._membership.replace_pending_rows(cur, pending_rows)
             count = len(rows)
         self._conn.commit()
         return count
@@ -2414,8 +2344,8 @@ class UrlLedger:
                 cur.fetchall(),
                 self._single_physical_queue_for_surface(SCHEDULER_SURFACE_RUNNABLE),
             )
-            self._delete_queue_entries(cur, [row[0] for row in rows])
-            self._insert_pending_queue_rows(cur, rows)
+            self._membership.delete_queue_entries(cur, self._membership.row_urls(rows))
+            self._membership.insert_pending_rows(cur, rows)
             count = len(rows)
 
         self._conn.commit()
@@ -2478,8 +2408,8 @@ class UrlLedger:
                 ledger_rows,
                 self._single_physical_queue_for_surface(SCHEDULER_SURFACE_RUNNABLE),
             )
-            self._replace_pending_queue_rows(cur, pending_rows)
-            self._delete_active_leases(cur, [row[0] for row in pending_rows])
+            self._membership.replace_pending_rows(cur, pending_rows)
+            self._delete_active_leases(cur, self._membership.row_urls(pending_rows))
             affected = len(ledger_rows)
         self._conn.commit()
         return affected

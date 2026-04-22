@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 import psycopg2.extras
 
 from .urls import normalize_url, url_branch_key
@@ -48,6 +50,29 @@ PHYSICAL_QUEUE_DEFAULT_SCHEDULER_SURFACE = {
 }
 
 
+@dataclass(frozen=True)
+class SchedulerQueueRow:
+    url: str
+    host: str
+    scheduler_score: float
+    next_fetch_at: float
+    added_at: float
+    physical_queue: str
+
+    def as_tuple(self) -> tuple[str, str, float, float, float, str]:
+        return (
+            self.url,
+            self.host,
+            self.scheduler_score,
+            self.next_fetch_at,
+            self.added_at,
+            self.physical_queue,
+        )
+
+
+SchedulerQueueRowInput = SchedulerQueueRow | tuple[str, str, float, float, float, str]
+
+
 class SchedulerMembershipStore:
     """Owns live scheduler queue membership rows."""
 
@@ -61,6 +86,10 @@ class SchedulerMembershipStore:
         self._conn = conn
         self._blocked_queue_table = blocked_queue_table
         self._host_runnable_heads_table = host_runnable_heads_table
+        self._host_heads = None
+
+    def attach_host_heads(self, host_heads) -> None:
+        self._host_heads = host_heads
 
     def physical_queues(self) -> list[str]:
         return list(PHYSICAL_QUEUE_ORDER)
@@ -113,9 +142,99 @@ class SchedulerMembershipStore:
     def queue_table_sql(self, physical_queue: str) -> str:
         return PHYSICAL_QUEUE_TABLES[self.normalize_physical_queue(physical_queue)]
 
+    def _row_tuple(
+        self, row: SchedulerQueueRowInput
+    ) -> tuple[str, str, float, float, float, str]:
+        if isinstance(row, SchedulerQueueRow):
+            return row.as_tuple()
+        return row
+
+    def _row_tuples(
+        self, rows: list[SchedulerQueueRowInput]
+    ) -> list[tuple[str, str, float, float, float, str]]:
+        return [self._row_tuple(row) for row in rows]
+
+    def row_urls(self, rows: list[SchedulerQueueRowInput]) -> list[str]:
+        return [url for url, *_rest in self._row_tuples(rows)]
+
+    def rows_for_physical_queue(
+        self,
+        rows: list[tuple[str, str, float, float, float]],
+        physical_queue: str,
+    ) -> list[SchedulerQueueRow]:
+        return [
+            SchedulerQueueRow(
+                url=url,
+                host=host,
+                scheduler_score=scheduler_score,
+                next_fetch_at=next_fetch_at,
+                added_at=added_at,
+                physical_queue=physical_queue,
+            )
+            for url, host, scheduler_score, next_fetch_at, added_at in rows
+        ]
+
+    def rows_for_ledger_rows(
+        self,
+        rows: list[tuple[str, str, float, float, float]],
+        *,
+        physical_queue_by_url: dict[str, str],
+        default_physical_queue: str,
+    ) -> list[SchedulerQueueRow]:
+        projected: list[SchedulerQueueRow] = []
+        for url, host, discovery_value, next_fetch_at, added_at in rows:
+            physical_queue = physical_queue_by_url.get(url, default_physical_queue)
+            projected.append(
+                SchedulerQueueRow(
+                    url=url,
+                    host=host,
+                    scheduler_score=discovery_value,
+                    next_fetch_at=next_fetch_at,
+                    added_at=added_at,
+                    physical_queue=self.normalize_physical_queue(physical_queue),
+                )
+            )
+        return projected
+
+    def queue_head_pairs_for_urls(self, cur, urls: list[str]) -> list[tuple[str, str]]:
+        normalized_urls = sorted({normalize_url(url) for url in urls if url})
+        if not normalized_urls:
+            return []
+
+        pairs: list[tuple[str, str]] = []
+        for physical_queue in self.physical_queues():
+            cur.execute(
+                f"""SELECT DISTINCT host
+                    FROM {self.queue_table_sql(physical_queue)}
+                    WHERE url = ANY(%s)""",
+                (normalized_urls,),
+            )
+            pairs.extend((physical_queue, host) for (host,) in cur.fetchall())
+        cur.execute(
+            f"""SELECT DISTINCT physical_queue, host
+                FROM {self._host_runnable_heads_table}
+                WHERE head_url = ANY(%s)""",
+            (normalized_urls,),
+        )
+        pairs.extend(
+            (self.normalize_physical_queue(physical_queue), host)
+            for physical_queue, host in cur.fetchall()
+        )
+        return pairs
+
+    def refresh_host_heads_for_pairs(
+        self,
+        cur,
+        pairs: list[tuple[str, str]],
+    ) -> None:
+        if self._host_heads is None:
+            return
+        self._host_heads.refresh_hosts_in_tx(cur, pairs)
+
     def delete_queue_entries(self, cur, urls: list[str]) -> None:
         if not urls:
             return
+        affected_pairs = self.queue_head_pairs_for_urls(cur, urls)
         for table_name in QUEUE_TABLES:
             cur.execute(f"DELETE FROM {table_name} WHERE url = ANY(%s)", (urls,))
         cur.execute(f"DELETE FROM {self._blocked_queue_table} WHERE url = ANY(%s)", (urls,))
@@ -123,16 +242,18 @@ class SchedulerMembershipStore:
             f"DELETE FROM {self._host_runnable_heads_table} WHERE head_url = ANY(%s)",
             (urls,),
         )
+        self.refresh_host_heads_for_pairs(cur, affected_pairs)
 
     def insert_pending_rows(
         self,
         cur,
-        rows: list[tuple[str, str, float, float, float, str]],
+        rows: list[SchedulerQueueRowInput],
     ) -> None:
+        row_tuples = self._row_tuples(rows)
         grouped: dict[str, list[tuple[str, str, float, float, float, str]]] = {
             physical_queue: [] for physical_queue in PHYSICAL_QUEUE_NAMES
         }
-        for url, host, scheduler_score, next_fetch_at, added_at, physical_queue in rows:
+        for url, host, scheduler_score, next_fetch_at, added_at, physical_queue in row_tuples:
             normalized_url = normalize_url(url)
             grouped[self.normalize_physical_queue(physical_queue)].append(
                 (
@@ -162,14 +283,17 @@ class SchedulerMembershipStore:
                 pending_rows,
                 page_size=200,
             )
+        if self._host_heads is not None:
+            self._host_heads.upsert_candidates_in_tx(cur, row_tuples)
 
     def replace_pending_rows(
         self,
         cur,
-        rows: list[tuple[str, str, float, float, float, str]],
+        rows: list[SchedulerQueueRowInput],
     ) -> None:
-        normalized_urls = sorted({normalize_url(url) for url, *_ in rows if url})
+        row_tuples = self._row_tuples(rows)
+        normalized_urls = sorted({normalize_url(url) for url, *_ in row_tuples if url})
         if not normalized_urls:
             return
         self.delete_queue_entries(cur, normalized_urls)
-        self.insert_pending_rows(cur, rows)
+        self.insert_pending_rows(cur, row_tuples)
