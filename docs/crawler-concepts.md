@@ -67,6 +67,12 @@ The scheduler primarily wants to know:
 
 In this sense, the scheduler's first-class unit leans more toward host/site than raw URL.
 
+`host runnable capability` and `host runnable head` are related but not the same concept.
+Capability describes whether a host/site can produce useful work now, and roughly how much work it
+can offer. A head is the representative next URL selected from that host/site. Both are runtime
+execution read-model concepts; neither replaces scheduler membership as the source of truth for
+which URLs are live.
+
 Runtime implementations may keep physical queue projections, worker lanes, or operator-facing
 views. Those are execution details below this concept. The abstract rule is that normal crawling
 should be driven by host/site runnable capability rather than by a raw URL queue.

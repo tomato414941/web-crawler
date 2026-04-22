@@ -1,10 +1,11 @@
 # web-crawler plan
 
-## Current milestone: harden crawl pipeline boundaries
+## Current milestone: harden crawl pipeline and read-model boundaries
 
 The crawler is now past the migration cleanup and host-first read-model deployment work. Speed is
 not the immediate focus for this slice. The current focus is to prevent another silent pipeline
-stall by making crawl pipeline stages explicit, observable, and testable:
+stall and read-model responsibility creep by making crawl pipeline stages and host runnable
+read-model boundaries explicit, observable, and testable:
 
 - `CrawlerEngine` should orchestrate stages, not own every stage policy.
 - Pipeline queues should be bounded and owned by a dedicated runtime object.
@@ -14,6 +15,9 @@ stall by making crawl pipeline stages explicit, observable, and testable:
 - Stage liveness should be visible in runtime stats.
 - Stage workers should survive item-level errors and record failures.
 - Finalizer bottlenecks should be explained by operation-level timing, not guessed from queue depth.
+- Host runnable capability and host runnable head should be documented as related but separate
+  runtime execution concepts.
+- `host_runnable_heads` should remain a derived read model, not a second durable source of truth.
 
 ## Completed in this slice
 
@@ -51,6 +55,13 @@ stall by making crawl pipeline stages explicit, observable, and testable:
 - Added dirty host-head refresh tests and runtime payload coverage.
 - Added a separate dirty-refresh limit and elapsed-time telemetry.
 - Preserved existing public scheduler telemetry methods and runtime payload behavior.
+- Clarified crawler concepts so host runnable capability means whether a host can produce work and
+  roughly how much, while host runnable head means the representative next URL for that host.
+- Clarified scheduler execution docs so `runnable_url_count` is an ordering/readiness signal, not an
+  exact source-of-truth count.
+- Moved host runnable-head ranking and runnable-time SQL policy into `HostRunnableHeadPolicy`.
+- Added `HostRunnableHeadMaintenance` as the named maintenance facade for rebuild, dirty refresh,
+  repair, and stale-candidate deletion without changing schema or external callers.
 
 ## Verification
 
@@ -73,13 +84,20 @@ stall by making crawl pipeline stages explicit, observable, and testable:
   `remaining_hosts` shows whether dirty refresh is keeping up.
 - Pipeline boundaries are documented in `docs/system-architecture.md` and
   `docs/system-architecture.ja.md`.
+- Host runnable capability/head boundaries are documented in `docs/crawler-concepts.md` and
+  `docs/crawler-concepts.ja.md`.
+- Host runnable-head execution semantics are aligned in `docs/scheduler-execution.md` and
+  `docs/scheduler-execution.ja.md`.
+- `HostRunnableHeadStore` still owns the public API and SQL primitives, but ranking policy and
+  maintenance responsibility now have explicit names.
+- No schema migration or caller migration was required for this slice.
 - Existing tests covering scheduler stats, lease diagnostics, retry transitions, and runtime stats pass.
 - No production speed change was required for this slice.
 
 ## Next candidates
 
-- Keep `host_runnable_heads` as a derived read model, but consider moving ranking policy out of the
-  read-model store.
+- If `HostRunnableHeadStore` grows again, split actual maintenance SQL into a dedicated module while
+  preserving the current public API.
 - Continue reducing `UrlLedger` facade breadth around requeue, lease selection, and host-head
   operations.
 - Continue slimming `CrawlerEngine` by extracting reusable fetch failure classification if it starts

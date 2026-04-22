@@ -112,6 +112,19 @@ Implemented order:
 The host runnable-head projection is a runtime read model. It summarizes which hosts currently have
 executable work and enough host capacity. It is not a second source of truth for URL membership.
 
+The current `host_runnable_heads` table is intentionally transitional: it stores the representative
+head URL together with host capability signals such as execution tier, runnable time, latency bucket,
+and runnable URL count. Those capability fields are scheduler signals, not durable facts.
+`runnable_url_count` should therefore be treated as an ordering/readiness signal rather than an
+exact source-of-truth count.
+
+Conceptually:
+
+- host runnable capability answers whether a host can produce work and roughly how much it can offer
+- host runnable head answers which URL should represent that host next
+- scheduler queues remain the source of truth for URL membership
+- active leases remain the source of truth for in-flight execution
+
 The lease path therefore uses a cheap-miss pattern:
 
 - read candidate host heads from `host_runnable_heads`
@@ -119,7 +132,9 @@ The lease path therefore uses a cheap-miss pattern:
 - delete and host-locally refresh stale read-model candidates after a miss
 - use a bounded queue scan only as a safety fallback when the read model is empty or unavailable
 
-The read model is maintained incrementally by queue insert/delete/lease/finalize paths. A global
-rebuild remains a manual repair mechanism, not normal crawler startup behavior. If production still
-shows frequent fallback after this switch, the next step should be to find the mutation path that is
-not refreshing its affected host, not to reintroduce a global rebuild.
+The read model is maintained incrementally by queue insert/delete/lease/finalize paths. Dirty
+refresh, repair, and rebuild are maintenance mechanisms for projection health; they are not the
+normal execution path. A global rebuild remains a manual repair mechanism, not normal crawler
+startup behavior. If production shows frequent fallback after this switch, the next step should be
+to find the mutation path that is not refreshing its affected host, not to reintroduce a global
+rebuild.

@@ -89,18 +89,41 @@ execution の変更では、次の制約を守る。
 - 通常実行 strategy は host-first breadth を維持する
 - `refresh` は通常クロールとは分ける
 - `normal` は durable URL state ではなく runtime-facing view として扱う
-- current query shape を十分安くできない場合までは schema migration を急がない
+- hot path の global scan を避けられるなら、小さな schema migration は許容する
 
-## Next Implementation Direction
+## Implementation Direction
 
-次の実装では、新しい durable projection を入れる前に、既存の host-first path を最適化する。
+現在の実装方針は、queue membership を scheduler の正本として維持しつつ、通常 host-first
+candidate selection を incremental な loose read model に寄せることである。
 
-推奨順序:
+実装済みの順序:
 
 1. host-first candidate selection の correlated `host_state` subquery を single join に置き換える
-2. crawler session または該当 hot-path query で PostgreSQL JIT を無効化するか検証する
-3. `COUNT(*) OVER (PARTITION BY host)` が production scale でまだ重いか再確認する
-4. それでも lease ごとの scan が重い場合、host runnable capability projection を設計する
+2. PostgreSQL JIT や query shape の影響を production で測る
+3. `COUNT(*) OVER (PARTITION BY host)` が production scale で重いことを確認する
+4. loose な host runnable-head projection を追加する
+5. host runnable-head read model を通常 host-first lease candidate source として使う
+6. crawl-cycle start の global rebuild を通常経路から外す
+7. queue membership 変更時は、影響を受けた `(physical_queue, host)` の head だけを更新する
 
-host runnable capability projection を作る場合、それは runtime read model である。
-URL membership の第二の正本にしてはいけない。
+`host_runnable_heads` は runtime read model である。現在の table は過渡的に、代表 URL
+である head と、execution tier、runnable time、latency bucket、runnable URL count といった
+host capability signal を同居させている。これらの capability field は durable fact ではない。
+特に `runnable_url_count` は厳密な正本 count ではなく、ordering/readiness 用の signal として扱う。
+
+概念上は次のように分ける。
+
+- host runnable capability: host が work を出せるか、どれくらい work を持つか
+- host runnable head: その host を代表して次に出す URL
+- scheduler queue: URL membership の正本
+- active lease: in-flight execution の正本
+
+lease path は cheap-miss pattern を使う。
+
+- `host_runnable_heads` から candidate host head を読む
+- queue membership、active lease、`host_state` で candidate を再検証する
+- stale candidate は削除し、その host の head を局所的に refresh する
+- read model が空または利用不能な場合だけ bounded queue scan を safety fallback として使う
+
+dirty refresh、repair、rebuild は read model maintenance であり、通常実行の中心ではない。
+global rebuild は manual repair mechanism として残すが、crawler startup の通常動作にはしない。
