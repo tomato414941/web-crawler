@@ -29,7 +29,7 @@ from .scheduler_membership import (
     QUEUE_SCHEDULED,
     QUEUE_TABLES,
     SCHEDULER_SURFACE_NORMAL,
-    SCHEDULER_SURFACE_PRIORITY,
+    SCHEDULER_SURFACE_URGENCY,
     SCHEDULER_SURFACE_REFRESH,
     SCHEDULER_SURFACE_RUNNABLE,
     SCHEDULER_SURFACE_SCHEDULED,
@@ -62,7 +62,7 @@ LATENCY_BUCKET_VERY_SLOW_MS = 1000.0
 URL_LEDGER_REQUIRED_COLUMNS = {
     "url",
     "host",
-    "priority",
+    "discovery_value",
     "source_url",
     "added_at",
     "next_fetch_at",
@@ -77,7 +77,7 @@ BLOCKED_HOST_BACKOFF_TABLE = "scheduler_queue_retry_quarantine"
 QUEUE_REQUIRED_COLUMNS = {
     "url",
     "host",
-    "priority",
+    "scheduler_score",
     "next_fetch_at",
     "added_at",
     "branch_key",
@@ -97,7 +97,7 @@ HOST_RUNNABLE_HEADS_REQUIRED_COLUMNS = {
     "head_url",
     "head_next_fetch_at",
     "head_added_at",
-    "head_priority",
+    "head_scheduler_score",
     "runnable_url_count",
     "execution_tier",
     "latency_penalty",
@@ -108,7 +108,7 @@ BLOCKED_QUEUE_REQUIRED_COLUMNS = {
     "url",
     "host",
     "physical_queue",
-    "priority",
+    "scheduler_score",
     "next_fetch_at",
     "added_at",
     "quarantined_at",
@@ -158,7 +158,8 @@ class CrawlTask:
     """A URL to crawl with metadata."""
 
     url: str
-    priority: float = 1.0
+    discovery_value: float = 1.0
+    scheduler_score: float = 1.0
     runnable_surface: str | None = None
     intent: str | None = None
     source_url: str | None = None
@@ -170,8 +171,9 @@ class CrawlTask:
     def __init__(
         self,
         url: str,
-        priority: float = 1.0,
+        discovery_value: float = 1.0,
         *,
+        scheduler_score: float | None = None,
         runnable_surface: str | None = None,
         intent: str | None = None,
         source_url: str | None = None,
@@ -181,7 +183,8 @@ class CrawlTask:
         lease_expires_at: float | None = None,
     ):
         self.url = url
-        self.priority = priority
+        self.discovery_value = discovery_value
+        self.scheduler_score = discovery_value if scheduler_score is None else scheduler_score
         self.runnable_surface = runnable_surface
         self.intent = intent
         self.source_url = source_url
@@ -206,7 +209,7 @@ class RunnableHostHead:
     url: str
     next_fetch_at: float
     added_at: float
-    priority: float
+    scheduler_score: float
     latency_penalty: int
     host_pending_count: int
 
@@ -357,9 +360,13 @@ class UrlLedger:
         """Compute exponential retry backoff for a failed URL."""
         return self._scheduler_retry_policy().compute_backoff(fail_streak)
 
-    def _compute_retry_priority(self, priority: float, fail_streak: int) -> float:
-        """Lower retry priority so repeatedly failing URLs do not dominate the queue."""
-        return self._scheduler_retry_policy().compute_priority(priority, fail_streak)
+    def _compute_retry_scheduler_score(
+        self, discovery_value: float, fail_streak: int
+    ) -> float:
+        """Lower retry score so repeatedly failing URLs do not dominate the queue."""
+        return self._scheduler_retry_policy().compute_scheduler_score(
+            discovery_value, fail_streak
+        )
 
     def _scheduler_retry_policy(self) -> SchedulerRetryPolicy:
         policy = getattr(self, "_retry_policy", None)
@@ -438,8 +445,8 @@ class UrlLedger:
     ) -> list[tuple[str, str, float, float, float, str]]:
         """Project ledger rows into one pending physical queue."""
         return [
-            (url, host, priority, next_fetch_at, added_at, physical_queue)
-            for url, host, priority, next_fetch_at, added_at in rows
+            (url, host, scheduler_score, next_fetch_at, added_at, physical_queue)
+            for url, host, scheduler_score, next_fetch_at, added_at in rows
         ]
 
     def _normalize_intent(self, intent: str | None) -> str | None:
@@ -556,7 +563,8 @@ class UrlLedger:
                     )
                     SELECT ledger.url,
                            ledger.host,
-                           ledger.priority,
+                           ledger.discovery_value,
+                           ledger.fail_streak,
                            ledger.next_fetch_at,
                            ledger.added_at,
                            recovered.physical_queue
@@ -565,7 +573,26 @@ class UrlLedger:
                 params,
             )
             rows = cur.fetchall()
-            self._replace_pending_queue_rows(cur, self._project_pending_queue_rows(rows))
+            pending_rows = [
+                (
+                    url,
+                    host,
+                    self._compute_retry_scheduler_score(discovery_value, fail_streak),
+                    next_fetch_at,
+                    added_at,
+                    physical_queue,
+                )
+                for (
+                    url,
+                    host,
+                    discovery_value,
+                    fail_streak,
+                    next_fetch_at,
+                    added_at,
+                    physical_queue,
+                ) in rows
+            ]
+            self._replace_pending_queue_rows(cur, pending_rows)
             return len(rows)
 
     def _assert_current_schema(self) -> None:
@@ -642,8 +669,8 @@ class UrlLedger:
         current_surface = self._task_runnable_surface(current)
         candidate_surface = self._task_runnable_surface(candidate)
         if (
-            SCHEDULER_SURFACE_PRIORITY[current_surface]
-            <= SCHEDULER_SURFACE_PRIORITY[candidate_surface]
+            SCHEDULER_SURFACE_URGENCY[current_surface]
+            <= SCHEDULER_SURFACE_URGENCY[candidate_surface]
         ):
             return current_surface
         return candidate_surface
@@ -658,7 +685,8 @@ class UrlLedger:
         )
         return CrawlTask(
             url=current.url,
-            priority=max(current.priority, candidate.priority),
+            discovery_value=max(current.discovery_value, candidate.discovery_value),
+            scheduler_score=max(current.scheduler_score, candidate.scheduler_score),
             runnable_surface=merged_surface,
             intent=merged_intent,
             source_url=current.source_url or candidate.source_url,
@@ -676,7 +704,8 @@ class UrlLedger:
         ) or SCHEDULER_SURFACE_DEFAULT_INTENT.get(resolved_surface)
         return CrawlTask(
             url=normalized_url or task.url,
-            priority=task.priority,
+            discovery_value=task.discovery_value,
+            scheduler_score=task.scheduler_score,
             runnable_surface=resolved_surface,
             intent=resolved_intent,
             source_url=task.source_url,
@@ -726,7 +755,8 @@ class UrlLedger:
             prepared.append(
                 CrawlTask(
                     url=task.url,
-                    priority=task.priority,
+                    discovery_value=task.discovery_value,
+                    scheduler_score=task.scheduler_score,
                     runnable_surface=task.runnable_surface,
                     intent=task.intent,
                     source_url=task.source_url,
@@ -762,11 +792,11 @@ class UrlLedger:
                 f"{alias}.next_fetch_at ASC, "
                 f"{latency_penalty} ASC, "
                 f"{alias}.added_at ASC, "
-                f"{alias}.priority DESC"
+                f"{alias}.scheduler_score DESC"
             )
 
         return (
-            f"{alias}.priority DESC, "
+            f"{alias}.scheduler_score DESC, "
             f"{latency_penalty} ASC, "
             f"{alias}.next_fetch_at ASC, "
             f"{alias}.added_at ASC"
@@ -790,7 +820,7 @@ class UrlLedger:
             f"{alias}.next_fetch_at ASC, "
             f"{latency_penalty} ASC, "
             f"{alias}.added_at ASC, "
-            f"{alias}.priority DESC, "
+            f"{alias}.scheduler_score DESC, "
             f"{alias}.url ASC"
         )
 
@@ -814,7 +844,7 @@ class UrlLedger:
                          selected.url,
                          selected.next_fetch_at,
                          selected.added_at,
-                         selected.priority,
+                         selected.scheduler_score,
                          selected.latency_penalty,
                          selected.host_pending_count
                   FROM (
@@ -823,7 +853,7 @@ class UrlLedger:
                           candidate.url,
                           candidate.next_fetch_at,
                           candidate.added_at,
-                          candidate.priority,
+                          candidate.scheduler_score,
                           {latency_penalty} AS latency_penalty,
                           COUNT(*) OVER (PARTITION BY candidate.host) AS host_pending_count
                       FROM {table_name} AS candidate
@@ -836,7 +866,7 @@ class UrlLedger:
                       selected.latency_penalty ASC,
                       selected.next_fetch_at ASC,
                       selected.added_at ASC,
-                      selected.priority DESC,
+                      selected.scheduler_score DESC,
                       selected.url ASC"""
         return sql, runnable_sql.params
 
@@ -849,7 +879,7 @@ class UrlLedger:
             head.latency_penalty,
             head.next_fetch_at,
             head.added_at,
-            -head.priority,
+            -head.scheduler_score,
             head.url,
         )
 
@@ -893,7 +923,7 @@ class UrlLedger:
                         url=url,
                         next_fetch_at=next_fetch_at,
                         added_at=added_at,
-                        priority=priority,
+                        scheduler_score=scheduler_score,
                         latency_penalty=latency_penalty,
                         host_pending_count=host_pending_count,
                     )
@@ -902,7 +932,7 @@ class UrlLedger:
                         url,
                         next_fetch_at,
                         added_at,
-                        priority,
+                        scheduler_score,
                         latency_penalty,
                         host_pending_count,
                     ) in cur.fetchall()
@@ -1096,25 +1126,25 @@ class UrlLedger:
                 normalize_url(url),
                 host,
                 self._normalize_physical_queue(physical_queue),
-                priority,
+                scheduler_score,
                 next_fetch_at,
                 added_at,
                 now,
                 url_branch_key(normalize_url(url)),
             )
-            for url, host, priority, next_fetch_at, added_at, physical_queue in rows
+            for url, host, scheduler_score, next_fetch_at, added_at, physical_queue in rows
         ]
         if not blocked_rows:
             return
         psycopg2.extras.execute_values(
             cur,
             f"""INSERT INTO {BLOCKED_HOST_BACKOFF_TABLE}
-                    (url, host, physical_queue, priority, next_fetch_at, added_at, quarantined_at, branch_key)
+                    (url, host, physical_queue, scheduler_score, next_fetch_at, added_at, quarantined_at, branch_key)
                 VALUES %s
                 ON CONFLICT (url) DO UPDATE
                 SET host = EXCLUDED.host,
                     physical_queue = EXCLUDED.physical_queue,
-                    priority = EXCLUDED.priority,
+                    scheduler_score = EXCLUDED.scheduler_score,
                     next_fetch_at = EXCLUDED.next_fetch_at,
                     added_at = EXCLUDED.added_at,
                     quarantined_at = EXCLUDED.quarantined_at,
@@ -1208,19 +1238,19 @@ class UrlLedger:
             for url, task in ((task.url, task) for task in prepared_tasks)
         }
         cur.execute(
-            f"""SELECT url, host, priority, next_fetch_at, added_at
+            f"""SELECT url, host, discovery_value, next_fetch_at, added_at
                 FROM {URL_LEDGER_TABLE}
                 WHERE url = ANY(%s)""",
             (normalized_urls,),
         )
         pending_rows: list[tuple[str, str, float, float, float, str]] = []
-        for url, host, priority, next_fetch_at, added_at in cur.fetchall():
+        for url, host, discovery_value, next_fetch_at, added_at in cur.fetchall():
             physical_queue = physical_queue_by_url.get(url, self._default_scheduled_physical_queue())
             pending_rows.append(
                 (
                     url,
                     host,
-                    priority,
+                    discovery_value,
                     next_fetch_at,
                     added_at,
                     self._normalize_physical_queue(physical_queue),
@@ -1275,7 +1305,7 @@ class UrlLedger:
                             terminal_reason = NULL,
                             terminalized_at = NULL
                         WHERE url = ANY(%s)
-                        RETURNING url, host, priority, next_fetch_at, added_at""",
+                        RETURNING url, host, discovery_value, next_fetch_at, added_at""",
                     (scheduled_at, normalized_intent, normalized_urls),
                 )
             else:
@@ -1286,13 +1316,13 @@ class UrlLedger:
                             terminal_reason = NULL,
                             terminalized_at = NULL
                         WHERE url = ANY(%s)
-                        RETURNING url, host, priority, next_fetch_at, added_at""",
+                        RETURNING url, host, discovery_value, next_fetch_at, added_at""",
                     (scheduled_at, normalized_intent, normalized_urls),
                 )
             rows = cur.fetchall()
             pending_rows = [
-                (url, host, priority, next_fetch_at, added_at, normalized_physical_queue)
-                for url, host, priority, next_fetch_at, added_at in rows
+                (url, host, discovery_value, next_fetch_at, added_at, normalized_physical_queue)
+                for url, host, discovery_value, next_fetch_at, added_at in rows
             ]
             self._replace_pending_queue_rows(cur, pending_rows)
             self._delete_active_leases(cur, [row[0] for row in pending_rows])
@@ -1331,7 +1361,7 @@ class UrlLedger:
                 (
                     task.url,
                     host,
-                    task.priority,
+                    task.discovery_value,
                     task.source_url,
                     task.added_at,
                     next_fetch_at,
@@ -1345,17 +1375,17 @@ class UrlLedger:
                 psycopg2.extras.execute_values(
                     cur,
                     f"""INSERT INTO {URL_LEDGER_TABLE} (
-                           url, host, priority, source_url, added_at, next_fetch_at, current_intent
+                           url, host, discovery_value, source_url, added_at, next_fetch_at, current_intent
                        )
                        VALUES %s
                        ON CONFLICT (url) DO UPDATE SET
-                           priority = GREATEST({URL_LEDGER_TABLE}.priority, EXCLUDED.priority),
+                           discovery_value = GREATEST({URL_LEDGER_TABLE}.discovery_value, EXCLUDED.discovery_value),
                            source_url = COALESCE({URL_LEDGER_TABLE}.source_url, EXCLUDED.source_url),
                            added_at = LEAST({URL_LEDGER_TABLE}.added_at, EXCLUDED.added_at),
                            next_fetch_at = LEAST({URL_LEDGER_TABLE}.next_fetch_at, EXCLUDED.next_fetch_at),
                            current_intent = COALESCE(EXCLUDED.current_intent, {URL_LEDGER_TABLE}.current_intent)
                        WHERE
-                           EXCLUDED.priority > {URL_LEDGER_TABLE}.priority
+                           EXCLUDED.discovery_value > {URL_LEDGER_TABLE}.discovery_value
                            OR ({URL_LEDGER_TABLE}.source_url IS NULL AND EXCLUDED.source_url IS NOT NULL)
                            OR EXCLUDED.next_fetch_at < {URL_LEDGER_TABLE}.next_fetch_at
                            OR EXCLUDED.current_intent IS DISTINCT FROM {URL_LEDGER_TABLE}.current_intent
@@ -1446,7 +1476,7 @@ class UrlLedger:
         cur.execute(
             f"""SELECT ledger.url,
                        ledger.host,
-                       ledger.priority,
+                       ledger.discovery_value,
                        ledger.next_fetch_at,
                        ledger.added_at
                 FROM {URL_LEDGER_TABLE} AS ledger
@@ -1460,7 +1490,7 @@ class UrlLedger:
                   AND lease.url IS NULL
                   AND ledger.last_success_at IS NULL
                   AND ledger.terminal_reason IS NULL
-                ORDER BY ledger.priority DESC,
+                ORDER BY ledger.discovery_value DESC,
                          ledger.next_fetch_at ASC,
                          ledger.added_at ASC,
                          ledger.url ASC
@@ -1501,8 +1531,8 @@ class UrlLedger:
                         (resolved_intent, [row[0] for row in candidate_rows]),
                     )
                 pending_rows = [
-                    (url, host, priority, next_fetch_at, added_at, normalized_physical_queue)
-                    for url, host, priority, next_fetch_at, added_at in candidate_rows
+                    (url, host, discovery_value, next_fetch_at, added_at, normalized_physical_queue)
+                    for url, host, discovery_value, next_fetch_at, added_at in candidate_rows
                 ]
                 self._replace_pending_queue_rows(cur, pending_rows)
                 count = len(pending_rows)
@@ -1878,7 +1908,8 @@ class UrlLedger:
                 cur.execute(
                     f"""SELECT
                             candidate.url,
-                            candidate.priority,
+                            candidate.scheduler_score,
+                            ledger.discovery_value,
                             ledger.source_url,
                             candidate.added_at,
                             candidate.next_fetch_at,
@@ -1895,7 +1926,7 @@ class UrlLedger:
                     self._delete_queue_entries(cur, [row[0]])
                     self._upsert_active_leases(
                         cur,
-                        [(row[0], row[5], physical_queue, lease_token, lease_expires_at)],
+                        [(row[0], row[6], physical_queue, lease_token, lease_expires_at)],
                     )
             self._conn.commit()
         except Exception:
@@ -1906,10 +1937,11 @@ class UrlLedger:
         if row is None:
             return None
 
-        url, priority, source_url, added_at, next_fetch_at, _host = row
+        url, scheduler_score, discovery_value, source_url, added_at, next_fetch_at, _host = row
         return CrawlTask(
             url=url,
-            priority=priority,
+            discovery_value=discovery_value,
+            scheduler_score=scheduler_score,
             source_url=source_url,
             added_at=added_at,
             next_fetch_at=next_fetch_at,
@@ -1997,7 +2029,8 @@ class UrlLedger:
                 cur.execute(
                     f"""SELECT
                             candidate.url,
-                            candidate.priority,
+                            candidate.scheduler_score,
+                            ledger.discovery_value,
                             ledger.source_url,
                             candidate.added_at,
                             candidate.next_fetch_at,
@@ -2024,7 +2057,7 @@ class UrlLedger:
                         [
                             (
                                 row[0],
-                                row[5],
+                                row[6],
                                 normalized_physical_queues[0],
                                 lease_token,
                                 lease_expires_at,
@@ -2041,7 +2074,8 @@ class UrlLedger:
         return [
             CrawlTask(
                 url=url,
-                priority=priority,
+                discovery_value=discovery_value,
+                scheduler_score=scheduler_score,
                 source_url=source_url,
                 added_at=added_at,
                 next_fetch_at=next_fetch_at,
@@ -2050,7 +2084,8 @@ class UrlLedger:
             )
             for (
                 url,
-                priority,
+                scheduler_score,
+                discovery_value,
                 source_url,
                 added_at,
                 next_fetch_at,
@@ -2102,7 +2137,7 @@ class UrlLedger:
 
         with self._conn.cursor() as cur:
             cur.execute(
-                f"SELECT fail_streak, priority, host FROM {URL_LEDGER_TABLE} AS ledger WHERE url = %s{lease_sql} FOR UPDATE",
+                f"SELECT fail_streak, discovery_value, host FROM {URL_LEDGER_TABLE} AS ledger WHERE url = %s{lease_sql} FOR UPDATE",
                 (normalized, *lease_params),
             )
             row = cur.fetchone()
@@ -2112,7 +2147,7 @@ class UrlLedger:
 
             transition = self._scheduler_retry_policy().failure_transition(
                 fail_streak=row[0],
-                priority=row[1],
+                discovery_value=row[1],
                 retryable=retryable,
                 error=error,
                 backoff_seconds=backoff_seconds,
@@ -2125,20 +2160,19 @@ class UrlLedger:
                         SET next_fetch_at = %s,
                             current_intent = %s,
                             fail_streak = %s,
-                            priority = %s,
                             last_error = %s,
                             terminal_reason = NULL,
                             terminalized_at = NULL
                         WHERE url = %s{lease_sql}
-                        RETURNING url, host, priority, next_fetch_at, added_at""",
+                        RETURNING url, host, %s::real AS scheduler_score, next_fetch_at, added_at""",
                     (
                         transition.next_fetch_at,
                         transition.current_intent,
                         transition.next_fail_streak,
-                        transition.next_priority,
                         transition.last_error,
                         normalized,
                         *lease_params,
+                        transition.next_scheduler_score,
                     ),
                 )
                 rows = cur.fetchall()
@@ -2157,7 +2191,6 @@ class UrlLedger:
                         SET next_fetch_at = %s,
                             current_intent = NULL,
                             fail_streak = %s,
-                            priority = %s,
                             last_error = %s,
                             terminal_reason = %s,
                             terminalized_at = %s
@@ -2166,7 +2199,6 @@ class UrlLedger:
                     (
                         transition.next_fetch_at,
                         transition.next_fail_streak,
-                        transition.next_priority,
                         transition.last_error,
                         transition.terminal_reason,
                         transition.terminalized_at,
@@ -2195,7 +2227,7 @@ class UrlLedger:
                        terminal_reason = NULL,
                        terminalized_at = NULL
                    WHERE terminal_reason IS NOT NULL
-                   RETURNING url, host, priority, next_fetch_at, added_at""",
+                   RETURNING url, host, discovery_value, next_fetch_at, added_at""",
                 (now, INTENT_RETRY),
             )
             rows = cur.fetchall()
@@ -2292,11 +2324,11 @@ class UrlLedger:
                             queue.url,
                             ROW_NUMBER() OVER (
                                 PARTITION BY queue.host
-                                ORDER BY queue.priority DESC, queue.next_fetch_at ASC, queue.added_at ASC, queue.url ASC
+                                ORDER BY queue.scheduler_score DESC, queue.next_fetch_at ASC, queue.added_at ASC, queue.url ASC
                             ) AS host_rownum,
                             ROW_NUMBER() OVER (
                                 PARTITION BY queue.host, queue.branch_key
-                                ORDER BY queue.priority DESC, queue.next_fetch_at ASC, queue.added_at ASC, queue.url ASC
+                                ORDER BY queue.scheduler_score DESC, queue.next_fetch_at ASC, queue.added_at ASC, queue.url ASC
                             ) AS branch_rownum
                         FROM {self._queue_table_sql(self._single_physical_queue_for_surface(SCHEDULER_SURFACE_SCHEDULED))} AS queue
                         WHERE queue.next_fetch_at <= %s
@@ -2311,7 +2343,7 @@ class UrlLedger:
                     UPDATE {URL_LEDGER_TABLE}
                     SET next_fetch_at = GREATEST(next_fetch_at, %s)
                     WHERE url IN (SELECT url FROM scheduled)
-                    RETURNING url, host, priority, next_fetch_at, added_at""",
+                    RETURNING url, host, discovery_value, next_fetch_at, added_at""",
                 params,
             )
             rows = cur.fetchall()
@@ -2350,7 +2382,7 @@ class UrlLedger:
             cur.execute(
                 f"""SELECT url, host
                     FROM {self._queue_table_sql(self._single_physical_queue_for_surface(SCHEDULER_SURFACE_SCHEDULED))}
-                    ORDER BY priority DESC, added_at ASC, url ASC
+                    ORDER BY scheduler_score DESC, added_at ASC, url ASC
                     LIMIT %s""",
                 (max(candidate_limit, needed * 20),),
             )
@@ -2373,7 +2405,7 @@ class UrlLedger:
                 return 0
 
             cur.execute(
-                f"""SELECT url, host, priority, next_fetch_at, added_at
+                f"""SELECT url, host, scheduler_score, next_fetch_at, added_at
                     FROM {self._queue_table_sql(self._single_physical_queue_for_surface(SCHEDULER_SURFACE_SCHEDULED))}
                     WHERE url = ANY(%s)""",
                 (promoted_urls,),
@@ -2389,7 +2421,7 @@ class UrlLedger:
         self._conn.commit()
         return count
 
-    def upsert_seeds(self, urls: list[str], priority: float = 2.0) -> int:
+    def upsert_seeds(self, urls: list[str], discovery_value: float = 2.0) -> int:
         """Insert or requeue seed URLs."""
         if not urls:
             return 0
@@ -2403,7 +2435,7 @@ class UrlLedger:
                 (
                     normalized,
                     host,
-                    priority,
+                    discovery_value,
                     now,
                     now,
                 )
@@ -2420,19 +2452,19 @@ class UrlLedger:
             psycopg2.extras.execute_values(
                 cur,
                 f"""INSERT INTO {URL_LEDGER_TABLE} (
-                       url, host, priority, source_url, added_at, next_fetch_at, current_intent
+                       url, host, discovery_value, source_url, added_at, next_fetch_at, current_intent
                    )
                    VALUES %s
                    ON CONFLICT (url) DO UPDATE SET
                        added_at = EXCLUDED.added_at,
                        next_fetch_at = EXCLUDED.next_fetch_at,
                        current_intent = EXCLUDED.current_intent,
-                       priority = EXCLUDED.priority,
+                       discovery_value = EXCLUDED.discovery_value,
                        fail_streak = 0,
                        last_error = NULL,
                        terminal_reason = NULL,
                        terminalized_at = NULL
-                   RETURNING url, host, priority, next_fetch_at, added_at""",
+                   RETURNING url, host, discovery_value, next_fetch_at, added_at""",
                 rows,
                 template=f"(%s, %s, %s, NULL, %s, %s, '{INTENT_EXPLORE}')",
                 page_size=200,

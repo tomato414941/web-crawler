@@ -218,7 +218,8 @@ URL が crawler の内部に入った後まで、通常の scheduler treatment �
 1. discovery と scheduler membership の結合がまだ強い
 2. breadth 制御が URL-first core の周辺 policy に依存しすぎている
 3. queue naming が state と intent の語彙を混ぜている
-4. `priority` が複数の意味を持ちすぎている
+4. `discovery_value` と `scheduler_score` は分離済みだが、URL ledger flow の一部では
+   discovery と admission の結合がまだ残っている
 5. bootstrap と seed influence が通常 scheduling からまだ十分に隔離されていない
 
 ## Immediate Design Consequences

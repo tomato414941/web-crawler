@@ -133,6 +133,8 @@ def test_apply_migrations_creates_current_url_ledger_columns(migrated_dsn):
     assert "depth" not in columns
     assert "lease_token" not in columns
     assert "lease_expires_at" not in columns
+    assert "priority" not in columns
+    assert "discovery_value" in columns
     assert "current_intent" in columns
 
     conn = psycopg2.connect(migrated_dsn)
@@ -168,6 +170,32 @@ def test_apply_migrations_creates_current_url_ledger_columns(migrated_dsn):
         conn.close()
 
     assert "execution_tier" in host_head_columns
+    assert "head_priority" not in host_head_columns
+    assert "head_scheduler_score" in host_head_columns
+
+    conn = psycopg2.connect(migrated_dsn)
+    try:
+        with conn.cursor() as cur:
+            for queue_table in (
+                PHYSICAL_QUEUE_TABLES[QUEUE_RUNNABLE],
+                PHYSICAL_QUEUE_TABLES[QUEUE_SCHEDULED],
+                PHYSICAL_QUEUE_TABLES[QUEUE_REFRESH],
+                BLOCKED_HOST_BACKOFF_TABLE,
+            ):
+                cur.execute(
+                    """
+                    SELECT column_name
+                    FROM information_schema.columns
+                    WHERE table_schema = 'public' AND table_name = %s
+                    ORDER BY ordinal_position
+                    """,
+                    (queue_table,),
+                )
+                queue_columns = [column_name for (column_name,) in cur.fetchall()]
+                assert "priority" not in queue_columns
+                assert "scheduler_score" in queue_columns
+    finally:
+        conn.close()
 
 
 def test_apply_migrations_is_idempotent(migrated_dsn):

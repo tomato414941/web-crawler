@@ -570,7 +570,7 @@ class CrawlerEngine:
         decision = rank_seed_url(url)
         return CrawlTask(
             url=url,
-            priority=decision.priority,
+            discovery_value=decision.discovery_value,
             runnable_surface=SCHEDULER_SURFACE_RUNNABLE,
             intent=INTENT_EXPLORE,
         )
@@ -614,7 +614,7 @@ class CrawlerEngine:
             tasks.append(
                 CrawlTask(
                     url=link,
-                    priority=decision.priority,
+                    discovery_value=decision.discovery_value,
                     runnable_surface=SCHEDULER_SURFACE_SCHEDULED,
                     intent=INTENT_EXPLORE,
                     source_url=parent_url,

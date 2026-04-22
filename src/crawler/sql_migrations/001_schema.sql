@@ -1,7 +1,7 @@
 CREATE TABLE public.url_ledger (
     url text NOT NULL,
     host text NOT NULL,
-    priority real DEFAULT 1.0 NOT NULL,
+    discovery_value real DEFAULT 1.0 NOT NULL,
     source_url text,
     added_at double precision NOT NULL,
     next_fetch_at double precision DEFAULT 0 NOT NULL,
@@ -101,7 +101,7 @@ CREATE TABLE public.crawler_runtime_stats (
 CREATE TABLE public.scheduler_queue_runnable (
     url text NOT NULL,
     host text NOT NULL,
-    priority real DEFAULT 1.0 NOT NULL,
+    scheduler_score real DEFAULT 1.0 NOT NULL,
     next_fetch_at double precision DEFAULT 0 NOT NULL,
     added_at double precision DEFAULT 0 NOT NULL,
     branch_key text DEFAULT '/'::text NOT NULL,
@@ -114,18 +114,18 @@ CREATE INDEX idx_scheduler_queue_runnable_host
     ON public.scheduler_queue_runnable(host);
 
 CREATE INDEX idx_scheduler_queue_runnable_ready
-    ON public.scheduler_queue_runnable(priority DESC, next_fetch_at ASC, added_at ASC);
+    ON public.scheduler_queue_runnable(scheduler_score DESC, next_fetch_at ASC, added_at ASC);
 
 CREATE INDEX idx_scheduler_queue_runnable_branch
     ON public.scheduler_queue_runnable(host, branch_key);
 
 CREATE INDEX idx_scheduler_queue_runnable_host_head
-    ON public.scheduler_queue_runnable(host, next_fetch_at ASC, priority DESC, added_at ASC, url ASC);
+    ON public.scheduler_queue_runnable(host, next_fetch_at ASC, scheduler_score DESC, added_at ASC, url ASC);
 
 CREATE TABLE public.scheduler_queue_scheduled (
     url text NOT NULL,
     host text NOT NULL,
-    priority real DEFAULT 1.0 NOT NULL,
+    scheduler_score real DEFAULT 1.0 NOT NULL,
     next_fetch_at double precision DEFAULT 0 NOT NULL,
     added_at double precision DEFAULT 0 NOT NULL,
     branch_key text DEFAULT '/'::text NOT NULL,
@@ -138,18 +138,18 @@ CREATE INDEX idx_scheduler_queue_scheduled_host
     ON public.scheduler_queue_scheduled(host);
 
 CREATE INDEX idx_scheduler_queue_scheduled_ready
-    ON public.scheduler_queue_scheduled(priority DESC, next_fetch_at ASC, added_at ASC);
+    ON public.scheduler_queue_scheduled(scheduler_score DESC, next_fetch_at ASC, added_at ASC);
 
 CREATE INDEX idx_scheduler_queue_scheduled_branch
     ON public.scheduler_queue_scheduled(host, branch_key);
 
 CREATE INDEX idx_scheduler_queue_scheduled_host_head
-    ON public.scheduler_queue_scheduled(host, next_fetch_at ASC, priority DESC, added_at ASC, url ASC);
+    ON public.scheduler_queue_scheduled(host, next_fetch_at ASC, scheduler_score DESC, added_at ASC, url ASC);
 
 CREATE TABLE public.scheduler_queue_refresh (
     url text NOT NULL,
     host text NOT NULL,
-    priority real DEFAULT 1.0 NOT NULL,
+    scheduler_score real DEFAULT 1.0 NOT NULL,
     next_fetch_at double precision DEFAULT 0 NOT NULL,
     added_at double precision DEFAULT 0 NOT NULL,
     branch_key text DEFAULT '/'::text NOT NULL,
@@ -162,19 +162,19 @@ CREATE INDEX idx_scheduler_queue_refresh_host
     ON public.scheduler_queue_refresh(host);
 
 CREATE INDEX idx_scheduler_queue_refresh_ready
-    ON public.scheduler_queue_refresh(priority DESC, next_fetch_at ASC, added_at ASC);
+    ON public.scheduler_queue_refresh(scheduler_score DESC, next_fetch_at ASC, added_at ASC);
 
 CREATE INDEX idx_scheduler_queue_refresh_branch
     ON public.scheduler_queue_refresh(host, branch_key);
 
 CREATE INDEX idx_scheduler_queue_refresh_host_head
-    ON public.scheduler_queue_refresh(host, next_fetch_at ASC, priority DESC, added_at ASC, url ASC);
+    ON public.scheduler_queue_refresh(host, next_fetch_at ASC, scheduler_score DESC, added_at ASC, url ASC);
 
 CREATE TABLE public.scheduler_queue_retry_quarantine (
     url text NOT NULL,
     host text NOT NULL,
     physical_queue text NOT NULL,
-    priority real DEFAULT 1.0 NOT NULL,
+    scheduler_score real DEFAULT 1.0 NOT NULL,
     next_fetch_at double precision DEFAULT 0 NOT NULL,
     added_at double precision DEFAULT 0 NOT NULL,
     branch_key text DEFAULT '/'::text NOT NULL,
@@ -222,7 +222,7 @@ CREATE TABLE public.host_runnable_heads (
     head_url text NOT NULL,
     head_next_fetch_at double precision NOT NULL,
     head_added_at double precision NOT NULL,
-    head_priority real NOT NULL,
+    head_scheduler_score real NOT NULL,
     runnable_url_count bigint DEFAULT 0 NOT NULL,
     execution_tier integer DEFAULT 1 NOT NULL,
     latency_penalty integer DEFAULT 0 NOT NULL,
@@ -242,7 +242,7 @@ CREATE INDEX idx_host_runnable_heads_ready
         latency_penalty,
         head_next_fetch_at,
         head_added_at,
-        head_priority DESC,
+        head_scheduler_score DESC,
         head_url
     );
 

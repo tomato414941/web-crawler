@@ -154,7 +154,7 @@ def test_get_stats_includes_scheduler_breakdown(pg_storage):
     with pg_storage._conn.cursor() as cur:
         cur.execute(
             f"""
-            INSERT INTO {URL_LEDGER_TABLE} (url, host, priority, source_url, added_at, next_fetch_at, current_intent)
+            INSERT INTO {URL_LEDGER_TABLE} (url, host, discovery_value, source_url, added_at, next_fetch_at, current_intent)
             VALUES
                 ('https://example.com/page1', 'example.com', 2.0, NULL, 1710000000.0, 1710000000.0, 'explore'),
                 ('https://example.com/page2', 'example.com', 1.25, 'https://example.com/page1', 1710000002.0, 1710000002.0, 'explore'),
@@ -163,7 +163,7 @@ def test_get_stats_includes_scheduler_breakdown(pg_storage):
         )
         cur.execute(
             f"""
-            INSERT INTO {PHYSICAL_QUEUE_TABLES[QUEUE_RUNNABLE]} (url, host, priority, next_fetch_at, added_at, branch_key)
+            INSERT INTO {PHYSICAL_QUEUE_TABLES[QUEUE_RUNNABLE]} (url, host, discovery_value, next_fetch_at, added_at, branch_key)
             VALUES
                 ('https://example.com/page2', 'example.com', 1.25, 1710000002.0, 1710000002.0, '/page2'),
                 ('https://other.com/page1', 'other.com', 0.8, 1710000003.0, 1710000003.0, '/page1')
@@ -595,7 +595,7 @@ def test_get_stats_includes_readiness_breakdown(pg_storage):
         cur.execute(
             """
             INSERT INTO url_ledger (
-                url, host, priority,
+                url, host, discovery_value,
                 source_url, added_at, next_fetch_at
             )
             VALUES
@@ -607,7 +607,7 @@ def test_get_stats_includes_readiness_breakdown(pg_storage):
         )
         cur.execute(
             f"""
-            INSERT INTO {PHYSICAL_QUEUE_TABLES[QUEUE_RUNNABLE]} (url, host, priority, next_fetch_at, added_at, branch_key)
+            INSERT INTO {PHYSICAL_QUEUE_TABLES[QUEUE_RUNNABLE]} (url, host, discovery_value, next_fetch_at, added_at, branch_key)
             VALUES
                 ('https://ready.example/', 'ready.example', 1.0, %s, %s, '/'),
                 ('https://future.example/', 'future.example', 1.0, %s, %s, '/'),
@@ -706,7 +706,7 @@ def test_get_stats_prioritizes_hosts_blocked_by_backoff(pg_storage):
         cur.execute(
             """
             INSERT INTO url_ledger (
-                url, host, priority,
+                url, host, discovery_value,
                 source_url, added_at, next_fetch_at
             )
             VALUES
@@ -718,7 +718,7 @@ def test_get_stats_prioritizes_hosts_blocked_by_backoff(pg_storage):
         )
         cur.execute(
             f"""
-            INSERT INTO {PHYSICAL_QUEUE_TABLES[QUEUE_RUNNABLE]} (url, host, priority, next_fetch_at, added_at, branch_key)
+            INSERT INTO {PHYSICAL_QUEUE_TABLES[QUEUE_RUNNABLE]} (url, host, discovery_value, next_fetch_at, added_at, branch_key)
             VALUES
                 ('https://backoff.example/a', 'backoff.example', 1.0, %s, %s, '/a'),
                 ('https://backoff.example/b', 'backoff.example', 1.0, %s, %s, '/b'),
@@ -771,7 +771,7 @@ def test_get_stats_counts_blocked_surfaces(pg_storage):
         cur.execute(
             """
             INSERT INTO url_ledger (
-                url, host, priority,
+                url, host, discovery_value,
                 source_url, added_at, next_fetch_at, current_intent
             )
             VALUES
@@ -783,7 +783,7 @@ def test_get_stats_counts_blocked_surfaces(pg_storage):
         cur.execute(
             f"""
             INSERT INTO {BLOCKED_HOST_BACKOFF_TABLE} (
-                url, host, physical_queue, priority, next_fetch_at, added_at, branch_key
+                url, host, physical_queue, scheduler_score, next_fetch_at, added_at, branch_key
             )
             VALUES
                 ('https://blocked.example/explore', 'blocked.example', 'runnable', 1.0, %s, %s, '/explore'),
@@ -867,7 +867,7 @@ def test_get_stats_includes_top_slow_hosts(pg_storage):
         cur.execute(
             """
             INSERT INTO url_ledger (
-                url, host, priority,
+                url, host, discovery_value,
                 source_url, added_at, next_fetch_at
             )
             VALUES
@@ -879,7 +879,7 @@ def test_get_stats_includes_top_slow_hosts(pg_storage):
         )
         cur.execute(
             f"""
-            INSERT INTO {PHYSICAL_QUEUE_TABLES[QUEUE_RUNNABLE]} (url, host, priority, next_fetch_at, added_at, branch_key)
+            INSERT INTO {PHYSICAL_QUEUE_TABLES[QUEUE_RUNNABLE]} (url, host, discovery_value, next_fetch_at, added_at, branch_key)
             VALUES
                 ('https://slow.example/a', 'slow.example', 1.0, %s, %s, '/a'),
                 ('https://fast.example/', 'fast.example', 1.0, %s, %s, '/')
@@ -889,7 +889,7 @@ def test_get_stats_includes_top_slow_hosts(pg_storage):
         cur.execute(
             f"""
             INSERT INTO {BLOCKED_HOST_BACKOFF_TABLE} (
-                url, host, physical_queue, priority, next_fetch_at, added_at, branch_key
+                url, host, physical_queue, scheduler_score, next_fetch_at, added_at, branch_key
             )
             VALUES ('https://slow.example/b', 'slow.example', 'scheduled', 1.0, %s, %s, '/b')
             """,
@@ -993,7 +993,7 @@ def test_get_stats_includes_active_error_breakdown(pg_storage):
         cur.execute(
             """
             INSERT INTO url_ledger (
-                url, host, priority, source_url,
+                url, host, discovery_value, source_url,
                 added_at, next_fetch_at, fail_streak, last_error, terminal_reason
             )
             VALUES

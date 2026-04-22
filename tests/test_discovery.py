@@ -4,11 +4,11 @@ from crawler.discovery import (
     ARCHETYPE_DOCUMENT_PAGE,
     ARCHETYPE_REDIRECT_HUB,
     ARCHETYPE_REGISTRY_LISTING,
-    EXTERNAL_PRIORITY,
+    EXTERNAL_DISCOVERY_VALUE,
     PageSignals,
-    SAME_HOST_PRIORITY,
-    SEED_HOST_PRIORITY,
-    SEED_PRIORITY,
+    SAME_HOST_DISCOVERY_VALUE,
+    SEED_HOST_DISCOVERY_VALUE,
+    SEED_DISCOVERY_VALUE,
     classify_parent_archetype,
     classify_url_archetype,
     rank_discovered_url,
@@ -28,10 +28,10 @@ def test_seed_hosts_from_urls_normalizes_hosts():
     assert result == {"example.com", "docs.example.com"}
 
 
-def test_rank_seed_url_returns_seed_priority():
+def test_rank_seed_url_returns_seed_discovery_value():
     result = rank_seed_url("https://example.com/")
 
-    assert result.priority == SEED_PRIORITY
+    assert result.discovery_value == SEED_DISCOVERY_VALUE
 
 
 def test_rank_discovered_url_prefers_same_host():
@@ -41,7 +41,7 @@ def test_rank_discovered_url_prefers_same_host():
         seed_hosts={"example.com"},
     )
 
-    assert result.priority == SAME_HOST_PRIORITY
+    assert result.discovery_value == SAME_HOST_DISCOVERY_VALUE
 
 
 def test_rank_discovered_url_prefers_seed_host_over_external():
@@ -51,7 +51,7 @@ def test_rank_discovered_url_prefers_seed_host_over_external():
         seed_hosts={"example.com", "docs.example.com"},
     )
 
-    assert result.priority == SEED_HOST_PRIORITY
+    assert result.discovery_value == SEED_HOST_DISCOVERY_VALUE
 
 
 def test_rank_discovered_url_marks_other_hosts_external():
@@ -61,7 +61,7 @@ def test_rank_discovered_url_marks_other_hosts_external():
         seed_hosts={"example.com", "docs.example.com"},
     )
 
-    assert result.priority == EXTERNAL_PRIORITY
+    assert result.discovery_value == EXTERNAL_DISCOVERY_VALUE
 
 
 def test_classify_url_archetype_detects_redirect_hubs():
@@ -88,7 +88,7 @@ def test_rank_discovered_url_downgrades_bulk_data_paths():
         seed_hosts={"example.com"},
     )
 
-    assert result.priority < 0.75
+    assert result.discovery_value < 0.75
 
 
 def test_rank_discovered_url_downgrades_redirect_hubs():
@@ -98,7 +98,7 @@ def test_rank_discovered_url_downgrades_redirect_hubs():
         seed_hosts={"example.com", "docs.example.com"},
     )
 
-    assert result.priority < SAME_HOST_PRIORITY
+    assert result.discovery_value < SAME_HOST_DISCOVERY_VALUE
 
 
 def test_rank_discovered_url_promotes_document_pages():
@@ -108,7 +108,7 @@ def test_rank_discovered_url_promotes_document_pages():
         seed_hosts={"example.com", "docs.example.com"},
     )
 
-    assert result.priority > SEED_HOST_PRIORITY
+    assert result.discovery_value > SEED_HOST_DISCOVERY_VALUE
 
 
 def test_rank_discovered_url_uses_parent_page_signals():
@@ -124,8 +124,8 @@ def test_rank_discovered_url_uses_parent_page_signals():
         ),
     )
 
-    assert result.priority < EXTERNAL_PRIORITY
-    assert result.priority >= 0.25
+    assert result.discovery_value < EXTERNAL_DISCOVERY_VALUE
+    assert result.discovery_value >= 0.25
     assert (
         classify_parent_archetype(
             "https://example.com/archive/",

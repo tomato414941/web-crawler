@@ -176,7 +176,7 @@ async def test_daemon_does_not_auto_requeue_failed_urls():
         def recover_leased(self, expired_only=False):
             return 0
 
-        def upsert_seeds(self, urls, priority=2.0):
+        def upsert_seeds(self, urls, discovery_value=2.0):
             return len(urls)
 
         def requeue_failed(self):
@@ -222,8 +222,8 @@ def test_bootstrap_scheduler_inserts_seeds_only_when_empty():
         def pending_count(self, runnable_surface=None):
             return self._pending
 
-        def upsert_seeds(self, urls, priority=2.0):
-            self.upsert_calls.append((list(urls), priority))
+        def upsert_seeds(self, urls, discovery_value=2.0):
+            self.upsert_calls.append((list(urls), discovery_value))
             self._pending = len(urls)
             return len(urls)
 
@@ -277,7 +277,7 @@ async def test_daemon_logs_cycle_error_breakdown(caplog):
         def recover_leased(self, expired_only=False):
             return 0
 
-        def upsert_seeds(self, urls, priority=2.0):
+        def upsert_seeds(self, urls, discovery_value=2.0):
             return len(urls)
 
         def stats(self):
@@ -340,7 +340,7 @@ async def test_daemon_uses_configured_scheduled_controls():
         def recover_leased(self, expired_only=False):
             return 0
 
-        def upsert_seeds(self, urls, priority=2.0):
+        def upsert_seeds(self, urls, discovery_value=2.0):
             return len(urls)
 
         def stats(self):
@@ -429,7 +429,7 @@ async def test_daemon_persists_readiness_breakdown_while_waiting_for_ready():
         def recover_leased(self, expired_only=False):
             return 0
 
-        def upsert_seeds(self, urls, priority=2.0):
+        def upsert_seeds(self, urls, discovery_value=2.0):
             return len(urls)
 
         def stats(self):
@@ -586,7 +586,7 @@ async def test_daemon_persists_scheduler_views_after_cycle():
         def recover_leased(self, expired_only=False):
             return 0
 
-        def upsert_seeds(self, urls, priority=2.0):
+        def upsert_seeds(self, urls, discovery_value=2.0):
             return len(urls)
 
         def stats(self):
@@ -708,8 +708,8 @@ def test_ensure_runnable_supply_tops_up_when_runnable_surface_is_starved():
             self.host_promote_calls.append((target_pending, per_host))
             return 2
 
-        def upsert_seeds(self, urls, priority=2.0):
-            self.upsert_calls.append((list(urls), priority))
+        def upsert_seeds(self, urls, discovery_value=2.0):
+            self.upsert_calls.append((list(urls), discovery_value))
             return len(urls)
 
     daemon = CrawlDaemon(
@@ -803,8 +803,8 @@ def test_ensure_runnable_supply_does_not_bootstrap_empty_ledger():
             self.host_promote_calls.append((target_pending, per_host))
             return 0
 
-        def upsert_seeds(self, urls, priority=2.0):
-            self.upsert_calls.append((list(urls), priority))
+        def upsert_seeds(self, urls, discovery_value=2.0):
+            self.upsert_calls.append((list(urls), discovery_value))
             return len(urls)
 
     daemon = CrawlDaemon(
@@ -854,8 +854,8 @@ def test_ensure_runnable_supply_stays_idle_when_host_promotion_is_insufficient()
             self.host_promote_calls.append((target_pending, per_host))
             return 0
 
-        def upsert_seeds(self, urls, priority=2.0):
-            self.upsert_calls.append((list(urls), priority))
+        def upsert_seeds(self, urls, discovery_value=2.0):
+            self.upsert_calls.append((list(urls), discovery_value))
             return len(urls)
 
     daemon = CrawlDaemon(
@@ -900,8 +900,8 @@ def test_ensure_runnable_supply_does_not_top_up_when_runnable_surface_is_healthy
                 return 3
             return 10
 
-        def upsert_seeds(self, urls, priority=2.0):
-            self.upsert_calls.append((list(urls), priority))
+        def upsert_seeds(self, urls, discovery_value=2.0):
+            self.upsert_calls.append((list(urls), discovery_value))
             return len(urls)
 
     daemon = CrawlDaemon(
@@ -950,8 +950,8 @@ def test_ensure_runnable_supply_does_not_reinsert_when_runnable_pending_is_high_
             self.host_promote_calls.append((target_pending, per_host))
             return 0
 
-        def upsert_seeds(self, urls, priority=2.0):
-            self.upsert_calls.append((list(urls), priority))
+        def upsert_seeds(self, urls, discovery_value=2.0):
+            self.upsert_calls.append((list(urls), discovery_value))
             return len(urls)
 
     daemon = CrawlDaemon(
@@ -1002,8 +1002,8 @@ def test_ensure_runnable_supply_tops_up_when_runnable_host_diversity_is_low():
             self.host_promote_calls.append((target_pending, per_host))
             return 1
 
-        def upsert_seeds(self, urls, priority=2.0):
-            self.upsert_calls.append((list(urls), priority))
+        def upsert_seeds(self, urls, discovery_value=2.0):
+            self.upsert_calls.append((list(urls), discovery_value))
             return len(urls)
 
     daemon = CrawlDaemon(
