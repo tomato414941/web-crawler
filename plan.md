@@ -40,14 +40,16 @@ stall by making crawl pipeline stages explicit, observable, and testable:
 - Added admission operation timing breakdown for intent updates, row fetches, queue membership
   replacement, host-head updates, lease cleanup, and commit time.
 - Moved admission host-head maintenance out of the synchronous admission path:
-  - admission now marks dirty host-head pairs instead of refreshing the read model inline.
-  - daemon maintenance refreshes dirty host-head rows in bounded batches.
+  - admission now refreshes affected host-head rows with set-based differential updates.
+  - dirty host-head rows are reserved for head deletion repair, not normal admission.
+  - daemon maintenance refreshes dirty host-head rows in bounded bulk batches.
 - Extracted fetch-stage queue handoff orchestration out of `CrawlerEngine`.
 - Added pipeline contract tests for queue metrics, liveness, finalizer error survival, and publisher
   error survival.
 - Added parser-stage contract tests for success, parse-error conversion, and worker survival.
 - Added fetch-stage contract tests for success, skipped, and failed queue routing.
 - Added dirty host-head refresh tests and runtime payload coverage.
+- Added a separate dirty-refresh limit and elapsed-time telemetry.
 - Preserved existing public scheduler telemetry methods and runtime payload behavior.
 
 ## Verification
@@ -66,7 +68,7 @@ stall by making crawl pipeline stages explicit, observable, and testable:
   details in `CrawlerEngine` callbacks.
 - `timing_summary["finalizer"]` now exposes finalizer sub-stage p50/p95/max values.
 - `timing_summary["finalizer"]` now exposes admission sub-stage p50/p95/max values.
-- `admit_host_heads_ms` now measures dirty marking instead of full host-head refresh for admission.
+- `admit_host_heads_ms` now measures set-based host-head differential refresh for admission.
 - Runtime stats expose `host_head_dirty_refresh` alongside bounded host-head repair.
   `remaining_hosts` shows whether dirty refresh is keeping up.
 - Pipeline boundaries are documented in `docs/system-architecture.md` and
@@ -82,6 +84,6 @@ stall by making crawl pipeline stages explicit, observable, and testable:
   operations.
 - Continue slimming `CrawlerEngine` by extracting reusable fetch failure classification if it starts
   obscuring HTTP behavior changes.
-- Evaluate whether dirty host-head refresh keeps up under production crawl load before adding any
-  larger scheduler projection.
+- Evaluate whether dirty host-head repair remains exceptional under production crawl load before
+  adding any larger scheduler projection.
 - Keep detailed speed investigation separate from this design-simplification milestone.

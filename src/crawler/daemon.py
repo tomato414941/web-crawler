@@ -123,6 +123,10 @@ class CrawlDaemon:
             0.0, settings.daemon_quarantine_retire_after_seconds
         )
         self._host_head_repair_limit = max(0, settings.daemon_host_head_repair_limit)
+        self._host_head_dirty_refresh_limit = max(
+            0,
+            settings.daemon_host_head_dirty_refresh_limit,
+        )
         self._shutdown = False
         self._engine: CrawlerEngine | None = None
         self._last_runtime_snapshot: dict[str, object] = {}
@@ -133,10 +137,11 @@ class CrawlDaemon:
             "missing_heads": 0,
             "repaired_hosts": 0,
         }
-        self._last_host_head_dirty_refresh: dict[str, int] = {
+        self._last_host_head_dirty_refresh: dict[str, int | float] = {
             "selected_hosts": 0,
             "refreshed_hosts": 0,
             "remaining_hosts": 0,
+            "elapsed_ms": 0,
         }
         self._host_store: HostStore | None = None
         self._host_manager = HostManager(
@@ -511,13 +516,13 @@ class CrawlDaemon:
 
     def _refresh_dirty_host_runnable_heads(self, url_ledger: UrlLedger) -> None:
         """Refresh bounded dirty host-head rows before daemon cycle gating."""
-        if self._host_head_repair_limit <= 0:
+        if self._host_head_dirty_refresh_limit <= 0:
             return
         refresh_fn = getattr(url_ledger, "refresh_dirty_host_runnable_heads", None)
         if not callable(refresh_fn):
             return
         try:
-            summary = refresh_fn(limit=self._host_head_repair_limit)
+            summary = refresh_fn(limit=self._host_head_dirty_refresh_limit)
         except Exception:
             logger.debug("Dirty host runnable-head refresh failed", exc_info=True)
             return

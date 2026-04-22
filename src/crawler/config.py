@@ -37,6 +37,7 @@ class CrawlerSettings(BaseSettings):
     daemon_quarantine_retire_min_consecutive_failures: int = 64
     daemon_quarantine_retire_after_seconds: float = 86400.0
     daemon_host_head_repair_limit: int = 64
+    daemon_host_head_dirty_refresh_limit: int = 2048
     execution_probing_worker_ratio: float = 0.2
 
     model_config = {"env_prefix": "CRAWLER_"}
