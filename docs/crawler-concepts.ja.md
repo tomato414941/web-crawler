@@ -64,6 +64,11 @@ scheduler は URL の集合そのものではなく、`runnable capability` の�
 
 この意味では、scheduler の一次単位は URL より host/site に寄る。
 
+`host runnable capability` と `host runnable head` は近いが同じ概念ではない。
+capability は、その host/site が今 work を出せるか、どれくらい work を持っているかを表す。
+head は、その host/site から次に出す代表 URL である。どちらも runtime execution のための
+read model 概念であり、どの URL が live かの正本である scheduler membership を置き換えない。
+
 runtime 実装には、物理 queue projection、worker lane、operator-facing view が残っていてもよい。
 それらはこの concept より下の execution detail である。抽象ルールとしては、通常クロールは
 raw URL queue ではなく、host/site の runnable capability を見て動くべきである。
