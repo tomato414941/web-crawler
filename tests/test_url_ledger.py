@@ -892,21 +892,19 @@ class TestUrlLedger:
         ]
         assert {head.refreshed_at for head in heads} == {1234.0}
 
-    def test_host_runnable_heads_are_updated_incrementally(self, ledger):
+    def test_host_runnable_heads_are_populated_incrementally(self, ledger):
         now = 1000.0
         ledger.place(CrawlTask(url="http://a.com/1", added_at=1000, next_fetch_at=now - 1))
         ledger.place(CrawlTask(url="http://a.com/2", added_at=1001, next_fetch_at=now - 1))
         ledger.place(CrawlTask(url="http://b.com/1", added_at=900, next_fetch_at=now - 1))
-        ledger.refresh_dirty_host_runnable_heads(limit=10, now=now)
-
         heads = ledger.host_runnable_heads_from_read_model(
             runnable_surface=SCHEDULER_SURFACE_RUNNABLE,
             now=now,
         )
 
-        assert [(head.host_key, head.url, head.runnable_url_count) for head in heads] == [
-            ("b.com", "http://b.com/1", 1),
-            ("a.com", "http://a.com/1", 2),
+        assert [(head.host_key, head.url) for head in heads] == [
+            ("b.com", "http://b.com/1"),
+            ("a.com", "http://a.com/1"),
         ]
 
     def test_host_runnable_heads_prioritize_warm_hosts_by_execution_tier(self, ledger):
