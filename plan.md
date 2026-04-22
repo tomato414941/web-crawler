@@ -37,9 +37,11 @@ stall by making crawl pipeline stages explicit, observable, and testable:
   stats.
 - Added finalizer operation timing breakdown for discovery, admission, host updates, and scheduler
   state transitions.
+- Extracted fetch-stage queue handoff orchestration out of `CrawlerEngine`.
 - Added pipeline contract tests for queue metrics, liveness, finalizer error survival, and publisher
   error survival.
 - Added parser-stage contract tests for success, parse-error conversion, and worker survival.
+- Added fetch-stage contract tests for success, skipped, and failed queue routing.
 - Preserved existing public scheduler telemetry methods and runtime payload behavior.
 
 ## Verification
@@ -54,6 +56,8 @@ stall by making crawl pipeline stages explicit, observable, and testable:
 - `CrawlerEngine` now exposes `parser_liveness` alongside finalizer and publisher liveness.
 - Finalizer and publisher item-level failures are counted and do not kill the queue worker.
 - Parser exceptions are converted into finalizer failures without killing the parser worker.
+- Fetch workers now delegate queue handoff to a pipeline stage while keeping HTTP and scheduler
+  details in `CrawlerEngine` callbacks.
 - `timing_summary["finalizer"]` now exposes finalizer sub-stage p50/p95/max values.
 - Pipeline boundaries are documented in `docs/system-architecture.md` and
   `docs/system-architecture.ja.md`.
@@ -66,8 +70,8 @@ stall by making crawl pipeline stages explicit, observable, and testable:
   read-model store.
 - Continue reducing `UrlLedger` facade breadth around requeue, lease selection, and host-head
   operations.
-- Continue slimming `CrawlerEngine` by extracting fetch-stage orchestration after the pipeline
-  boundary is stable in production.
+- Continue slimming `CrawlerEngine` by extracting reusable fetch failure classification if it starts
+  obscuring HTTP behavior changes.
 - Use finalizer operation timing to decide whether the next speed fix belongs in discovery admission,
   host-state writes, or scheduler state transitions.
 - Keep detailed speed investigation separate from this design-simplification milestone.

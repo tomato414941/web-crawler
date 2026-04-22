@@ -7,6 +7,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 import logging
 import time
+from typing import Any
 
 from .core import Response
 from .result import CrawlFailure, CrawlResult, CrawlStageTimings
@@ -391,6 +392,130 @@ class ParseStage:
             )
         self.finalize_stats.record_enqueue(queue_item.queue_depth)
         await self.finalize_queue.put(queue_item)
+
+
+class FetchStage:
+    """Lease URL work and hand fetch outcomes to downstream pipeline queues."""
+
+    def __init__(
+        self,
+        *,
+        parse_queue: asyncio.Queue[FetchedPage | object],
+        finalize_queue: asyncio.Queue[FinalizeItem | object],
+        parse_stats: QueueStats,
+        finalize_stats: QueueStats,
+        is_running: Callable[[], bool],
+        claim_page_slot: Callable[[], Awaitable[bool]],
+        release_page_slot: Callable[[bool], Awaitable[None]],
+        lease_task: Callable[[float], Awaitable[tuple[CrawlTask | None, Any]]],
+        process_url: Callable[[CrawlTask], Awaitable[FetchedPage | FailedTask | SkippedTask | None]],
+        release_active_host: Callable[[str], Awaitable[None]],
+        record_failure_category: Callable[[str], None],
+        worker_patience: int,
+    ) -> None:
+        self.parse_queue = parse_queue
+        self.finalize_queue = finalize_queue
+        self.parse_stats = parse_stats
+        self.finalize_stats = finalize_stats
+        self.is_running = is_running
+        self.claim_page_slot = claim_page_slot
+        self.release_page_slot = release_page_slot
+        self.lease_task = lease_task
+        self.process_url = process_url
+        self.release_active_host = release_active_host
+        self.record_failure_category = record_failure_category
+        self.worker_patience = worker_patience
+
+    async def run(self) -> None:
+        idle_ticks = 0
+
+        while self.is_running():
+            if not await self.claim_page_slot():
+                break
+
+            slot_started = time.perf_counter()
+            lease_started = time.perf_counter()
+            task, lease_telemetry = await self.lease_task(lease_started)
+            lease_ms = getattr(lease_telemetry, "elapsed_ms", 0.0)
+            if not task:
+                await self.release_page_slot(False)
+                idle_ticks += 1
+                if idle_ticks >= self.worker_patience:
+                    break
+                await asyncio.sleep(0.1)
+                continue
+
+            idle_ticks = 0
+            try:
+                result = await self.process_url(task)
+            finally:
+                await self.release_active_host(task.url)
+
+            if result is None:
+                await self.release_page_slot(False)
+                continue
+
+            if isinstance(result, SkippedTask):
+                await self._enqueue_skipped(result, lease_ms, lease_telemetry, slot_started)
+            elif isinstance(result, FailedTask):
+                await self._enqueue_failed(result, lease_ms, lease_telemetry, slot_started)
+            else:
+                await self._enqueue_fetched(result, lease_ms, lease_telemetry, slot_started)
+
+    async def _enqueue_skipped(
+        self,
+        skipped: SkippedTask,
+        lease_ms: float,
+        lease_telemetry: Any,
+        slot_started: float,
+    ) -> None:
+        skipped.timings.lease_ms = lease_ms
+        skipped.timings.lease = lease_telemetry
+        skipped.timings.slot_ms = elapsed_ms(slot_started)
+        await self.release_page_slot(False)
+        queue_item = FinalizeItem(
+            skipped=skipped,
+            enqueued_at=time.perf_counter(),
+            queue_depth=self.finalize_queue.qsize(),
+        )
+        self.finalize_stats.record_enqueue(queue_item.queue_depth)
+        await self.finalize_queue.put(queue_item)
+
+    async def _enqueue_failed(
+        self,
+        failed: FailedTask,
+        lease_ms: float,
+        lease_telemetry: Any,
+        slot_started: float,
+    ) -> None:
+        failed.failure.timings.lease_ms = lease_ms
+        failed.failure.timings.lease = lease_telemetry
+        failed.failure.timings.slot_ms = elapsed_ms(slot_started)
+        await self.release_page_slot(False)
+        self.record_failure_category(failed.failure.error)
+        queue_item = FinalizeItem(
+            failed=failed,
+            enqueued_at=time.perf_counter(),
+            queue_depth=self.finalize_queue.qsize(),
+        )
+        self.finalize_stats.record_enqueue(queue_item.queue_depth)
+        await self.finalize_queue.put(queue_item)
+
+    async def _enqueue_fetched(
+        self,
+        fetched: FetchedPage,
+        lease_ms: float,
+        lease_telemetry: Any,
+        slot_started: float,
+    ) -> None:
+        await self.release_page_slot(True)
+        fetched.timings.lease_ms = lease_ms
+        fetched.timings.lease = lease_telemetry
+        fetched.timings.slot_ms = elapsed_ms(slot_started)
+        fetched.queue_depth = self.parse_queue.qsize()
+        self.parse_stats.record_enqueue(fetched.queue_depth)
+        fetched.enqueued_at = time.perf_counter()
+        await self.parse_queue.put(fetched)
 
 
 class PublishStage:
