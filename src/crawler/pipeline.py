@@ -322,6 +322,77 @@ class FinalizeStage:
             raise ValueError("finalize item has no payload")
 
 
+class ParseStage:
+    """Drain fetched pages and parse them into finalize-stage items."""
+
+    def __init__(
+        self,
+        *,
+        parse_queue: asyncio.Queue[FetchedPage | object],
+        finalize_queue: asyncio.Queue[FinalizeItem | object],
+        parse_stats: QueueStats,
+        finalize_stats: QueueStats,
+        liveness: StageLiveness,
+        parse_fetched_page: Callable[[FetchedPage], Awaitable[ParsedPage]],
+        build_failed_task: Callable[[FetchedPage, Exception], FailedTask],
+        record_failure_category: Callable[[str], None],
+    ) -> None:
+        self.parse_queue = parse_queue
+        self.finalize_queue = finalize_queue
+        self.parse_stats = parse_stats
+        self.finalize_stats = finalize_stats
+        self.liveness = liveness
+        self.parse_fetched_page = parse_fetched_page
+        self.build_failed_task = build_failed_task
+        self.record_failure_category = record_failure_category
+
+    async def run(self) -> None:
+        while True:
+            item = await self.parse_queue.get()
+            if item is PARSER_SENTINEL:
+                self.parse_queue.task_done()
+                break
+
+            fetched = item
+            self.liveness.start(kind="parse", url=fetched.task.url)
+            fetched.timings.parse_queue_wait_ms = self.parse_stats.record_dequeue(
+                fetched.enqueued_at,
+                fetched.queue_depth,
+            )
+            fetched.timings.parse_queue_depth = fetched.queue_depth
+            try:
+                await self._process_item(fetched)
+                self.liveness.complete()
+            except Exception:
+                self.liveness.fail()
+                logger.exception(
+                    "Parser failed while processing fetched page: url=%s",
+                    fetched.task.url,
+                )
+            finally:
+                self.liveness.clear_current()
+                self.parse_queue.task_done()
+
+    async def _process_item(self, fetched: FetchedPage) -> None:
+        try:
+            parsed = await self.parse_fetched_page(fetched)
+            queue_item = FinalizeItem(
+                parsed=parsed,
+                enqueued_at=time.perf_counter(),
+                queue_depth=self.finalize_queue.qsize(),
+            )
+        except Exception as exc:
+            failed = self.build_failed_task(fetched, exc)
+            self.record_failure_category(failed.failure.error)
+            queue_item = FinalizeItem(
+                failed=failed,
+                enqueued_at=time.perf_counter(),
+                queue_depth=self.finalize_queue.qsize(),
+            )
+        self.finalize_stats.record_enqueue(queue_item.queue_depth)
+        await self.finalize_queue.put(queue_item)
+
+
 class PublishStage:
     """Drain processed crawl results and perform blocking writes."""
 
