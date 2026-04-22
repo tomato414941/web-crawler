@@ -13,6 +13,7 @@ stall by making crawl pipeline stages explicit, observable, and testable:
 - Publish should own blocking storage/output writes.
 - Stage liveness should be visible in runtime stats.
 - Stage workers should survive item-level errors and record failures.
+- Finalizer bottlenecks should be explained by operation-level timing, not guessed from queue depth.
 
 ## Completed in this slice
 
@@ -34,6 +35,8 @@ stall by making crawl pipeline stages explicit, observable, and testable:
 - Extracted pipeline queue metrics, finalizer stage, and publish stage out of `CrawlerEngine`.
 - Extracted parser stage orchestration out of `CrawlerEngine` and added parser liveness to runtime
   stats.
+- Added finalizer operation timing breakdown for discovery, admission, host updates, and scheduler
+  state transitions.
 - Added pipeline contract tests for queue metrics, liveness, finalizer error survival, and publisher
   error survival.
 - Added parser-stage contract tests for success, parse-error conversion, and worker survival.
@@ -51,6 +54,7 @@ stall by making crawl pipeline stages explicit, observable, and testable:
 - `CrawlerEngine` now exposes `parser_liveness` alongside finalizer and publisher liveness.
 - Finalizer and publisher item-level failures are counted and do not kill the queue worker.
 - Parser exceptions are converted into finalizer failures without killing the parser worker.
+- `timing_summary["finalizer"]` now exposes finalizer sub-stage p50/p95/max values.
 - Pipeline boundaries are documented in `docs/system-architecture.md` and
   `docs/system-architecture.ja.md`.
 - Existing tests covering scheduler stats, lease diagnostics, retry transitions, and runtime stats pass.
@@ -64,4 +68,6 @@ stall by making crawl pipeline stages explicit, observable, and testable:
   operations.
 - Continue slimming `CrawlerEngine` by extracting fetch-stage orchestration after the pipeline
   boundary is stable in production.
+- Use finalizer operation timing to decide whether the next speed fix belongs in discovery admission,
+  host-state writes, or scheduler state transitions.
 - Keep detailed speed investigation separate from this design-simplification milestone.
