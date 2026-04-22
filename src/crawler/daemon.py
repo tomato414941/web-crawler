@@ -191,7 +191,7 @@ class CrawlDaemon:
                         )
                     if maintenance["scheduled"]:
                         logger.info(
-                            "Delayed %d low-priority scheduled-surface URLs",
+                            "Delayed %d low-score scheduled-surface URLs",
                             maintenance["scheduled"],
                         )
                     if maintenance["rebalanced_after"]:
@@ -523,7 +523,7 @@ class CrawlDaemon:
                     )
                 if prime["scheduled"]:
                     logger.info(
-                        "Delayed %d low-priority scheduled-surface URLs", prime["scheduled"]
+                        "Delayed %d low-score scheduled-surface URLs", prime["scheduled"]
                     )
                 if prime["promoted"]:
                     logger.info(
@@ -621,7 +621,7 @@ class CrawlDaemon:
         """Seed an empty scheduler through a dedicated bootstrap path."""
         if url_ledger.pending_count() != 0:
             return 0
-        return url_ledger.upsert_seeds(self._seeds, priority=2.0)
+        return url_ledger.upsert_seeds(self._seeds, discovery_value=2.0)
 
     def _promote_blocked_retry(self, url_ledger: UrlLedger) -> int:
         """Restore a small cooled-down subset from blocked retry queue when runnable work is thin."""

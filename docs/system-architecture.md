@@ -220,7 +220,8 @@ Today, the project still has several major convergence gaps:
 1. discovery and scheduler membership are still too tightly coupled
 2. breadth control still relies too much on daemon-side policy around a URL-first core
 3. queue naming still mixes state language and intent language
-4. `priority` still carries too many meanings at once
+4. `discovery_value` and `scheduler_score` are now separate, but discovery and admission are still
+   coupled in parts of the URL ledger flow
 5. bootstrap and seed influence are not fully isolated from normal scheduling
 
 ## Immediate Design Consequences
