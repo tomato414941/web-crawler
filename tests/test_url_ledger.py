@@ -35,6 +35,7 @@ from crawler.url_ledger import (
     UrlLedger,
 )
 from crawler.migrate import apply_migrations
+from crawler.scheduler_membership import HOST_HEAD_UPDATE_DIRTY
 from crawler.urls import normalize_url
 
 PG_DSN = os.environ.get("TEST_POSTGRES_DSN", "postgresql://crawler:crawler@localhost/crawldb_test")
@@ -392,7 +393,10 @@ class TestUrlLedger:
         with ledger._conn.cursor() as cur:
             cur.execute(f"SELECT COUNT(*) FROM {HOST_RUNNABLE_HEAD_DIRTY_HOSTS_TABLE}")
             (dirty_count,) = cur.fetchone()
-        assert dirty_count == 1
+            cur.execute(f"SELECT COUNT(*) FROM {HOST_RUNNABLE_HEADS_TABLE}")
+            (head_count,) = cur.fetchone()
+        assert dirty_count == 0
+        assert head_count == 1
         for value in diagnostics.values():
             assert value >= 0.0
 
@@ -401,16 +405,27 @@ class TestUrlLedger:
         ledger.place(
             CrawlTask(
                 url="http://dirty.com/one",
+                added_at=now - 2,
+                next_fetch_at=now - 1,
+                runnable_surface=SCHEDULER_SURFACE_RUNNABLE,
+            )
+        )
+        ledger.place(
+            CrawlTask(
+                url="http://dirty.com/two",
                 added_at=now - 1,
                 next_fetch_at=now - 1,
                 runnable_surface=SCHEDULER_SURFACE_RUNNABLE,
             )
         )
 
-        assert ledger.host_runnable_heads_from_read_model(
-            runnable_surface=SCHEDULER_SURFACE_RUNNABLE,
-            now=now,
-        ) == []
+        with ledger._conn.cursor() as cur:
+            ledger._membership.delete_queue_entries(
+                cur,
+                ["http://dirty.com/one"],
+                host_head_update=HOST_HEAD_UPDATE_DIRTY,
+            )
+        ledger._conn.commit()
 
         summary = ledger.refresh_dirty_host_runnable_heads(limit=10, now=now)
         heads = ledger.host_runnable_heads_from_read_model(
@@ -422,12 +437,42 @@ class TestUrlLedger:
         assert summary.refreshed_hosts == 1
         assert summary.remaining_hosts == 0
         assert [(head.host_key, head.url) for head in heads] == [
-            ("dirty.com", "http://dirty.com/one")
+            ("dirty.com", "http://dirty.com/two")
         ]
         with ledger._conn.cursor() as cur:
             cur.execute(f"SELECT COUNT(*) FROM {HOST_RUNNABLE_HEAD_DIRTY_HOSTS_TABLE}")
             (dirty_count,) = cur.fetchone()
         assert dirty_count == 0
+
+    def test_refresh_dirty_host_runnable_heads_removes_empty_host_head(self, ledger):
+        now = 1000.0
+        ledger.place(
+            CrawlTask(
+                url="http://empty-dirty.com/one",
+                added_at=now - 1,
+                next_fetch_at=now - 1,
+                runnable_surface=SCHEDULER_SURFACE_RUNNABLE,
+            )
+        )
+
+        with ledger._conn.cursor() as cur:
+            ledger._membership.delete_queue_entries(
+                cur,
+                ["http://empty-dirty.com/one"],
+                host_head_update=HOST_HEAD_UPDATE_DIRTY,
+            )
+        ledger._conn.commit()
+
+        summary = ledger.refresh_dirty_host_runnable_heads(limit=10, now=now)
+        heads = ledger.host_runnable_heads_from_read_model(
+            runnable_surface=SCHEDULER_SURFACE_RUNNABLE,
+            now=now,
+        )
+
+        assert summary.selected_hosts == 1
+        assert summary.refreshed_hosts == 0
+        assert summary.remaining_hosts == 0
+        assert heads == []
 
     def test_prepare_tasks_prefers_more_urgent_surface(self, ledger):
         prepared = ledger._prepare_tasks(

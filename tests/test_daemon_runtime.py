@@ -99,6 +99,7 @@ def test_runtime_payload_includes_host_head_dirty_refresh():
         "selected_hosts": 3,
         "refreshed_hosts": 2,
         "remaining_hosts": 1,
+        "elapsed_ms": 12.3,
     }
 
     payload = daemon._idle_runtime_payload(
@@ -112,25 +113,32 @@ def test_runtime_payload_includes_host_head_dirty_refresh():
         "selected_hosts": 3,
         "refreshed_hosts": 2,
         "remaining_hosts": 1,
+        "elapsed_ms": 12.3,
     }
     assert payload["active_cycle"]["host_head_dirty_refresh"] == {
         "selected_hosts": 3,
         "refreshed_hosts": 2,
         "remaining_hosts": 1,
+        "elapsed_ms": 12.3,
     }
 
 
 def test_refresh_dirty_host_runnable_heads_records_summary():
     class FakeLedger:
         def refresh_dirty_host_runnable_heads(self, limit):
-            assert limit == 7
-            return {"selected_hosts": 4, "refreshed_hosts": 3, "remaining_hosts": 2}
+            assert limit == 11
+            return {
+                "selected_hosts": 4,
+                "refreshed_hosts": 3,
+                "remaining_hosts": 2,
+                "elapsed_ms": 9.8,
+            }
 
     daemon = CrawlDaemon(
         seeds=["https://example.com/"],
         postgres_dsn="postgresql://unused",
     )
-    daemon._host_head_repair_limit = 7
+    daemon._host_head_dirty_refresh_limit = 11
 
     daemon._refresh_dirty_host_runnable_heads(FakeLedger())
 
@@ -138,4 +146,5 @@ def test_refresh_dirty_host_runnable_heads_records_summary():
         "selected_hosts": 4,
         "refreshed_hosts": 3,
         "remaining_hosts": 2,
+        "elapsed_ms": 9.8,
     }

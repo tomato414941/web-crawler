@@ -256,5 +256,5 @@ CREATE TABLE public.host_runnable_head_dirty_hosts (
     CONSTRAINT host_runnable_head_dirty_hosts_pkey PRIMARY KEY (physical_queue, host)
 );
 
-CREATE INDEX idx_host_runnable_head_dirty_hosts_marked_at
-    ON public.host_runnable_head_dirty_hosts(marked_at);
+CREATE INDEX idx_host_runnable_head_dirty_hosts_queue_marked_at_host
+    ON public.host_runnable_head_dirty_hosts(physical_queue, marked_at, host);

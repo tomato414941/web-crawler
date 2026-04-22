@@ -288,7 +288,20 @@ class SchedulerMembershipStore:
         if not urls:
             return
         started = time.perf_counter()
-        affected_pairs = self.queue_head_pairs_for_urls(cur, urls)
+        affected_pairs: list[tuple[str, str]] = []
+        if host_head_update == HOST_HEAD_UPDATE_DIRTY:
+            cur.execute(
+                f"""SELECT DISTINCT physical_queue, host
+                    FROM {self._host_runnable_heads_table}
+                    WHERE head_url = ANY(%s)""",
+                (urls,),
+            )
+            affected_pairs = [
+                (self.normalize_physical_queue(physical_queue), host)
+                for physical_queue, host in cur.fetchall()
+            ]
+        else:
+            affected_pairs = self.queue_head_pairs_for_urls(cur, urls)
         for table_name in QUEUE_TABLES:
             cur.execute(f"DELETE FROM {table_name} WHERE url = ANY(%s)", (urls,))
         cur.execute(f"DELETE FROM {self._blocked_queue_table} WHERE url = ANY(%s)", (urls,))
@@ -351,17 +364,7 @@ class SchedulerMembershipStore:
         _add_timing(timings, "insert_membership_ms", _elapsed_ms(started))
 
         host_heads_started = time.perf_counter()
-        if host_head_update == HOST_HEAD_UPDATE_DIRTY:
-            self.mark_dirty_host_heads(
-                cur,
-                [
-                    (physical_queue, host)
-                    for _url, host, _scheduler_score, _next_fetch_at, _added_at, physical_queue
-                    in row_tuples
-                ],
-            )
-            _add_timing(timings, "host_heads_ms", _elapsed_ms(host_heads_started))
-        elif self._host_heads is not None:
+        if self._host_heads is not None:
             self._host_heads.upsert_candidates_in_tx(cur, row_tuples)
             _add_timing(timings, "host_heads_ms", _elapsed_ms(host_heads_started))
 
