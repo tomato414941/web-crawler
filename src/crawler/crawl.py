@@ -33,6 +33,7 @@ from .pipeline import (
     PARSER_SENTINEL as _PARSER_SENTINEL,
     PUBLISHER_SENTINEL as _PUBLISHER_SENTINEL,
     FailedTask as _FailedTask,
+    FetchStage,
     FetchedPage as _FetchedPage,
     FinalizeItem as _FinalizeItem,
     FinalizeStage,
@@ -471,11 +472,6 @@ class CrawlerEngine:
         """Return the durable store used for host success resets when available."""
         return getattr(self.host_manager, "_host_store", None)
 
-    def _enqueue_finalize_item(self, item: _FinalizeItem) -> None:
-        """Track finalize queue depth before handing work to finalizer workers."""
-        if self._pipeline_queues is not None:
-            self._pipeline_queues.finalize_stats.record_enqueue(item.queue_depth)
-
     def _progress(self) -> tuple[int, int]:
         return self.pages_crawled, self.max_pages
 
@@ -872,108 +868,34 @@ class CrawlerEngine:
         lease_lane: _LeaseLane,
     ):
         """Worker coroutine that processes URLs from a dedicated runnable surface."""
-        idle_ticks = 0
-
-        while self._running:
-            if not await self._claim_page_slot():
-                break
-
-            slot_started = time.perf_counter()
-            lease_started = time.perf_counter()
-            task, lease_telemetry = await self._lease_task(
+        if self._parse_queue is None or self._finalize_queue is None:
+            return
+        stage = FetchStage(
+            parse_queue=self._parse_queue,
+            finalize_queue=self._finalize_queue,
+            parse_stats=(
+                self._pipeline_queues.parse_stats
+                if self._pipeline_queues is not None
+                else QueueStats()
+            ),
+            finalize_stats=(
+                self._pipeline_queues.finalize_stats
+                if self._pipeline_queues is not None
+                else QueueStats()
+            ),
+            is_running=lambda: self._running,
+            claim_page_slot=self._claim_page_slot,
+            release_page_slot=self._release_page_slot,
+            lease_task=lambda lease_started: self._lease_task(
                 lease_lane=lease_lane,
                 lease_started=lease_started,
-            )
-            lease_ms = lease_telemetry.elapsed_ms
-            if not task:
-                await self._release_page_slot(success=False)
-                idle_ticks += 1
-                if idle_ticks >= _WORKER_PATIENCE:
-                    break
-                await asyncio.sleep(0.1)
-                continue
-
-            idle_ticks = 0
-            try:
-                result = await self._process_url(task)
-            finally:
-                await self._release_active_host(task.url)
-            if not result:
-                await self._release_page_slot(success=False)
-                continue
-
-            if isinstance(result, _SkippedTask):
-                result.timings.lease_ms = lease_ms
-                result.timings.lease = lease_telemetry
-                result.timings.slot_ms = _elapsed_ms(slot_started)
-                await self._release_page_slot(success=False)
-                if self._finalize_queue is not None:
-                    queue_item = _FinalizeItem(
-                        skipped=result,
-                        enqueued_at=time.perf_counter(),
-                        queue_depth=self._finalize_queue.qsize(),
-                    )
-                    self._enqueue_finalize_item(queue_item)
-                    await self._finalize_queue.put(queue_item)
-                else:
-                    skipped = await self._finalize_skipped_task(result)
-                    self._record_timing("skipped", skipped.timings)
-                    logger.info(
-                        "Skipped %s: %s (%s)",
-                        skipped.task.url,
-                        skipped.reason,
-                        _format_timings(skipped.timings),
-                    )
-            elif isinstance(result, _FailedTask):
-                result.failure.timings.lease_ms = lease_ms
-                result.failure.timings.lease = lease_telemetry
-                result.failure.timings.slot_ms = _elapsed_ms(slot_started)
-                await self._release_page_slot(success=False)
-                category = categorize_crawl_error(result.failure.error)
-                if category:
-                    self._failure_counts[category] += 1
-                if self._finalize_queue is not None:
-                    queue_item = _FinalizeItem(
-                        failed=result,
-                        enqueued_at=time.perf_counter(),
-                        queue_depth=self._finalize_queue.qsize(),
-                    )
-                    self._enqueue_finalize_item(queue_item)
-                    await self._finalize_queue.put(queue_item)
-                else:
-                    failure = await self._finalize_failed_task(result)
-                    self._record_timing("failed", failure.timings)
-                    logger.warning(
-                        "Failed %s: %s (%s)",
-                        failure.url,
-                        failure.error,
-                        _format_timings(failure.timings),
-                    )
-            else:
-                await self._release_page_slot(success=True)
-                result.timings.lease_ms = lease_ms
-                result.timings.lease = lease_telemetry
-                result.timings.slot_ms = _elapsed_ms(slot_started)
-                if self._parse_queue is not None:
-                    result.queue_depth = self._parse_queue.qsize()
-                    if self._pipeline_queues is not None:
-                        self._pipeline_queues.parse_stats.record_enqueue(result.queue_depth)
-                    result.enqueued_at = time.perf_counter()
-                    await self._parse_queue.put(result)
-                else:
-                    parsed = await self._parse_fetched_page(result)
-                    finalized = await self._finalize_parsed_page(parsed)
-                    finalized.timings.publish_queue_depth = 0
-                    finalized.timings.publish_queue_wait_ms = 0.0
-                    await self._publish_result(finalized)
-                    self._record_timing("success", finalized.timings)
-                    logger.info(
-                        "[%d/%d] %s (%s)",
-                        self.pages_crawled,
-                        self.max_pages,
-                        finalized.url,
-                        _format_timings(finalized.timings),
-                    )
+            ),
+            process_url=self._process_url,
+            release_active_host=self._release_active_host,
+            record_failure_category=self._record_failure_category,
+            worker_patience=_WORKER_PATIENCE,
+        )
+        await stage.run()
 
     def _prepare_parsed_payload(
         self,

@@ -1,6 +1,7 @@
 """Pipeline stage contract tests."""
 
 import asyncio
+from types import SimpleNamespace
 import time
 
 import pytest
@@ -10,6 +11,7 @@ from crawler.pipeline import (
     PARSER_SENTINEL,
     PUBLISHER_SENTINEL,
     FailedTask,
+    FetchStage,
     FetchedPage,
     FinalizeItem,
     FinalizeStage,
@@ -70,6 +72,10 @@ async def _no_finalize_skipped(skipped):
     return skipped
 
 
+class _LeaseTelemetry:
+    elapsed_ms = 3.0
+
+
 def _record(records):
     def record(outcome, timings):
         records.append((outcome, timings))
@@ -90,6 +96,140 @@ def _parse_failure(fetched, exc):
         record_error=True,
         backoff_seconds=1.0,
     )
+
+
+@pytest.mark.asyncio
+async def test_fetch_stage_success_enqueues_fetched_page():
+    queues = PipelineQueues(maxsize=4)
+    task = CrawlTask(url="https://example.com/", lease_token="lease-1")
+    claimed = 0
+    releases = []
+    released_hosts = []
+
+    async def claim_page_slot():
+        nonlocal claimed
+        claimed += 1
+        return claimed == 1
+
+    async def release_page_slot(success):
+        releases.append(success)
+
+    async def lease_task(_lease_started):
+        return task, _LeaseTelemetry()
+
+    async def process_url(leased_task):
+        return FetchedPage(
+            task=leased_task,
+            response=SimpleNamespace(url=leased_task.url),
+            timings=CrawlStageTimings(),
+            process_started=time.perf_counter(),
+        )
+
+    async def release_active_host(url):
+        released_hosts.append(url)
+
+    stage = FetchStage(
+        parse_queue=queues.parse,
+        finalize_queue=queues.finalize,
+        parse_stats=queues.parse_stats,
+        finalize_stats=queues.finalize_stats,
+        is_running=lambda: True,
+        claim_page_slot=claim_page_slot,
+        release_page_slot=release_page_slot,
+        lease_task=lease_task,
+        process_url=process_url,
+        release_active_host=release_active_host,
+        record_failure_category=lambda _error: None,
+        worker_patience=1,
+    )
+
+    await stage.run()
+
+    fetched = queues.parse.get_nowait()
+    assert fetched.task is task
+    assert fetched.timings.lease is not None
+    assert fetched.timings.lease_ms == 3.0
+    assert fetched.timings.slot_ms >= 0
+    assert releases == [True]
+    assert released_hosts == [task.url]
+    assert queues.parse_stats.depth_max == 0
+    assert queues.finalize.empty()
+
+
+@pytest.mark.asyncio
+async def test_fetch_stage_routes_skipped_and_failed_to_finalizer():
+    queues = PipelineQueues(maxsize=4)
+    tasks = [
+        CrawlTask(url="https://example.com/skip", lease_token="skip"),
+        CrawlTask(url="https://example.com/fail", lease_token="fail"),
+    ]
+    claimed = 0
+    releases = []
+    failures = []
+    released_hosts = []
+
+    async def claim_page_slot():
+        nonlocal claimed
+        claimed += 1
+        return claimed <= 2
+
+    async def release_page_slot(success):
+        releases.append(success)
+
+    async def lease_task(_lease_started):
+        return tasks[claimed - 1], _LeaseTelemetry()
+
+    async def process_url(task):
+        if task.url.endswith("/skip"):
+            return SkippedTask(
+                task=task,
+                reason="robots_denied",
+                timings=CrawlStageTimings(),
+                process_started=time.perf_counter(),
+            )
+        return FailedTask(
+            task=task,
+            failure=CrawlFailure(
+                url=task.url,
+                error="timeout",
+                retryable=True,
+                timings=CrawlStageTimings(),
+            ),
+            process_started=time.perf_counter(),
+            record_error=True,
+            backoff_seconds=1.0,
+        )
+
+    async def release_active_host(url):
+        released_hosts.append(url)
+
+    stage = FetchStage(
+        parse_queue=queues.parse,
+        finalize_queue=queues.finalize,
+        parse_stats=queues.parse_stats,
+        finalize_stats=queues.finalize_stats,
+        is_running=lambda: True,
+        claim_page_slot=claim_page_slot,
+        release_page_slot=release_page_slot,
+        lease_task=lease_task,
+        process_url=process_url,
+        release_active_host=release_active_host,
+        record_failure_category=failures.append,
+        worker_patience=1,
+    )
+
+    await stage.run()
+
+    first = queues.finalize.get_nowait()
+    second = queues.finalize.get_nowait()
+    assert first.skipped is not None
+    assert first.skipped.timings.lease_ms == 3.0
+    assert second.failed is not None
+    assert second.failed.failure.timings.lease_ms == 3.0
+    assert failures == ["timeout"]
+    assert releases == [False, False]
+    assert released_hosts == [task.url for task in tasks]
+    assert queues.parse.empty()
 
 
 def test_pipeline_queues_snapshot_records_depth_and_wait():
