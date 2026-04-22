@@ -5,7 +5,13 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from typing import Any, Mapping
 
-from .telemetry import FetchTelemetry, LeaseTelemetry, PipelineTelemetry, RobotsDecision
+from .telemetry import (
+    FetchTelemetry,
+    FinalizerTelemetry,
+    LeaseTelemetry,
+    PipelineTelemetry,
+    RobotsDecision,
+)
 
 
 @dataclass(slots=True)
@@ -37,6 +43,7 @@ class CrawlStageTimings:
     robots: RobotsDecision | None = None
     lease: LeaseTelemetry | None = None
     pipeline: PipelineTelemetry | None = None
+    finalizer: FinalizerTelemetry | None = None
 
 
 @dataclass(slots=True)

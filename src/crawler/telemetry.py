@@ -27,6 +27,16 @@ TIMING_STAGE_FIELDS = (
     "slot_ms",
 )
 
+FINALIZER_TIMING_FIELDS = (
+    "discover_ms",
+    "admit_ms",
+    "host_success_ms",
+    "host_failure_ms",
+    "mark_done_ms",
+    "mark_failed_ms",
+    "total_ms",
+)
+
 
 @dataclass(slots=True)
 class FetchTelemetry:
@@ -100,6 +110,24 @@ class PipelineTelemetry:
         return asdict(self)
 
 
+@dataclass(slots=True)
+class FinalizerTelemetry:
+    """Detailed scheduler mutation timings for one finalized crawl attempt."""
+
+    kind: str
+    new_tasks_count: int = 0
+    discover_ms: float = 0.0
+    admit_ms: float = 0.0
+    host_success_ms: float = 0.0
+    host_failure_ms: float = 0.0
+    mark_done_ms: float = 0.0
+    mark_failed_ms: float = 0.0
+    total_ms: float = 0.0
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
 def percentile(values: list[float], percentile_value: int) -> float:
     """Return a nearest-rank percentile for small cycle-local samples."""
     if not values:
@@ -110,6 +138,24 @@ def percentile(values: list[float], percentile_value: int) -> float:
         min(len(ordered) - 1, math.ceil(percentile_value / 100 * len(ordered)) - 1),
     )
     return round(ordered[index], 1)
+
+
+def _summarize_values(values: list[float]) -> dict[str, float | int]:
+    if not values:
+        return {
+            "count": 0,
+            "avg": 0.0,
+            "p50": 0.0,
+            "p95": 0.0,
+            "max": 0.0,
+        }
+    return {
+        "count": len(values),
+        "avg": round(sum(values) / len(values), 1),
+        "p50": percentile(values, 50),
+        "p95": percentile(values, 95),
+        "max": round(max(values), 1),
+    }
 
 
 class TelemetryAccumulator:
@@ -127,6 +173,12 @@ class TelemetryAccumulator:
         self._lease_read_models: Counter[str] = Counter()
         self._lease_fallbacks: Counter[str] = Counter()
         self._lease_execution_tiers: Counter[str] = Counter()
+        self._finalizer_stages: dict[str, list[float]] = {
+            field: [] for field in FINALIZER_TIMING_FIELDS
+        }
+        self._finalizer_kinds: Counter[str] = Counter()
+        self._finalizer_new_tasks_total = 0
+        self._finalizer_new_tasks_nonzero_items = 0
 
     def record(self, outcome: str, timings: object | None) -> None:
         """Record one finalized crawl attempt."""
@@ -157,26 +209,25 @@ class TelemetryAccumulator:
             self._lease_fallbacks[str(getattr(lease, "fallback", "unknown"))] += 1
             self._lease_execution_tiers[str(getattr(lease, "execution_tier", "unknown"))] += 1
 
+        finalizer = getattr(timings, "finalizer", None)
+        if finalizer is not None:
+            self._finalizer_kinds[str(getattr(finalizer, "kind", "unknown"))] += 1
+            new_tasks_count = int(getattr(finalizer, "new_tasks_count", 0))
+            self._finalizer_new_tasks_total += new_tasks_count
+            if new_tasks_count > 0:
+                self._finalizer_new_tasks_nonzero_items += 1
+            for field in FINALIZER_TIMING_FIELDS:
+                self._finalizer_stages[field].append(float(getattr(finalizer, field)))
+
     def snapshot(self) -> dict[str, object]:
         """Return a runtime-safe summary of observed cycle telemetry."""
-        stages = {}
-        for field, values in self._stages.items():
-            if not values:
-                stages[field] = {
-                    "count": 0,
-                    "avg": 0.0,
-                    "p50": 0.0,
-                    "p95": 0.0,
-                    "max": 0.0,
-                }
-                continue
-            stages[field] = {
-                "count": len(values),
-                "avg": round(sum(values) / len(values), 1),
-                "p50": percentile(values, 50),
-                "p95": percentile(values, 95),
-                "max": round(max(values), 1),
-            }
+        stages = {
+            field: _summarize_values(values) for field, values in self._stages.items()
+        }
+        finalizer = {
+            field: _summarize_values(values)
+            for field, values in self._finalizer_stages.items()
+        }
 
         outcomes = {
             "success": int(self._outcomes.get("success", 0)),
@@ -197,5 +248,11 @@ class TelemetryAccumulator:
                 "lease_read_models": dict(self._lease_read_models),
                 "lease_fallbacks": dict(self._lease_fallbacks),
                 "lease_execution_tiers": dict(self._lease_execution_tiers),
+                "finalizer_kinds": dict(self._finalizer_kinds),
+                "finalizer_new_tasks": {
+                    "total": self._finalizer_new_tasks_total,
+                    "nonzero_items": self._finalizer_new_tasks_nonzero_items,
+                },
             },
+            "finalizer": finalizer,
         }

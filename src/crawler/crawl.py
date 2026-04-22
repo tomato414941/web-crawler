@@ -59,7 +59,13 @@ from .url_ledger import (
 )
 from .output import StreamingOutputWriter
 from .result import CrawlFailure, CrawlResult, CrawlStageTimings
-from .telemetry import FetchTelemetry, LeaseTelemetry, PipelineTelemetry, TelemetryAccumulator
+from .telemetry import (
+    FetchTelemetry,
+    FinalizerTelemetry,
+    LeaseTelemetry,
+    PipelineTelemetry,
+    TelemetryAccumulator,
+)
 from .urls import extract_links
 
 logger = logging.getLogger(__name__)
@@ -428,24 +434,38 @@ class CrawlerEngine:
         task: CrawlTask,
         new_tasks: list[CrawlTask],
         request_latency_ms: float | None,
-    ) -> None:
+    ) -> FinalizerTelemetry:
         """Apply durable scheduler mutations on the dedicated finalizer connection."""
         scheduler = self._finalizer_scheduler or self.scheduler
+        telemetry = FinalizerTelemetry(kind="success", new_tasks_count=len(new_tasks))
+        total_started = time.perf_counter()
         if new_tasks:
             if hasattr(scheduler, "discover_many") and hasattr(scheduler, "admit_discovered_tasks"):
+                discover_started = time.perf_counter()
                 scheduler.discover_many(new_tasks)
+                telemetry.discover_ms = _elapsed_ms(discover_started)
+                admit_started = time.perf_counter()
                 scheduler.admit_discovered_tasks(new_tasks)
+                telemetry.admit_ms = _elapsed_ms(admit_started)
             else:
+                admit_started = time.perf_counter()
                 scheduler.place_many(new_tasks)
+                telemetry.admit_ms = _elapsed_ms(admit_started)
 
         host_store = self._finalizer_host_store or self._host_store_for_success_tracking()
         if host_store is not None:
+            host_started = time.perf_counter()
             host_store.record_success(
                 self._host_key_for_url(task.url),
                 request_latency_ms=request_latency_ms,
             )
+            telemetry.host_success_ms = _elapsed_ms(host_started)
 
+        mark_started = time.perf_counter()
         scheduler.mark_done(task.url, lease_token=task.lease_token)
+        telemetry.mark_done_ms = _elapsed_ms(mark_started)
+        telemetry.total_ms = _elapsed_ms(total_started)
+        return telemetry
 
     def _host_store_for_success_tracking(self) -> HostStore | None:
         """Return the durable store used for host success resets when available."""
@@ -482,22 +502,32 @@ class CrawlerEngine:
             return max(1, int(budget))
         return default_budget
 
-    def _finalize_failed_sync(self, failed: _FailedTask) -> None:
+    def _finalize_failed_sync(self, failed: _FailedTask) -> FinalizerTelemetry:
         """Apply durable failure mutations on the dedicated finalizer connection."""
         scheduler = self._finalizer_scheduler or self.scheduler
         host_store = self._finalizer_host_store or self._host_store_for_success_tracking()
+        telemetry = FinalizerTelemetry(kind="failed")
+        total_started = time.perf_counter()
         if failed.record_success and host_store is not None:
+            host_started = time.perf_counter()
             host_store.record_success(self._host_key_for_url(failed.task.url))
+            telemetry.host_success_ms = _elapsed_ms(host_started)
         if failed.record_error and host_store is not None:
+            host_started = time.perf_counter()
             host_store.record_failure(
                 self._host_key_for_url(failed.task.url),
                 backoff_seconds=failed.backoff_seconds or 0.0,
             )
+            telemetry.host_failure_ms = _elapsed_ms(host_started)
 
         if failed.mark_done:
+            mark_started = time.perf_counter()
             scheduler.mark_done(failed.task.url, lease_token=failed.task.lease_token)
-            return
+            telemetry.mark_done_ms = _elapsed_ms(mark_started)
+            telemetry.total_ms = _elapsed_ms(total_started)
+            return telemetry
 
+        mark_started = time.perf_counter()
         scheduler.mark_failed(
             failed.task.url,
             retryable=failed.failure.retryable,
@@ -505,6 +535,9 @@ class CrawlerEngine:
             backoff_seconds=failed.backoff_seconds,
             lease_token=failed.task.lease_token,
         )
+        telemetry.mark_failed_ms = _elapsed_ms(mark_started)
+        telemetry.total_ms = _elapsed_ms(total_started)
+        return telemetry
 
     async def _finalize_failed_task(self, failed: _FailedTask) -> CrawlFailure:
         """Apply scheduler mutations for a failed crawl outside fetch and parse workers."""
@@ -512,14 +545,15 @@ class CrawlerEngine:
         scheduler_started = time.perf_counter()
         if self._finalizer_executor is not None:
             loop = asyncio.get_running_loop()
-            await loop.run_in_executor(
+            telemetry = await loop.run_in_executor(
                 self._finalizer_executor,
                 self._finalize_failed_sync,
                 failed,
             )
         else:
-            self._finalize_failed_sync(failed)
+            telemetry = self._finalize_failed_sync(failed)
         failure.timings.scheduler_ms += _elapsed_ms(scheduler_started)
+        failure.timings.finalizer = telemetry
         failure.timings.process_ms = _elapsed_ms(failed.process_started)
         return failure
 
@@ -588,24 +622,31 @@ class CrawlerEngine:
             return self.scheduler.preview_tasks(tasks)
         return tasks
 
-    def _finalize_skipped_sync(self, skipped: _SkippedTask) -> None:
+    def _finalize_skipped_sync(self, skipped: _SkippedTask) -> FinalizerTelemetry:
         """Apply durable scheduler mutation for a skipped crawl."""
         scheduler = self._finalizer_scheduler or self.scheduler
+        telemetry = FinalizerTelemetry(kind="skipped")
+        total_started = time.perf_counter()
+        mark_started = time.perf_counter()
         scheduler.mark_done(skipped.task.url, lease_token=skipped.task.lease_token)
+        telemetry.mark_done_ms = _elapsed_ms(mark_started)
+        telemetry.total_ms = _elapsed_ms(total_started)
+        return telemetry
 
     async def _finalize_skipped_task(self, skipped: _SkippedTask) -> _SkippedTask:
         """Apply scheduler mutations for a skipped crawl outside fetch workers."""
         scheduler_started = time.perf_counter()
         if self._finalizer_executor is not None:
             loop = asyncio.get_running_loop()
-            await loop.run_in_executor(
+            telemetry = await loop.run_in_executor(
                 self._finalizer_executor,
                 self._finalize_skipped_sync,
                 skipped,
             )
         else:
-            self._finalize_skipped_sync(skipped)
+            telemetry = self._finalize_skipped_sync(skipped)
         skipped.timings.scheduler_ms += _elapsed_ms(scheduler_started)
+        skipped.timings.finalizer = telemetry
         skipped.timings.process_ms = _elapsed_ms(skipped.process_started)
         return skipped
 
@@ -1046,7 +1087,7 @@ class CrawlerEngine:
         scheduler_started = time.perf_counter()
         if self._finalizer_executor is not None:
             loop = asyncio.get_running_loop()
-            await loop.run_in_executor(
+            telemetry = await loop.run_in_executor(
                 self._finalizer_executor,
                 self._finalize_sync,
                 parsed.task,
@@ -1058,17 +1099,14 @@ class CrawlerEngine:
             else:
                 self.host_manager.record_success(parsed.task.url)
         else:
-            if parsed.new_tasks:
-                if hasattr(self.scheduler, "discover_many") and hasattr(
-                    self.scheduler, "admit_discovered_tasks"
-                ):
-                    self.scheduler.discover_many(parsed.new_tasks)
-                    self.scheduler.admit_discovered_tasks(parsed.new_tasks)
-                else:
-                    self.scheduler.place_many(parsed.new_tasks)
+            telemetry = self._finalize_sync(
+                parsed.task,
+                parsed.new_tasks,
+                parsed.result.timings.fetch_request_ms or parsed.result.timings.fetch_ms,
+            )
             self.host_manager.record_success(parsed.task.url)
-            self.scheduler.mark_done(parsed.task.url, lease_token=parsed.task.lease_token)
         result.timings.scheduler_ms += _elapsed_ms(scheduler_started)
+        result.timings.finalizer = telemetry
         result.timings.process_ms = _elapsed_ms(parsed.process_started)
 
         return result
