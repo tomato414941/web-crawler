@@ -340,6 +340,18 @@ class CrawlerEngine:
         self._parse_queue_depth_max = 0
         self._finalize_queue_depth_max = 0
         self._publish_queue_depth_max = 0
+        self._pipeline_queue_maxsize = max(16, concurrency * 4)
+        self._finalizer_started = 0
+        self._finalizer_completed = 0
+        self._finalizer_failed = 0
+        self._last_finalizer_progress_at = 0.0
+        self._current_finalizer_url: str | None = None
+        self._current_finalizer_kind: str | None = None
+        self._publisher_started = 0
+        self._publisher_completed = 0
+        self._publisher_failed = 0
+        self._last_publisher_progress_at = 0.0
+        self._current_publisher_url: str | None = None
         self._timing_summary = TelemetryAccumulator()
 
     def _host_first_fallback_stats(self) -> dict[str, int]:
@@ -403,6 +415,22 @@ class CrawlerEngine:
             "parse_queue_depth_max": self._parse_queue_depth_max,
             "finalize_queue_depth_max": self._finalize_queue_depth_max,
             "publish_queue_depth_max": self._publish_queue_depth_max,
+            "pipeline_queue_maxsize": self._pipeline_queue_maxsize,
+            "finalizer_liveness": {
+                "started": self._finalizer_started,
+                "completed": self._finalizer_completed,
+                "failed": self._finalizer_failed,
+                "last_progress_at": self._last_finalizer_progress_at,
+                "current_url": self._current_finalizer_url,
+                "current_kind": self._current_finalizer_kind,
+            },
+            "publisher_liveness": {
+                "started": self._publisher_started,
+                "completed": self._publisher_completed,
+                "failed": self._publisher_failed,
+                "last_progress_at": self._last_publisher_progress_at,
+                "current_url": self._current_publisher_url,
+            },
             "failure_breakdown": dict(self._failure_counts),
             "timing_summary": self._timing_summary.snapshot(),
             "host_first_fallback": self._host_first_fallback_stats(),
@@ -1180,6 +1208,15 @@ class CrawlerEngine:
         elif not storage:
             self.results.append(result.to_dict())
 
+    def _finalize_item_context(self, item: _FinalizeItem) -> tuple[str, str | None]:
+        if item.parsed is not None:
+            return "success", item.parsed.task.url
+        if item.skipped is not None:
+            return "skipped", item.skipped.task.url
+        if item.failed is not None:
+            return "failed", item.failed.task.url
+        return "unknown", None
+
     async def _finalizer(self):
         """Drain parsed payloads and apply scheduler mutations before persistence."""
         if self._finalize_queue is None:
@@ -1192,6 +1229,11 @@ class CrawlerEngine:
                 break
 
             queue_item = item
+            item_kind, item_url = self._finalize_item_context(queue_item)
+            self._finalizer_started += 1
+            self._current_finalizer_kind = item_kind
+            self._current_finalizer_url = item_url
+            self._last_finalizer_progress_at = time.time()
             queue_wait_ms = _elapsed_ms(queue_item.enqueued_at) if queue_item.enqueued_at else 0.0
             self._finalize_queue_wait_last_ms = queue_wait_ms
             self._finalize_queue_wait_max_ms = max(
@@ -1253,9 +1295,19 @@ class CrawlerEngine:
                         failure.error,
                         _format_timings(failure.timings),
                     )
+                self._finalizer_completed += 1
+                self._last_finalizer_progress_at = time.time()
             except Exception:
-                logger.exception("Finalizer failed while processing queued crawl result")
+                self._finalizer_failed += 1
+                self._last_finalizer_progress_at = time.time()
+                logger.exception(
+                    "Finalizer failed while processing queued crawl result: kind=%s url=%s",
+                    item_kind,
+                    item_url,
+                )
             finally:
+                self._current_finalizer_kind = None
+                self._current_finalizer_url = None
                 self._finalize_queue.task_done()
 
     async def _publisher(self):
@@ -1271,6 +1323,9 @@ class CrawlerEngine:
 
             queue_item = item
             result = queue_item.result
+            self._publisher_started += 1
+            self._current_publisher_url = result.url
+            self._last_publisher_progress_at = time.time()
             result.timings.publish_queue_wait_ms = (
                 _elapsed_ms(queue_item.enqueued_at) if queue_item.enqueued_at else 0.0
             )
@@ -1294,7 +1349,17 @@ class CrawlerEngine:
                     result.url,
                     _format_timings(result.timings),
                 )
+                self._publisher_completed += 1
+                self._last_publisher_progress_at = time.time()
+            except Exception:
+                self._publisher_failed += 1
+                self._last_publisher_progress_at = time.time()
+                logger.exception(
+                    "Publisher failed while processing queued crawl result: url=%s",
+                    result.url,
+                )
             finally:
+                self._current_publisher_url = None
                 self._publish_queue.task_done()
 
     async def _lease_task(
@@ -1370,9 +1435,9 @@ class CrawlerEngine:
         if self.start_url and self.scheduler.pending_count() == 0:
             self.scheduler.place(self._build_seed_task(self.start_url))
 
-        self._parse_queue = asyncio.Queue()
-        self._finalize_queue = asyncio.Queue()
-        self._publish_queue = asyncio.Queue()
+        self._parse_queue = asyncio.Queue(maxsize=self._pipeline_queue_maxsize)
+        self._finalize_queue = asyncio.Queue(maxsize=self._pipeline_queue_maxsize)
+        self._publish_queue = asyncio.Queue(maxsize=self._pipeline_queue_maxsize)
         publisher_dsn = (
             getattr(self.pg_storage, "_dsn", None) if self.pg_storage is not None else None
         )
