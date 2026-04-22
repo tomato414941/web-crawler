@@ -65,6 +65,15 @@ MAX_RETRY_BACKOFF_SECONDS = 1800.0
 LATENCY_BUCKET_FAST_MS = 150.0
 LATENCY_BUCKET_SLOW_MS = 400.0
 LATENCY_BUCKET_VERY_SLOW_MS = 1000.0
+ADMISSION_DIAGNOSTIC_FIELDS = (
+    "admit_update_intents_ms",
+    "admit_fetch_rows_ms",
+    "admit_delete_membership_ms",
+    "admit_insert_membership_ms",
+    "admit_host_heads_ms",
+    "admit_delete_leases_ms",
+    "admit_commit_ms",
+)
 URL_LEDGER_REQUIRED_COLUMNS = {
     "url",
     "host",
@@ -235,6 +244,10 @@ class _HostFirstReadModelResult:
     execution_tier: int | None = None
 
 
+def _elapsed_ms(started_at: float) -> float:
+    return round((time.perf_counter() - started_at) * 1000, 1)
+
+
 class UrlLedger:
     """Durable URL ledger with PostgreSQL persistence. Dedup via ON CONFLICT."""
 
@@ -304,6 +317,7 @@ class UrlLedger:
             insert_blocked_rows=self._insert_blocked_host_backoff_rows,
             insert_pending_rows=self._insert_pending_queue_rows,
         )
+        self._last_admission_diagnostics = self._empty_admission_diagnostics()
         self._assert_current_schema()
 
     def reset_host_first_fallback_stats(self) -> None:
@@ -350,6 +364,13 @@ class UrlLedger:
     def last_lease_diagnostics(self) -> dict[str, object]:
         """Return diagnostics for the most recent lease_next call on this ledger."""
         return self._host_first_lease_telemetry().last_lease_diagnostics()
+
+    def _empty_admission_diagnostics(self) -> dict[str, float]:
+        return {field: 0.0 for field in ADMISSION_DIAGNOSTIC_FIELDS}
+
+    def last_admission_diagnostics(self) -> dict[str, float]:
+        """Return timing diagnostics for the most recent scheduler admission."""
+        return dict(self._last_admission_diagnostics)
 
     def attach_host_store(self, host_store: "HostStore | None") -> None:
         """Attach the persistent host scheduler used for lease selection."""
@@ -1288,28 +1309,53 @@ class UrlLedger:
 
     def _admit_queue_membership(self, tasks: list[CrawlTask]) -> int:
         """Assign scheduler membership for known ledger URLs."""
+        diagnostics = self._empty_admission_diagnostics()
         if not tasks:
+            self._last_admission_diagnostics = diagnostics
             return 0
 
         prepared_tasks = self._prepare_tasks(tasks)
         try:
             with self._conn.cursor() as cur:
+                started = time.perf_counter()
                 self._update_task_intents(cur, prepared_tasks)
+                diagnostics["admit_update_intents_ms"] = _elapsed_ms(started)
+
+                started = time.perf_counter()
                 ledger_rows = self._fetch_admission_ledger_rows_for_tasks(cur, prepared_tasks)
+                diagnostics["admit_fetch_rows_ms"] = _elapsed_ms(started)
                 pending_rows = self._membership.rows_for_ledger_rows(
                     ledger_rows,
                     physical_queue_by_url=self._admission_physical_queue_by_url(prepared_tasks),
                     default_physical_queue=self._default_scheduled_physical_queue(),
                 )
-                self._membership.replace_pending_rows(cur, pending_rows)
+                membership_timings = self._membership.replace_pending_rows(cur, pending_rows)
+                diagnostics["admit_delete_membership_ms"] = membership_timings.get(
+                    "delete_membership_ms",
+                    0.0,
+                )
+                diagnostics["admit_insert_membership_ms"] = membership_timings.get(
+                    "insert_membership_ms",
+                    0.0,
+                )
+                diagnostics["admit_host_heads_ms"] = membership_timings.get(
+                    "host_heads_ms",
+                    0.0,
+                )
+                started = time.perf_counter()
                 self._leases.delete(cur, self._membership.row_urls(pending_rows))
+                diagnostics["admit_delete_leases_ms"] = _elapsed_ms(started)
                 count = len(pending_rows)
         except Exception:
             self._conn.rollback()
+            self._last_admission_diagnostics = diagnostics
             logger.exception("Failed to admit %d URLs", len(tasks))
             return 0
 
+        started = time.perf_counter()
         self._conn.commit()
+        diagnostics["admit_commit_ms"] = _elapsed_ms(started)
+        self._last_admission_diagnostics = diagnostics
         return count
 
     def admit_discovered_tasks(self, tasks: list[CrawlTask]) -> int:

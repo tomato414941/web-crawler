@@ -21,6 +21,16 @@ from crawler.result import CrawlFailure, CrawlResult, CrawlStageTimings
 from crawler.telemetry import FinalizerTelemetry, TelemetryAccumulator
 from crawler.url_ledger import CrawlTask
 
+_ADMISSION_DIAGNOSTICS = {
+    "admit_update_intents_ms": 0.1,
+    "admit_fetch_rows_ms": 0.2,
+    "admit_delete_membership_ms": 0.3,
+    "admit_insert_membership_ms": 0.4,
+    "admit_host_heads_ms": 0.5,
+    "admit_delete_leases_ms": 0.6,
+    "admit_commit_ms": 0.7,
+}
+
 
 class _FakeLedger:
     def __init__(self, task):
@@ -50,6 +60,9 @@ class _FakeLedger:
     def admit_discovered_tasks(self, tasks):
         self.place_many(tasks)
         return len(tasks)
+
+    def last_admission_diagnostics(self):
+        return dict(_ADMISSION_DIAGNOSTICS)
 
     def pending_count(self):
         return 0
@@ -138,6 +151,13 @@ def test_timing_accumulator_summarizes_stage_percentiles():
                 new_tasks_count=3,
                 discover_ms=2.0,
                 admit_ms=4.0,
+                admit_update_intents_ms=0.1,
+                admit_fetch_rows_ms=0.2,
+                admit_delete_membership_ms=0.3,
+                admit_insert_membership_ms=0.4,
+                admit_host_heads_ms=0.5,
+                admit_delete_leases_ms=0.6,
+                admit_commit_ms=0.7,
                 mark_done_ms=1.0,
                 total_ms=8.0,
             ),
@@ -161,6 +181,8 @@ def test_timing_accumulator_summarizes_stage_percentiles():
     assert summary["finalizer"]["discover_ms"]["count"] == 1
     assert summary["finalizer"]["discover_ms"]["p95"] == 2.0
     assert summary["finalizer"]["admit_ms"]["p95"] == 4.0
+    assert summary["finalizer"]["admit_insert_membership_ms"]["p95"] == 0.4
+    assert summary["finalizer"]["admit_host_heads_ms"]["p95"] == 0.5
     assert summary["finalizer"]["total_ms"]["p95"] == 8.0
     assert summary["counts"]["finalizer_kinds"] == {"success": 1}
     assert summary["counts"]["finalizer_new_tasks"] == {
@@ -395,6 +417,13 @@ async def test_success_finalizer_records_operation_breakdown():
     assert finalized.timings.finalizer.new_tasks_count == 1
     assert finalized.timings.finalizer.discover_ms >= 0
     assert finalized.timings.finalizer.admit_ms >= 0
+    assert finalized.timings.finalizer.admit_update_intents_ms == 0.1
+    assert finalized.timings.finalizer.admit_fetch_rows_ms == 0.2
+    assert finalized.timings.finalizer.admit_delete_membership_ms == 0.3
+    assert finalized.timings.finalizer.admit_insert_membership_ms == 0.4
+    assert finalized.timings.finalizer.admit_host_heads_ms == 0.5
+    assert finalized.timings.finalizer.admit_delete_leases_ms == 0.6
+    assert finalized.timings.finalizer.admit_commit_ms == 0.7
     assert finalized.timings.finalizer.host_success_ms >= 0
     assert finalized.timings.finalizer.mark_done_ms >= 0
     assert finalized.timings.finalizer.total_ms >= 0
@@ -492,6 +521,8 @@ async def test_crawler_engine_records_stage_timings():
     assert result.timings.finalizer.new_tasks_count == 1
     assert result.timings.finalizer.discover_ms >= 0
     assert result.timings.finalizer.admit_ms >= 0
+    assert result.timings.finalizer.admit_insert_membership_ms == 0.4
+    assert result.timings.finalizer.admit_host_heads_ms == 0.5
     assert result.timings.finalizer.mark_done_ms >= 0
     assert result.timings.finalizer.total_ms >= 0
     assert result.timings.lease_ms >= 0
@@ -526,6 +557,8 @@ async def test_crawler_engine_records_stage_timings():
     assert timing_summary["stages"]["rate_limit_ms"]["count"] == 1
     assert timing_summary["stages"]["fetch_ms"]["count"] == 1
     assert timing_summary["finalizer"]["total_ms"]["count"] == 1
+    assert timing_summary["finalizer"]["admit_host_heads_ms"]["count"] == 1
+    assert timing_summary["finalizer"]["admit_host_heads_ms"]["p95"] == 0.5
     assert timing_summary["counts"]["finalizer_kinds"] == {"success": 1}
     assert timing_summary["counts"]["finalizer_new_tasks"]["total"] == 1
     assert timing_summary["counts"]["fetch_outcomes"]["ok"] == 1

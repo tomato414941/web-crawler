@@ -14,6 +14,7 @@ from crawler.host_runnable_heads import (
 from crawler.host_store import HostStore
 from crawler.host_ledger import HOST_LEDGER_TABLE
 from crawler.url_ledger import (
+    ADMISSION_DIAGNOSTIC_FIELDS,
     BLOCKED_HOST_BACKOFF_TABLE,
     CrawlTask,
     HOST_RUNNABLE_HEADS_TABLE,
@@ -367,6 +368,27 @@ class TestUrlLedger:
         assert admitted == 2
         assert explore_counts == (0, 1, 0)
         assert refresh_counts == (0, 0, 1)
+
+    def test_admit_discovered_tasks_records_admission_diagnostics(self, ledger):
+        ledger.discover_many(
+            [
+                CrawlTask(url="http://example.com/one"),
+                CrawlTask(url="http://example.com/two"),
+            ]
+        )
+
+        admitted = ledger.admit_discovered_tasks(
+            [
+                CrawlTask(url="http://example.com/one"),
+                CrawlTask(url="http://example.com/two"),
+            ]
+        )
+        diagnostics = ledger.last_admission_diagnostics()
+
+        assert admitted == 2
+        assert set(diagnostics) == set(ADMISSION_DIAGNOSTIC_FIELDS)
+        for value in diagnostics.values():
+            assert value >= 0.0
 
     def test_prepare_tasks_prefers_more_urgent_surface(self, ledger):
         prepared = ledger._prepare_tasks(
