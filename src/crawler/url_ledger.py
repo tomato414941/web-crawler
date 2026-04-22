@@ -14,6 +14,7 @@ import psycopg2.extras
 from .config import settings
 from .host_runnable_heads import (
     HostRunnableHead,
+    HostRunnableHeadDirtyRefreshSummary,
     HostRunnableHeadRepairSummary,
     HostRunnableHeadStore,
 )
@@ -27,6 +28,7 @@ from .scheduler_membership import (
     QUEUE_RUNNABLE,
     QUEUE_SCHEDULED,
     QUEUE_TABLES,
+    HOST_HEAD_UPDATE_DIRTY,
     SCHEDULER_SURFACE_NORMAL,
     SCHEDULER_SURFACE_URGENCY,
     SCHEDULER_SURFACE_REFRESH,
@@ -99,6 +101,7 @@ QUEUE_REQUIRED_COLUMNS = {
 }
 LEASE_TABLE = ACTIVE_LEASES_TABLE
 HOST_RUNNABLE_HEADS_TABLE = "host_runnable_heads"
+HOST_RUNNABLE_HEAD_DIRTY_HOSTS_TABLE = "host_runnable_head_dirty_hosts"
 HOST_RUNNABLE_HEADS_REQUIRED_COLUMNS = {
     "physical_queue",
     "host",
@@ -111,6 +114,11 @@ HOST_RUNNABLE_HEADS_REQUIRED_COLUMNS = {
     "latency_penalty",
     "runnable_at",
     "refreshed_at",
+}
+HOST_RUNNABLE_HEAD_DIRTY_HOSTS_REQUIRED_COLUMNS = {
+    "physical_queue",
+    "host",
+    "marked_at",
 }
 BLOCKED_QUEUE_REQUIRED_COLUMNS = {
     "url",
@@ -141,6 +149,7 @@ HOST_HEAD_READ_MODEL_LOOKAHEAD = HOST_HEAD_LOOKAHEAD * 4
 __all__ = [
     "BLOCKED_HOST_BACKOFF_TABLE",
     "CrawlTask",
+    "HOST_RUNNABLE_HEAD_DIRTY_HOSTS_TABLE",
     "HOST_RUNNABLE_HEADS_TABLE",
     "INTENT_EXPLORE",
     "INTENT_REFRESH",
@@ -283,6 +292,7 @@ class UrlLedger:
             conn,
             blocked_queue_table=BLOCKED_HOST_BACKOFF_TABLE,
             host_runnable_heads_table=HOST_RUNNABLE_HEADS_TABLE,
+            host_runnable_head_dirty_hosts_table=HOST_RUNNABLE_HEAD_DIRTY_HOSTS_TABLE,
         )
         self._leases = ExecutionLeaseStore(
             conn,
@@ -295,6 +305,7 @@ class UrlLedger:
             normalize_physical_queue=self._normalize_physical_queue,
             normalized_surface_queues=self._normalized_surface_queues,
             latency_penalty_sql=self._latency_penalty_sql,
+            dirty_hosts_table_name=HOST_RUNNABLE_HEAD_DIRTY_HOSTS_TABLE,
         )
         self._membership.attach_host_heads(self._host_heads)
         self._lease_telemetry = HostFirstLeaseTelemetry()
@@ -632,6 +643,20 @@ class UrlLedger:
                 self._conn,
                 HOST_RUNNABLE_HEADS_TABLE,
                 HOST_RUNNABLE_HEADS_REQUIRED_COLUMNS,
+            )
+            cur.execute(
+                "SELECT to_regclass(%s)",
+                (f"public.{HOST_RUNNABLE_HEAD_DIRTY_HOSTS_TABLE}",),
+            )
+            if cur.fetchone()[0] is None:
+                raise RuntimeError(
+                    "missing scheduler host runnable-head dirty table: "
+                    f"{HOST_RUNNABLE_HEAD_DIRTY_HOSTS_TABLE}"
+                )
+            assert_public_table_columns(
+                self._conn,
+                HOST_RUNNABLE_HEAD_DIRTY_HOSTS_TABLE,
+                HOST_RUNNABLE_HEAD_DIRTY_HOSTS_REQUIRED_COLUMNS,
             )
 
     def _normalize_physical_queue(self, physical_queue: str | None) -> str:
@@ -998,6 +1023,22 @@ class UrlLedger:
             now=now,
         )
 
+    def refresh_dirty_host_runnable_heads(
+        self,
+        *,
+        limit: int,
+        runnable_surface: str | None = None,
+        physical_queues: list[str] | None = None,
+        now: float | None = None,
+    ) -> HostRunnableHeadDirtyRefreshSummary:
+        """Refresh a bounded batch of dirty host-head read-model rows."""
+        return self._host_heads.refresh_dirty_hosts(
+            limit=limit,
+            runnable_surface=runnable_surface,
+            physical_queues=physical_queues,
+            now=now,
+        )
+
     def host_runnable_heads_from_read_model(
         self,
         *,
@@ -1329,7 +1370,11 @@ class UrlLedger:
                     physical_queue_by_url=self._admission_physical_queue_by_url(prepared_tasks),
                     default_physical_queue=self._default_scheduled_physical_queue(),
                 )
-                membership_timings = self._membership.replace_pending_rows(cur, pending_rows)
+                membership_timings = self._membership.replace_pending_rows(
+                    cur,
+                    pending_rows,
+                    host_head_update=HOST_HEAD_UPDATE_DIRTY,
+                )
                 diagnostics["admit_delete_membership_ms"] = membership_timings.get(
                     "delete_membership_ms",
                     0.0,
@@ -1453,7 +1498,11 @@ class UrlLedger:
                     candidate_rows,
                     normalized_physical_queue,
                 )
-                self._membership.replace_pending_rows(cur, pending_rows)
+                self._membership.replace_pending_rows(
+                    cur,
+                    pending_rows,
+                    host_head_update=HOST_HEAD_UPDATE_DIRTY,
+                )
                 count = len(pending_rows)
         except Exception:
             self._conn.rollback()

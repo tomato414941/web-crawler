@@ -78,6 +78,23 @@ class HostRunnableHeadRepairSummary:
         }
 
 
+@dataclass(frozen=True)
+class HostRunnableHeadDirtyRefreshSummary:
+    """Bounded refresh result for dirty host-head projection rows."""
+
+    selected_hosts: int = 0
+    refreshed_hosts: int = 0
+    remaining_hosts: int = 0
+
+    def as_dict(self) -> dict[str, int]:
+        """Return a stable runtime payload."""
+        return {
+            "selected_hosts": self.selected_hosts,
+            "refreshed_hosts": self.refreshed_hosts,
+            "remaining_hosts": self.remaining_hosts,
+        }
+
+
 class HostRunnableHeadStore:
     """Owns the loose host-level runnable-head projection."""
 
@@ -90,9 +107,11 @@ class HostRunnableHeadStore:
         normalize_physical_queue: Callable[[str | None], str],
         normalized_surface_queues: Callable[..., list[str]],
         latency_penalty_sql: Callable[..., str],
+        dirty_hosts_table_name: str,
     ):
         self._conn = conn
         self._table_name = table_name
+        self._dirty_hosts_table_name = dirty_hosts_table_name
         self._queue_table_sql = queue_table_sql
         self._normalize_physical_queue = normalize_physical_queue
         self._normalized_surface_queues = normalized_surface_queues
@@ -418,6 +437,74 @@ class HostRunnableHeadStore:
             logger.exception("Failed to rebuild host runnable heads")
             raise
         return rebuilt
+
+    def refresh_dirty_hosts(
+        self,
+        *,
+        limit: int,
+        runnable_surface: str | None = None,
+        physical_queues: list[str] | None = None,
+        now: float | None = None,
+    ) -> HostRunnableHeadDirtyRefreshSummary:
+        """Refresh a bounded batch of dirty host-head rows."""
+        if limit <= 0:
+            return HostRunnableHeadDirtyRefreshSummary()
+
+        refreshed_at = time.time() if now is None else now
+        normalized_physical_queues = self._normalized_surface_queues(
+            runnable_surface=runnable_surface,
+            physical_queues=physical_queues,
+        )
+
+        try:
+            with self._conn.cursor() as cur:
+                cur.execute(
+                    f"""SELECT physical_queue, host
+                        FROM {self._dirty_hosts_table_name}
+                        WHERE physical_queue = ANY(%s)
+                        ORDER BY marked_at ASC, physical_queue ASC, host ASC
+                        LIMIT %s
+                        FOR UPDATE SKIP LOCKED""",
+                    (normalized_physical_queues, limit),
+                )
+                pairs = [
+                    (self._normalize_physical_queue(physical_queue), host)
+                    for physical_queue, host in cur.fetchall()
+                ]
+                refreshed_hosts = self.refresh_hosts_in_tx(
+                    cur,
+                    pairs,
+                    refreshed_at=refreshed_at,
+                )
+                if pairs:
+                    psycopg2.extras.execute_values(
+                        cur,
+                        f"""DELETE FROM {self._dirty_hosts_table_name} AS dirty
+                            USING (VALUES %s) AS refreshed(physical_queue, host)
+                            WHERE dirty.physical_queue = refreshed.physical_queue
+                              AND dirty.host = refreshed.host""",
+                        pairs,
+                        template="(%s, %s)",
+                        page_size=200,
+                    )
+                cur.execute(
+                    f"""SELECT COUNT(*)
+                        FROM {self._dirty_hosts_table_name}
+                        WHERE physical_queue = ANY(%s)""",
+                    (normalized_physical_queues,),
+                )
+                (remaining_hosts,) = cur.fetchone()
+            self._conn.commit()
+        except Exception:
+            self._conn.rollback()
+            logger.exception("Failed to refresh dirty host runnable heads")
+            raise
+
+        return HostRunnableHeadDirtyRefreshSummary(
+            selected_hosts=len(pairs),
+            refreshed_hosts=refreshed_hosts,
+            remaining_hosts=int(remaining_hosts or 0),
+        )
 
     def _rebuild_queue(self, cur, *, physical_queue: str, refreshed_at: float) -> int:
         normalized_physical_queue = self._normalize_physical_queue(physical_queue)

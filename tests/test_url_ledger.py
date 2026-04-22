@@ -17,6 +17,7 @@ from crawler.url_ledger import (
     ADMISSION_DIAGNOSTIC_FIELDS,
     BLOCKED_HOST_BACKOFF_TABLE,
     CrawlTask,
+    HOST_RUNNABLE_HEAD_DIRTY_HOSTS_TABLE,
     HOST_RUNNABLE_HEADS_TABLE,
     INTENT_EXPLORE,
     INTENT_REFRESH,
@@ -191,6 +192,7 @@ class TestUrlLedger:
         conn.autocommit = False
         with conn.cursor() as cur:
             cur.execute("DROP TABLE IF EXISTS schema_migrations")
+            cur.execute(f"DROP TABLE IF EXISTS {HOST_RUNNABLE_HEAD_DIRTY_HOSTS_TABLE}")
             cur.execute(f"DROP TABLE IF EXISTS {HOST_RUNNABLE_HEADS_TABLE}")
             cur.execute(f"DROP TABLE IF EXISTS {LEASE_TABLE}")
             cur.execute(f"DROP TABLE IF EXISTS {PHYSICAL_QUEUE_TABLES[QUEUE_RUNNABLE]}")
@@ -387,8 +389,45 @@ class TestUrlLedger:
 
         assert admitted == 2
         assert set(diagnostics) == set(ADMISSION_DIAGNOSTIC_FIELDS)
+        with ledger._conn.cursor() as cur:
+            cur.execute(f"SELECT COUNT(*) FROM {HOST_RUNNABLE_HEAD_DIRTY_HOSTS_TABLE}")
+            (dirty_count,) = cur.fetchone()
+        assert dirty_count == 1
         for value in diagnostics.values():
             assert value >= 0.0
+
+    def test_refresh_dirty_host_runnable_heads_updates_read_model(self, ledger):
+        now = 1000.0
+        ledger.place(
+            CrawlTask(
+                url="http://dirty.com/one",
+                added_at=now - 1,
+                next_fetch_at=now - 1,
+                runnable_surface=SCHEDULER_SURFACE_RUNNABLE,
+            )
+        )
+
+        assert ledger.host_runnable_heads_from_read_model(
+            runnable_surface=SCHEDULER_SURFACE_RUNNABLE,
+            now=now,
+        ) == []
+
+        summary = ledger.refresh_dirty_host_runnable_heads(limit=10, now=now)
+        heads = ledger.host_runnable_heads_from_read_model(
+            runnable_surface=SCHEDULER_SURFACE_RUNNABLE,
+            now=now,
+        )
+
+        assert summary.selected_hosts == 1
+        assert summary.refreshed_hosts == 1
+        assert summary.remaining_hosts == 0
+        assert [(head.host_key, head.url) for head in heads] == [
+            ("dirty.com", "http://dirty.com/one")
+        ]
+        with ledger._conn.cursor() as cur:
+            cur.execute(f"SELECT COUNT(*) FROM {HOST_RUNNABLE_HEAD_DIRTY_HOSTS_TABLE}")
+            (dirty_count,) = cur.fetchone()
+        assert dirty_count == 0
 
     def test_prepare_tasks_prefers_more_urgent_surface(self, ledger):
         prepared = ledger._prepare_tasks(
@@ -813,6 +852,7 @@ class TestUrlLedger:
         ledger.place(CrawlTask(url="http://a.com/1", added_at=1000, next_fetch_at=now - 1))
         ledger.place(CrawlTask(url="http://a.com/2", added_at=1001, next_fetch_at=now - 1))
         ledger.place(CrawlTask(url="http://b.com/1", added_at=900, next_fetch_at=now - 1))
+        ledger.refresh_dirty_host_runnable_heads(limit=10, now=now)
 
         heads = ledger.host_runnable_heads_from_read_model(
             runnable_surface=SCHEDULER_SURFACE_RUNNABLE,
@@ -843,6 +883,7 @@ class TestUrlLedger:
                 runnable_surface=SCHEDULER_SURFACE_RUNNABLE,
             )
         )
+        ledger.refresh_dirty_host_runnable_heads(limit=10, now=now)
 
         heads = ledger.host_runnable_heads_from_read_model(
             runnable_surface=SCHEDULER_SURFACE_RUNNABLE,
@@ -873,6 +914,7 @@ class TestUrlLedger:
                 runnable_surface=SCHEDULER_SURFACE_RUNNABLE,
             )
         )
+        ledger.refresh_dirty_host_runnable_heads(limit=10, now=now)
 
         heads = ledger.host_runnable_heads_from_read_model(
             runnable_surface=SCHEDULER_SURFACE_RUNNABLE,
@@ -888,6 +930,7 @@ class TestUrlLedger:
         now = 1000.0
         ledger.place(CrawlTask(url="http://a.com/1", added_at=1000, next_fetch_at=now - 1))
         ledger.place(CrawlTask(url="http://a.com/2", added_at=1001, next_fetch_at=now - 1))
+        ledger.refresh_dirty_host_runnable_heads(limit=10, now=now)
 
         leased = ledger.lease_next(
             lease_strategy=LEASE_STRATEGY_HOST_FIRST,
@@ -946,6 +989,7 @@ class TestUrlLedger:
                 runnable_surface=SCHEDULER_SURFACE_RUNNABLE,
             )
         )
+        ledger.refresh_dirty_host_runnable_heads(limit=10, now=now)
 
         assert ledger.host_runnable_heads_from_read_model(
             runnable_surface=SCHEDULER_SURFACE_RUNNABLE,
@@ -1001,6 +1045,7 @@ class TestUrlLedger:
                 runnable_surface=SCHEDULER_SURFACE_RUNNABLE,
             )
         )
+        ledger.refresh_dirty_host_runnable_heads(limit=10, now=now)
 
         warm_heads = ledger.host_runnable_heads_from_read_model(
             runnable_surface=SCHEDULER_SURFACE_RUNNABLE,
@@ -1037,6 +1082,7 @@ class TestUrlLedger:
                 runnable_surface=SCHEDULER_SURFACE_RUNNABLE,
             )
         )
+        ledger.refresh_dirty_host_runnable_heads(limit=10, now=now)
 
         leased = ledger.lease_next(
             lease_strategy=LEASE_STRATEGY_HOST_FIRST,
@@ -1085,6 +1131,7 @@ class TestUrlLedger:
                 runnable_surface=SCHEDULER_SURFACE_RUNNABLE,
             )
         )
+        ledger.refresh_dirty_host_runnable_heads(limit=10, now=now)
         with ledger._conn.cursor() as cur:
             cur.execute(
                 f"DELETE FROM {PHYSICAL_QUEUE_TABLES[QUEUE_RUNNABLE]} WHERE url = %s",
@@ -1120,6 +1167,7 @@ class TestUrlLedger:
                 runnable_surface=SCHEDULER_SURFACE_RUNNABLE,
             )
         )
+        ledger.refresh_dirty_host_runnable_heads(limit=10, now=now)
         with ledger._conn.cursor() as cur:
             cur.execute(
                 f"""UPDATE {HOST_RUNNABLE_HEADS_TABLE}

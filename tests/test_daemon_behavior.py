@@ -11,6 +11,7 @@ from crawler.daemon import CrawlDaemon, _format_error_breakdown
 from crawler.url_ledger import (
     BLOCKED_HOST_BACKOFF_TABLE,
     CrawlTask,
+    HOST_RUNNABLE_HEAD_DIRTY_HOSTS_TABLE,
     LEASE_TABLE,
     PHYSICAL_QUEUE_TABLES,
     QUEUE_REFRESH,
@@ -35,6 +36,7 @@ def _reset_schema(dsn: str) -> None:
     try:
         with conn.cursor() as cur:
             cur.execute("DROP TABLE IF EXISTS public.schema_migrations")
+            cur.execute(f"DROP TABLE IF EXISTS public.{HOST_RUNNABLE_HEAD_DIRTY_HOSTS_TABLE}")
             cur.execute(f"DROP TABLE IF EXISTS public.{HOST_LEDGER_TABLE}")
             cur.execute("DROP TABLE IF EXISTS public.host_state")
             cur.execute(f"DROP TABLE IF EXISTS public.{PHYSICAL_QUEUE_TABLES[QUEUE_RUNNABLE]}")

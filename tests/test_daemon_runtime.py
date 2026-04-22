@@ -88,3 +88,54 @@ def test_idle_runtime_payload_preserves_pipeline_liveness():
     assert payload["active_cycle"]["parser_liveness"] == payload["parser_liveness"]
     assert payload["active_cycle"]["finalizer_liveness"] == payload["finalizer_liveness"]
     assert payload["active_cycle"]["publisher_liveness"] == payload["publisher_liveness"]
+
+
+def test_runtime_payload_includes_host_head_dirty_refresh():
+    daemon = CrawlDaemon(
+        seeds=["https://example.com/"],
+        postgres_dsn="postgresql://unused",
+    )
+    daemon._last_host_head_dirty_refresh = {
+        "selected_hosts": 3,
+        "refreshed_hosts": 2,
+        "remaining_hosts": 1,
+    }
+
+    payload = daemon._idle_runtime_payload(
+        state="cycle_complete",
+        pending=10,
+        runnable=8,
+        cycle=3,
+    )
+
+    assert payload["host_head_dirty_refresh"] == {
+        "selected_hosts": 3,
+        "refreshed_hosts": 2,
+        "remaining_hosts": 1,
+    }
+    assert payload["active_cycle"]["host_head_dirty_refresh"] == {
+        "selected_hosts": 3,
+        "refreshed_hosts": 2,
+        "remaining_hosts": 1,
+    }
+
+
+def test_refresh_dirty_host_runnable_heads_records_summary():
+    class FakeLedger:
+        def refresh_dirty_host_runnable_heads(self, limit):
+            assert limit == 7
+            return {"selected_hosts": 4, "refreshed_hosts": 3, "remaining_hosts": 2}
+
+    daemon = CrawlDaemon(
+        seeds=["https://example.com/"],
+        postgres_dsn="postgresql://unused",
+    )
+    daemon._host_head_repair_limit = 7
+
+    daemon._refresh_dirty_host_runnable_heads(FakeLedger())
+
+    assert daemon._last_host_head_dirty_refresh == {
+        "selected_hosts": 4,
+        "refreshed_hosts": 3,
+        "remaining_hosts": 2,
+    }
