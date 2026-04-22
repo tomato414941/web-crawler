@@ -62,6 +62,9 @@ read-model boundaries explicit, observable, and testable:
 - Moved host runnable-head ranking and runnable-time SQL policy into `HostRunnableHeadPolicy`.
 - Added `HostRunnableHeadMaintenance` as the named maintenance facade for rebuild, dirty refresh,
   repair, and stale-candidate deletion without changing schema or external callers.
+- Moved host runnable-head maintenance SQL implementation into `HostRunnableHeadMaintenance`:
+  - `HostRunnableHeadStore` keeps the public API, normal read/write path, and shared SQL primitives.
+  - maintenance now owns rebuild, dirty refresh, repair, and stale-candidate deletion bodies.
 
 ## Verification
 
@@ -90,14 +93,16 @@ read-model boundaries explicit, observable, and testable:
   `docs/scheduler-execution.ja.md`.
 - `HostRunnableHeadStore` still owns the public API and SQL primitives, but ranking policy and
   maintenance responsibility now have explicit names.
+- `HostRunnableHeadMaintenance` is no longer only a delegating facade; it owns maintenance control
+  flow and SQL while preserving existing external behavior.
 - No schema migration or caller migration was required for this slice.
 - Existing tests covering scheduler stats, lease diagnostics, retry transitions, and runtime stats pass.
 - No production speed change was required for this slice.
 
 ## Next candidates
 
-- If `HostRunnableHeadStore` grows again, split actual maintenance SQL into a dedicated module while
-  preserving the current public API.
+- If host runnable maintenance grows again, move it to a dedicated module without changing the
+  current public API.
 - Continue reducing `UrlLedger` facade breadth around requeue, lease selection, and host-head
   operations.
 - Continue slimming `CrawlerEngine` by extracting reusable fetch failure classification if it starts
