@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import time
 
 import psycopg2.extras
 
@@ -71,6 +72,15 @@ class SchedulerQueueRow:
 
 
 SchedulerQueueRowInput = SchedulerQueueRow | tuple[str, str, float, float, float, str]
+
+
+def _elapsed_ms(started_at: float) -> float:
+    return round((time.perf_counter() - started_at) * 1000, 1)
+
+
+def _add_timing(timings: dict[str, float] | None, key: str, elapsed_ms: float) -> None:
+    if timings is not None:
+        timings[key] = round(timings.get(key, 0.0) + elapsed_ms, 1)
 
 
 class SchedulerMembershipStore:
@@ -231,23 +241,36 @@ class SchedulerMembershipStore:
             return
         self._host_heads.refresh_hosts_in_tx(cur, pairs)
 
-    def delete_queue_entries(self, cur, urls: list[str]) -> None:
+    def delete_queue_entries(
+        self,
+        cur,
+        urls: list[str],
+        *,
+        timings: dict[str, float] | None = None,
+    ) -> None:
         if not urls:
             return
+        started = time.perf_counter()
         affected_pairs = self.queue_head_pairs_for_urls(cur, urls)
         for table_name in QUEUE_TABLES:
             cur.execute(f"DELETE FROM {table_name} WHERE url = ANY(%s)", (urls,))
         cur.execute(f"DELETE FROM {self._blocked_queue_table} WHERE url = ANY(%s)", (urls,))
+        _add_timing(timings, "delete_membership_ms", _elapsed_ms(started))
+
+        host_heads_started = time.perf_counter()
         cur.execute(
             f"DELETE FROM {self._host_runnable_heads_table} WHERE head_url = ANY(%s)",
             (urls,),
         )
         self.refresh_host_heads_for_pairs(cur, affected_pairs)
+        _add_timing(timings, "host_heads_ms", _elapsed_ms(host_heads_started))
 
     def insert_pending_rows(
         self,
         cur,
         rows: list[SchedulerQueueRowInput],
+        *,
+        timings: dict[str, float] | None = None,
     ) -> None:
         row_tuples = self._row_tuples(rows)
         grouped: dict[str, list[tuple[str, str, float, float, float, str]]] = {
@@ -266,6 +289,7 @@ class SchedulerMembershipStore:
                 )
             )
 
+        started = time.perf_counter()
         for physical_queue, pending_rows in grouped.items():
             if not pending_rows:
                 continue
@@ -283,17 +307,27 @@ class SchedulerMembershipStore:
                 pending_rows,
                 page_size=200,
             )
+        _add_timing(timings, "insert_membership_ms", _elapsed_ms(started))
+
         if self._host_heads is not None:
+            host_heads_started = time.perf_counter()
             self._host_heads.upsert_candidates_in_tx(cur, row_tuples)
+            _add_timing(timings, "host_heads_ms", _elapsed_ms(host_heads_started))
 
     def replace_pending_rows(
         self,
         cur,
         rows: list[SchedulerQueueRowInput],
-    ) -> None:
+    ) -> dict[str, float]:
+        timings = {
+            "delete_membership_ms": 0.0,
+            "insert_membership_ms": 0.0,
+            "host_heads_ms": 0.0,
+        }
         row_tuples = self._row_tuples(rows)
         normalized_urls = sorted({normalize_url(url) for url, *_ in row_tuples if url})
         if not normalized_urls:
-            return
-        self.delete_queue_entries(cur, normalized_urls)
-        self.insert_pending_rows(cur, row_tuples)
+            return timings
+        self.delete_queue_entries(cur, normalized_urls, timings=timings)
+        self.insert_pending_rows(cur, row_tuples, timings=timings)
+        return timings

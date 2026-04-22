@@ -37,6 +37,8 @@ stall by making crawl pipeline stages explicit, observable, and testable:
   stats.
 - Added finalizer operation timing breakdown for discovery, admission, host updates, and scheduler
   state transitions.
+- Added admission operation timing breakdown for intent updates, row fetches, queue membership
+  replacement, host-head updates, lease cleanup, and commit time.
 - Extracted fetch-stage queue handoff orchestration out of `CrawlerEngine`.
 - Added pipeline contract tests for queue metrics, liveness, finalizer error survival, and publisher
   error survival.
@@ -59,6 +61,7 @@ stall by making crawl pipeline stages explicit, observable, and testable:
 - Fetch workers now delegate queue handoff to a pipeline stage while keeping HTTP and scheduler
   details in `CrawlerEngine` callbacks.
 - `timing_summary["finalizer"]` now exposes finalizer sub-stage p50/p95/max values.
+- `timing_summary["finalizer"]` now exposes admission sub-stage p50/p95/max values.
 - Pipeline boundaries are documented in `docs/system-architecture.md` and
   `docs/system-architecture.ja.md`.
 - Existing tests covering scheduler stats, lease diagnostics, retry transitions, and runtime stats pass.
@@ -72,6 +75,6 @@ stall by making crawl pipeline stages explicit, observable, and testable:
   operations.
 - Continue slimming `CrawlerEngine` by extracting reusable fetch failure classification if it starts
   obscuring HTTP behavior changes.
-- Use finalizer operation timing to decide whether the next speed fix belongs in discovery admission,
-  host-state writes, or scheduler state transitions.
+- Use admission operation timing to decide whether the next speed fix belongs in queue membership
+  replacement, host-head read-model maintenance, or lease cleanup.
 - Keep detailed speed investigation separate from this design-simplification milestone.
