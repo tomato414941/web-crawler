@@ -167,6 +167,17 @@ synchronously.
 
 Pipeline stages are operational boundaries, not durable URL identity boundaries.
 
+Runtime stage code should make these boundaries explicit:
+
+- queue ownership and backpressure belong to the pipeline runtime
+- per-stage liveness belongs to the pipeline runtime
+- finalize owns scheduler mutation after parsing
+- persist owns blocking storage and output writes
+- crawler orchestration wires stages together, but should not accumulate stage policy
+
+Every stage item must either complete or fail visibly. Silent worker death and unbounded queues are
+architecture bugs, not incidental implementation details.
+
 ## 8. Read Models And Operator Surfaces
 
 Operator views should be derived from primary state, not treated as scheduler truth.
