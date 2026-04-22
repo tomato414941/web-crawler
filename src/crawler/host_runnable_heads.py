@@ -97,29 +97,23 @@ class HostRunnableHeadDirtyRefreshSummary:
         }
 
 
-class HostRunnableHeadStore:
-    """Owns the loose host-level runnable-head projection."""
+@dataclass(frozen=True)
+class HostRunnableHeadSqlParts:
+    """SQL fragments needed to derive a host runnable-head row."""
 
-    def __init__(
-        self,
-        conn,
-        *,
-        table_name: str,
-        queue_table_sql: Callable[[str], str],
-        normalize_physical_queue: Callable[[str | None], str],
-        normalized_surface_queues: Callable[..., list[str]],
-        latency_penalty_sql: Callable[..., str],
-        dirty_hosts_table_name: str,
-    ):
-        self._conn = conn
-        self._table_name = table_name
-        self._dirty_hosts_table_name = dirty_hosts_table_name
-        self._queue_table_sql = queue_table_sql
-        self._normalize_physical_queue = normalize_physical_queue
-        self._normalized_surface_queues = normalized_surface_queues
+    queue_table: str
+    latency_penalty: str
+    runnable_at: str
+    execution_tier: str
+
+
+class HostRunnableHeadPolicy:
+    """Owns host execution policy SQL used by the read model."""
+
+    def __init__(self, latency_penalty_sql: Callable[..., str]):
         self._latency_penalty_sql = latency_penalty_sql
 
-    def _execution_tier_sql(
+    def execution_tier_sql(
         self,
         *,
         host_state_alias: str,
@@ -140,25 +134,93 @@ class HostRunnableHeadStore:
             f"ELSE {HOST_EXECUTION_TIER_PROBING} END"
         )
 
-    def _head_sql(self, *, physical_queue: str) -> tuple[str, str, str, str]:
-        normalized_physical_queue = self._normalize_physical_queue(physical_queue)
-        queue_table = self._queue_table_sql(normalized_physical_queue)
+    def head_sql_parts(
+        self,
+        *,
+        queue_table: str,
+    ) -> HostRunnableHeadSqlParts:
         latency_penalty = self._latency_penalty_sql(
             "candidate",
             latency_ms_sql="COALESCE(candidate_host_state.latency_ewma_ms, 0)",
         )
-        runnable_at = (
-            "GREATEST("
-            "candidate.next_fetch_at, "
-            "COALESCE(candidate_host_state.next_request_at, 0), "
-            "COALESCE(candidate_host_state.backoff_until, 0)"
-            ")"
+        runnable_at = self.candidate_runnable_at_sql(
+            candidate_alias="candidate",
+            host_state_alias="candidate_host_state",
         )
-        execution_tier = self._execution_tier_sql(
+        execution_tier = self.execution_tier_sql(
             host_state_alias="candidate_host_state",
             host_ledger_alias="candidate_host_ledger",
         )
-        return queue_table, latency_penalty, runnable_at, execution_tier
+        return HostRunnableHeadSqlParts(
+            queue_table=queue_table,
+            latency_penalty=latency_penalty,
+            runnable_at=runnable_at,
+            execution_tier=execution_tier,
+        )
+
+    def candidate_runnable_at_sql(self, *, candidate_alias: str, host_state_alias: str) -> str:
+        return (
+            "GREATEST("
+            f"{candidate_alias}.next_fetch_at, "
+            f"COALESCE({host_state_alias}.next_request_at, 0), "
+            f"COALESCE({host_state_alias}.backoff_until, 0)"
+            ")"
+        )
+
+    def effective_head_runnable_at_sql(
+        self,
+        *,
+        head_alias: str,
+        host_state_alias: str,
+    ) -> str:
+        return (
+            "GREATEST("
+            f"{head_alias}.runnable_at, "
+            f"COALESCE({host_state_alias}.next_request_at, 0), "
+            f"COALESCE({host_state_alias}.backoff_until, 0)"
+            ")"
+        )
+
+
+class HostRunnableHeadStore:
+    """Owns the loose host-level runnable-head projection."""
+
+    def __init__(
+        self,
+        conn,
+        *,
+        table_name: str,
+        queue_table_sql: Callable[[str], str],
+        normalize_physical_queue: Callable[[str | None], str],
+        normalized_surface_queues: Callable[..., list[str]],
+        latency_penalty_sql: Callable[..., str],
+        dirty_hosts_table_name: str,
+    ):
+        self._conn = conn
+        self._table_name = table_name
+        self._dirty_hosts_table_name = dirty_hosts_table_name
+        self._queue_table_sql = queue_table_sql
+        self._normalize_physical_queue = normalize_physical_queue
+        self._normalized_surface_queues = normalized_surface_queues
+        self._policy = HostRunnableHeadPolicy(latency_penalty_sql)
+        self._maintenance = HostRunnableHeadMaintenance(self)
+
+    def _execution_tier_sql(
+        self,
+        *,
+        host_state_alias: str,
+        host_ledger_alias: str,
+    ) -> str:
+        return self._policy.execution_tier_sql(
+            host_state_alias=host_state_alias,
+            host_ledger_alias=host_ledger_alias,
+        )
+
+    def _head_sql(self, *, physical_queue: str) -> tuple[str, str, str, str]:
+        normalized_physical_queue = self._normalize_physical_queue(physical_queue)
+        queue_table = self._queue_table_sql(normalized_physical_queue)
+        parts = self._policy.head_sql_parts(queue_table=queue_table)
+        return parts.queue_table, parts.latency_penalty, parts.runnable_at, parts.execution_tier
 
     def refresh_host_in_tx(
         self,
@@ -418,6 +480,56 @@ class HostRunnableHeadStore:
         now: float | None = None,
     ) -> int:
         """Rebuild the loose host-head read model from scheduler queue membership."""
+        return self._maintenance.rebuild(
+            runnable_surface=runnable_surface,
+            physical_queues=physical_queues,
+            now=now,
+        )
+
+    def refresh_dirty_hosts(
+        self,
+        *,
+        limit: int,
+        runnable_surface: str | None = None,
+        physical_queues: list[str] | None = None,
+        now: float | None = None,
+    ) -> HostRunnableHeadDirtyRefreshSummary:
+        """Refresh a bounded batch of dirty host-head rows."""
+        return self._maintenance.refresh_dirty_hosts(
+            limit=limit,
+            runnable_surface=runnable_surface,
+            physical_queues=physical_queues,
+            now=now,
+        )
+
+    def repair(
+        self,
+        *,
+        limit: int,
+        runnable_surface: str | None = None,
+        physical_queues: list[str] | None = None,
+        now: float | None = None,
+    ) -> HostRunnableHeadRepairSummary:
+        """Repair a small sample of stale or missing host-head rows."""
+        return self._maintenance.repair(
+            limit=limit,
+            runnable_surface=runnable_surface,
+            physical_queues=physical_queues,
+            now=now,
+        )
+
+    def delete_candidate(self, *, physical_queue: str, url: str) -> None:
+        """Drop a stale read-model candidate and refresh its host from queue membership."""
+        self._maintenance.delete_candidate(physical_queue=physical_queue, url=url)
+
+    def _rebuild(
+        self,
+        *,
+        runnable_surface: str | None = None,
+        physical_queues: list[str] | None = None,
+        now: float | None = None,
+    ) -> int:
+        """Rebuild the loose host-head read model from scheduler queue membership."""
         refreshed_at = time.time() if now is None else now
         normalized_physical_queues = self._normalized_surface_queues(
             runnable_surface=runnable_surface,
@@ -440,7 +552,7 @@ class HostRunnableHeadStore:
             raise
         return rebuilt
 
-    def refresh_dirty_hosts(
+    def _refresh_dirty_hosts(
         self,
         *,
         limit: int,
@@ -753,12 +865,9 @@ class HostRunnableHeadStore:
             runnable_surface=runnable_surface,
             physical_queues=physical_queues,
         )
-        effective_runnable_at = (
-            "GREATEST("
-            "heads.runnable_at, "
-            "COALESCE(host_state.next_request_at, 0), "
-            "COALESCE(host_state.backoff_until, 0)"
-            ")"
+        effective_runnable_at = self._policy.effective_head_runnable_at_sql(
+            head_alias="heads",
+            host_state_alias="host_state",
         )
         conditions = [
             "heads.physical_queue = ANY(%s)",
@@ -837,7 +946,7 @@ class HostRunnableHeadStore:
             ) in rows
         ]
 
-    def repair(
+    def _repair(
         self,
         *,
         limit: int,
@@ -970,12 +1079,9 @@ class HostRunnableHeadStore:
             runnable_surface=runnable_surface,
             physical_queues=physical_queues,
         )
-        effective_runnable_at = (
-            "GREATEST("
-            "heads.runnable_at, "
-            "COALESCE(host_state.next_request_at, 0), "
-            "COALESCE(host_state.backoff_until, 0)"
-            ")"
+        effective_runnable_at = self._policy.effective_head_runnable_at_sql(
+            head_alias="heads",
+            host_state_alias="host_state",
         )
         with self._conn.cursor() as cur:
             cur.execute(
@@ -1002,7 +1108,7 @@ class HostRunnableHeadStore:
             next_runnable_at=next_runnable_at,
         )
 
-    def delete_candidate(self, *, physical_queue: str, url: str) -> None:
+    def _delete_candidate(self, *, physical_queue: str, url: str) -> None:
         """Drop a stale read-model candidate and refresh its host from queue membership."""
         try:
             with self._conn.cursor() as cur:
@@ -1022,3 +1128,60 @@ class HostRunnableHeadStore:
         except Exception:
             self._conn.rollback()
             logger.debug("Failed to delete stale host runnable-head candidate", exc_info=True)
+
+
+class HostRunnableHeadMaintenance:
+    """Facade for read-model maintenance operations.
+
+    The store keeps the SQL primitives and public read/write API. This facade names the
+    maintenance responsibility separately without changing the existing schema or callers.
+    """
+
+    def __init__(self, store: HostRunnableHeadStore):
+        self._store = store
+
+    def rebuild(
+        self,
+        *,
+        runnable_surface: str | None = None,
+        physical_queues: list[str] | None = None,
+        now: float | None = None,
+    ) -> int:
+        return self._store._rebuild(
+            runnable_surface=runnable_surface,
+            physical_queues=physical_queues,
+            now=now,
+        )
+
+    def refresh_dirty_hosts(
+        self,
+        *,
+        limit: int,
+        runnable_surface: str | None = None,
+        physical_queues: list[str] | None = None,
+        now: float | None = None,
+    ) -> HostRunnableHeadDirtyRefreshSummary:
+        return self._store._refresh_dirty_hosts(
+            limit=limit,
+            runnable_surface=runnable_surface,
+            physical_queues=physical_queues,
+            now=now,
+        )
+
+    def repair(
+        self,
+        *,
+        limit: int,
+        runnable_surface: str | None = None,
+        physical_queues: list[str] | None = None,
+        now: float | None = None,
+    ) -> HostRunnableHeadRepairSummary:
+        return self._store._repair(
+            limit=limit,
+            runnable_surface=runnable_surface,
+            physical_queues=physical_queues,
+            now=now,
+        )
+
+    def delete_candidate(self, *, physical_queue: str, url: str) -> None:
+        self._store._delete_candidate(physical_queue=physical_queue, url=url)
