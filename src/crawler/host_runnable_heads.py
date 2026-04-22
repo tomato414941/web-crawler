@@ -39,7 +39,7 @@ class HostRunnableHead:
     url: str
     next_fetch_at: float
     added_at: float
-    priority: float
+    scheduler_score: float
     runnable_url_count: int
     execution_tier: int
     latency_penalty: int
@@ -164,7 +164,7 @@ class HostRunnableHeadStore:
                         candidate.url,
                         candidate.next_fetch_at,
                         candidate.added_at,
-                        candidate.priority,
+                        candidate.scheduler_score,
                         (
                             SELECT COUNT(*)
                             FROM {queue_table} AS host_rows
@@ -184,7 +184,7 @@ class HostRunnableHeadStore:
                         runnable_at ASC,
                         latency_penalty ASC,
                         candidate.added_at ASC,
-                        candidate.priority DESC,
+                        candidate.scheduler_score DESC,
                         candidate.url ASC
                     LIMIT 1
                 )
@@ -194,7 +194,7 @@ class HostRunnableHeadStore:
                     head_url,
                     head_next_fetch_at,
                     head_added_at,
-                    head_priority,
+                    head_scheduler_score,
                     runnable_url_count,
                     execution_tier,
                     latency_penalty,
@@ -207,7 +207,7 @@ class HostRunnableHeadStore:
                     url,
                     next_fetch_at,
                     added_at,
-                    priority,
+                    scheduler_score,
                     runnable_url_count,
                     execution_tier,
                     latency_penalty,
@@ -218,7 +218,7 @@ class HostRunnableHeadStore:
                     head_url = EXCLUDED.head_url,
                     head_next_fetch_at = EXCLUDED.head_next_fetch_at,
                     head_added_at = EXCLUDED.head_added_at,
-                    head_priority = EXCLUDED.head_priority,
+                    head_scheduler_score = EXCLUDED.head_scheduler_score,
                     runnable_url_count = EXCLUDED.runnable_url_count,
                     execution_tier = EXCLUDED.execution_tier,
                     latency_penalty = EXCLUDED.latency_penalty,
@@ -276,12 +276,12 @@ class HostRunnableHeadStore:
         timestamp = time.time() if refreshed_at is None else refreshed_at
         grouped: dict[tuple[str, str], list[tuple[str, str, float, float, float, str]]] = {}
         for row in rows:
-            url, host, priority, next_fetch_at, added_at, physical_queue = row
+            url, host, scheduler_score, next_fetch_at, added_at, physical_queue = row
             if not url or not host:
                 continue
             key = (self._normalize_physical_queue(physical_queue), host)
             grouped.setdefault(key, []).append(
-                (url, host, priority, next_fetch_at, added_at, key[0])
+                (url, host, scheduler_score, next_fetch_at, added_at, key[0])
             )
 
         candidate_rows = []
@@ -290,7 +290,7 @@ class HostRunnableHeadStore:
                 host_rows,
                 key=lambda row: (row[3], row[4], -row[2], row[0]),
             )
-            url, _host, priority, next_fetch_at, added_at, _physical_queue = best
+            url, _host, scheduler_score, next_fetch_at, added_at, _physical_queue = best
             candidate_rows.append(
                 (
                     physical_queue,
@@ -298,7 +298,7 @@ class HostRunnableHeadStore:
                     url,
                     next_fetch_at,
                     added_at,
-                    priority,
+                    scheduler_score,
                     len(host_rows),
                     timestamp,
                 )
@@ -315,7 +315,7 @@ class HostRunnableHeadStore:
                     head_url,
                     head_next_fetch_at,
                     head_added_at,
-                    head_priority,
+                    head_scheduler_score,
                     runnable_url_count,
                     refreshed_at
                 ) AS (VALUES %s)
@@ -325,7 +325,7 @@ class HostRunnableHeadStore:
                     head_url,
                     head_next_fetch_at,
                     head_added_at,
-                    head_priority,
+                    head_scheduler_score,
                     runnable_url_count,
                     execution_tier,
                     latency_penalty,
@@ -338,7 +338,7 @@ class HostRunnableHeadStore:
                     incoming.head_url,
                     incoming.head_next_fetch_at,
                     incoming.head_added_at,
-                    incoming.head_priority,
+                    incoming.head_scheduler_score,
                     incoming.runnable_url_count,
                     {self._execution_tier_sql(host_state_alias="host_state", host_ledger_alias="host_ledger")}
                         AS execution_tier,
@@ -361,7 +361,7 @@ class HostRunnableHeadStore:
                     head_url = EXCLUDED.head_url,
                     head_next_fetch_at = EXCLUDED.head_next_fetch_at,
                     head_added_at = EXCLUDED.head_added_at,
-                    head_priority = EXCLUDED.head_priority,
+                    head_scheduler_score = EXCLUDED.head_scheduler_score,
                     runnable_url_count = EXCLUDED.runnable_url_count,
                     execution_tier = EXCLUDED.execution_tier,
                     latency_penalty = EXCLUDED.latency_penalty,
@@ -372,14 +372,14 @@ class HostRunnableHeadStore:
                     EXCLUDED.runnable_at,
                     EXCLUDED.latency_penalty,
                     EXCLUDED.head_added_at,
-                    0 - EXCLUDED.head_priority,
+                    0 - EXCLUDED.head_scheduler_score,
                     EXCLUDED.head_url
                 ) < (
                     {self._table_name}.execution_tier,
                     {self._table_name}.runnable_at,
                     {self._table_name}.latency_penalty,
                     {self._table_name}.head_added_at,
-                    0 - {self._table_name}.head_priority,
+                    0 - {self._table_name}.head_scheduler_score,
                     {self._table_name}.head_url
                 )""",
             candidate_rows,
@@ -436,7 +436,7 @@ class HostRunnableHeadStore:
                         candidate.url,
                         candidate.next_fetch_at,
                         candidate.added_at,
-                        candidate.priority,
+                        candidate.scheduler_score,
                         COUNT(*) OVER (PARTITION BY candidate.host) AS runnable_url_count,
                         {execution_tier} AS execution_tier,
                         {latency_penalty} AS latency_penalty,
@@ -453,7 +453,7 @@ class HostRunnableHeadStore:
                         url,
                         next_fetch_at,
                         added_at,
-                        priority,
+                        scheduler_score,
                         runnable_url_count,
                         execution_tier,
                         latency_penalty,
@@ -465,7 +465,7 @@ class HostRunnableHeadStore:
                         runnable_at ASC,
                         latency_penalty ASC,
                         added_at ASC,
-                        priority DESC,
+                        scheduler_score DESC,
                         url ASC
                 )
                 INSERT INTO {self._table_name} (
@@ -474,7 +474,7 @@ class HostRunnableHeadStore:
                     head_url,
                     head_next_fetch_at,
                     head_added_at,
-                    head_priority,
+                    head_scheduler_score,
                     runnable_url_count,
                     execution_tier,
                     latency_penalty,
@@ -487,7 +487,7 @@ class HostRunnableHeadStore:
                     url,
                     next_fetch_at,
                     added_at,
-                    priority,
+                    scheduler_score,
                     runnable_url_count,
                     execution_tier,
                     latency_penalty,
@@ -550,7 +550,7 @@ class HostRunnableHeadStore:
                         heads.head_url,
                         heads.head_next_fetch_at,
                         heads.head_added_at,
-                        heads.head_priority,
+                        heads.head_scheduler_score,
                         heads.runnable_url_count,
                         heads.execution_tier,
                         heads.latency_penalty,
@@ -565,7 +565,7 @@ class HostRunnableHeadStore:
                         heads.latency_penalty ASC,
                         heads.head_next_fetch_at ASC,
                         heads.head_added_at ASC,
-                        heads.head_priority DESC,
+                        heads.head_scheduler_score DESC,
                         heads.physical_queue ASC,
                         heads.head_url ASC
                     LIMIT %s""",
@@ -580,7 +580,7 @@ class HostRunnableHeadStore:
                 url=url,
                 next_fetch_at=next_fetch_at,
                 added_at=added_at,
-                priority=priority,
+                scheduler_score=scheduler_score,
                 runnable_url_count=runnable_url_count,
                 execution_tier=execution_tier,
                 latency_penalty=latency_penalty,
@@ -593,7 +593,7 @@ class HostRunnableHeadStore:
                 url,
                 next_fetch_at,
                 added_at,
-                priority,
+                scheduler_score,
                 runnable_url_count,
                 execution_tier,
                 latency_penalty,
@@ -666,7 +666,7 @@ class HostRunnableHeadStore:
                                     {runnable_at} ASC,
                                     {latency_penalty} ASC,
                                     candidate.added_at ASC,
-                                    candidate.priority DESC,
+                                    candidate.scheduler_score DESC,
                                     candidate.url ASC
                                 LIMIT 1
                             ) AS best ON TRUE

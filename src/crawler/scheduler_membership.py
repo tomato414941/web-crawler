@@ -36,7 +36,7 @@ SCHEDULER_SURFACE_PHYSICAL_QUEUES = {
     SCHEDULER_SURFACE_NORMAL: (QUEUE_RUNNABLE, QUEUE_SCHEDULED),
     SCHEDULER_SURFACE_REFRESH: (QUEUE_REFRESH,),
 }
-SCHEDULER_SURFACE_PRIORITY = {
+SCHEDULER_SURFACE_URGENCY = {
     SCHEDULER_SURFACE_RUNNABLE: 0,
     SCHEDULER_SURFACE_SCHEDULED: 1,
     SCHEDULER_SURFACE_REFRESH: 2,
@@ -132,13 +132,13 @@ class SchedulerMembershipStore:
         grouped: dict[str, list[tuple[str, str, float, float, float, str]]] = {
             physical_queue: [] for physical_queue in PHYSICAL_QUEUE_NAMES
         }
-        for url, host, priority, next_fetch_at, added_at, physical_queue in rows:
+        for url, host, scheduler_score, next_fetch_at, added_at, physical_queue in rows:
             normalized_url = normalize_url(url)
             grouped[self.normalize_physical_queue(physical_queue)].append(
                 (
                     normalized_url,
                     host,
-                    priority,
+                    scheduler_score,
                     next_fetch_at,
                     added_at,
                     url_branch_key(normalized_url),
@@ -151,11 +151,11 @@ class SchedulerMembershipStore:
             psycopg2.extras.execute_values(
                 cur,
                 f"""INSERT INTO {self.queue_table_sql(physical_queue)}
-                        (url, host, priority, next_fetch_at, added_at, branch_key)
+                        (url, host, scheduler_score, next_fetch_at, added_at, branch_key)
                     VALUES %s
                     ON CONFLICT (url) DO UPDATE
                     SET host = EXCLUDED.host,
-                        priority = EXCLUDED.priority,
+                        scheduler_score = EXCLUDED.scheduler_score,
                         next_fetch_at = EXCLUDED.next_fetch_at,
                         added_at = EXCLUDED.added_at,
                         branch_key = EXCLUDED.branch_key""",

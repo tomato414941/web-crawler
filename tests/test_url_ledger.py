@@ -84,19 +84,21 @@ class TestCrawlTask:
     def test_default_values(self):
         task = CrawlTask(url="http://example.com")
         assert task.url == "http://example.com"
-        assert task.priority == 1.0
+        assert task.discovery_value == 1.0
+        assert task.scheduler_score == 1.0
         assert task.source_url is None
         assert task.added_at > 0
 
     def test_custom_values(self):
         task = CrawlTask(
             url="http://example.com/page",
-            priority=0.5,
+            discovery_value=0.5,
             source_url="http://example.com",
             added_at=1000.0,
             next_fetch_at=1200.0,
         )
-        assert task.priority == 0.5
+        assert task.discovery_value == 0.5
+        assert task.scheduler_score == 0.5
         assert task.added_at == 1000.0
         assert task.next_fetch_at == 1200.0
 
@@ -414,11 +416,11 @@ class TestUrlLedger:
         assert admitted == 0
         assert self._queue_counts(ledger, "http://example.com/done") == (0, 0, 0)
 
-    def test_add_preserves_first_seen_source_url_when_priority_improves(self, ledger):
+    def test_add_preserves_first_seen_source_url_when_discovery_value_improves(self, ledger):
         assert ledger.place(
             CrawlTask(
                 url="http://example.com/page",
-                priority=0.8,
+                discovery_value=0.8,
                 source_url="http://other.com",
             )
         )
@@ -426,19 +428,19 @@ class TestUrlLedger:
         assert ledger.place(
             CrawlTask(
                 url="http://example.com/page",
-                priority=1.25,
+                discovery_value=1.25,
                 source_url="http://example.com/",
             )
         )
 
         with ledger._conn.cursor() as cur:
             cur.execute(
-                f"SELECT priority, source_url FROM {URL_LEDGER_TABLE} WHERE url = %s",
+                f"SELECT discovery_value, source_url FROM {URL_LEDGER_TABLE} WHERE url = %s",
                 ("http://example.com/page",),
             )
-            priority, source_url = cur.fetchone()
+            discovery_value, source_url = cur.fetchone()
 
-        assert priority == 1.25
+        assert discovery_value == 1.25
         assert source_url == "http://other.com"
 
     def test_add_classifies_shallow_urls_as_scheduled(self, ledger):
@@ -556,23 +558,23 @@ class TestUrlLedger:
     def test_lease_next_returns_none_when_empty(self, ledger):
         assert ledger.lease_next() is None
 
-    def test_lease_next_priority_order(self, ledger):
-        ledger.place(CrawlTask(url="http://example.com/low", priority=0.5))
-        ledger.place(CrawlTask(url="http://example.com/high", priority=1.5))
+    def test_lease_next_scheduler_score_order(self, ledger):
+        ledger.place(CrawlTask(url="http://example.com/low", discovery_value=0.5))
+        ledger.place(CrawlTask(url="http://example.com/high", discovery_value=1.5))
         result = ledger.lease_next()
         assert "high" in result.url
 
-    def test_lease_next_fifo_same_priority(self, ledger):
+    def test_lease_next_fifo_same_scheduler_score(self, ledger):
         ledger.place(CrawlTask(url="http://example.com/first", added_at=1000))
         ledger.place(CrawlTask(url="http://example.com/second", added_at=2000))
         result = ledger.lease_next()
         assert "first" in result.url
 
-    def test_lease_next_prefers_less_congested_host_when_priority_matches(self, ledger):
+    def test_lease_next_prefers_less_congested_host_when_scheduler_score_matches(self, ledger):
         ledger.place(
             CrawlTask(
                 url="http://a.com/1",
-                priority=1.0,
+                discovery_value=1.0,
                 added_at=1000,
                 runnable_surface=SCHEDULER_SURFACE_RUNNABLE,
                 intent=INTENT_EXPLORE,
@@ -581,7 +583,7 @@ class TestUrlLedger:
         ledger.place(
             CrawlTask(
                 url="http://a.com/2",
-                priority=1.0,
+                discovery_value=1.0,
                 added_at=1001,
                 runnable_surface=SCHEDULER_SURFACE_RUNNABLE,
                 intent=INTENT_EXPLORE,
@@ -590,7 +592,7 @@ class TestUrlLedger:
         ledger.place(
             CrawlTask(
                 url="http://a.com/3",
-                priority=1.0,
+                discovery_value=1.0,
                 added_at=1002,
                 runnable_surface=SCHEDULER_SURFACE_RUNNABLE,
                 intent=INTENT_EXPLORE,
@@ -599,7 +601,7 @@ class TestUrlLedger:
         ledger.place(
             CrawlTask(
                 url="http://b.com/1",
-                priority=1.0,
+                discovery_value=1.0,
                 added_at=2000,
                 runnable_surface=SCHEDULER_SURFACE_RUNNABLE,
                 intent=INTENT_EXPLORE,
@@ -611,9 +613,9 @@ class TestUrlLedger:
         assert result is not None
         assert result.url == "http://b.com/1"
 
-    def test_lease_next_prefers_lower_latency_host_when_priority_matches(self, ledger):
-        ledger.place(CrawlTask(url="http://slow.com/1", priority=1.0, added_at=1000))
-        ledger.place(CrawlTask(url="http://fast.com/1", priority=1.0, added_at=900))
+    def test_lease_next_prefers_lower_latency_host_when_scheduler_score_matches(self, ledger):
+        ledger.place(CrawlTask(url="http://slow.com/1", discovery_value=1.0, added_at=1000))
+        ledger.place(CrawlTask(url="http://fast.com/1", discovery_value=1.0, added_at=900))
 
         self.host_store.record_success("slow.com", now=time.time(), request_latency_ms=900.0)
         self.host_store.record_success("fast.com", now=time.time(), request_latency_ms=80.0)
@@ -628,7 +630,7 @@ class TestUrlLedger:
             ledger.place(
                 CrawlTask(
                     url=f"http://a.com/{i}",
-                    priority=1.0,
+                    discovery_value=1.0,
                     added_at=1000 + i,
                     runnable_surface=SCHEDULER_SURFACE_RUNNABLE,
                     intent=INTENT_EXPLORE,
@@ -637,7 +639,7 @@ class TestUrlLedger:
         ledger.place(
             CrawlTask(
                 url="http://b.com/1",
-                priority=0.8,
+                discovery_value=0.8,
                 added_at=2000,
                 runnable_surface=SCHEDULER_SURFACE_RUNNABLE,
                 intent=INTENT_EXPLORE,
@@ -653,7 +655,7 @@ class TestUrlLedger:
         ledger.place(
             CrawlTask(
                 url="http://a.com/1",
-                priority=1.0,
+                discovery_value=1.0,
                 added_at=1000,
                 runnable_surface=SCHEDULER_SURFACE_RUNNABLE,
                 intent=INTENT_EXPLORE,
@@ -662,7 +664,7 @@ class TestUrlLedger:
         ledger.place(
             CrawlTask(
                 url="http://a.com/2",
-                priority=1.0,
+                discovery_value=1.0,
                 added_at=1001,
                 runnable_surface=SCHEDULER_SURFACE_RUNNABLE,
                 intent=INTENT_EXPLORE,
@@ -671,7 +673,7 @@ class TestUrlLedger:
         ledger.place(
             CrawlTask(
                 url="http://b.com/1",
-                priority=0.8,
+                discovery_value=0.8,
                 added_at=2000,
                 runnable_surface=SCHEDULER_SURFACE_RUNNABLE,
                 intent=INTENT_EXPLORE,
@@ -689,7 +691,7 @@ class TestUrlLedger:
         ledger.place(
             CrawlTask(
                 url="http://a.com/1",
-                priority=1.0,
+                discovery_value=1.0,
                 added_at=1000,
                 runnable_surface=SCHEDULER_SURFACE_RUNNABLE,
                 intent=INTENT_EXPLORE,
@@ -698,7 +700,7 @@ class TestUrlLedger:
         ledger.place(
             CrawlTask(
                 url="http://b.com/1",
-                priority=0.8,
+                discovery_value=0.8,
                 added_at=2000,
                 runnable_surface=SCHEDULER_SURFACE_SCHEDULED,
                 intent=INTENT_EXPLORE,
@@ -712,9 +714,9 @@ class TestUrlLedger:
             ("b.com", "http://b.com/1"),
         ]
 
-    def test_runnable_host_heads_orders_hosts_by_host_first_priority(self, ledger):
-        ledger.place(CrawlTask(url="http://slow.com/1", priority=1.0, added_at=1000))
-        ledger.place(CrawlTask(url="http://fast.com/1", priority=1.0, added_at=1200))
+    def test_runnable_host_heads_orders_hosts_by_host_first_score(self, ledger):
+        ledger.place(CrawlTask(url="http://slow.com/1", discovery_value=1.0, added_at=1000))
+        ledger.place(CrawlTask(url="http://fast.com/1", discovery_value=1.0, added_at=1200))
 
         self.host_store.record_success("slow.com", now=time.time(), request_latency_ms=900.0)
         self.host_store.record_success("fast.com", now=time.time(), request_latency_ms=80.0)
@@ -1258,7 +1260,7 @@ class TestUrlLedger:
         ledger.place(
             CrawlTask(
                 url="http://slow.com/1",
-                priority=1.0,
+                discovery_value=1.0,
                 added_at=1000,
                 runnable_surface=SCHEDULER_SURFACE_RUNNABLE,
                 intent=INTENT_EXPLORE,
@@ -1267,7 +1269,7 @@ class TestUrlLedger:
         ledger.place(
             CrawlTask(
                 url="http://fast.com/1",
-                priority=1.0,
+                discovery_value=1.0,
                 added_at=1200,
                 runnable_surface=SCHEDULER_SURFACE_RUNNABLE,
                 intent=INTENT_EXPLORE,
@@ -1287,7 +1289,7 @@ class TestUrlLedger:
         ledger.place(
             CrawlTask(
                 url="http://a.com/1",
-                priority=1.0,
+                discovery_value=1.0,
                 added_at=1000,
                 runnable_surface=SCHEDULER_SURFACE_RUNNABLE,
                 intent=INTENT_EXPLORE,
@@ -1296,7 +1298,7 @@ class TestUrlLedger:
         ledger.place(
             CrawlTask(
                 url="http://b.com/1",
-                priority=0.8,
+                discovery_value=0.8,
                 added_at=2000,
                 runnable_surface=SCHEDULER_SURFACE_SCHEDULED,
                 intent=INTENT_EXPLORE,
@@ -1332,7 +1334,7 @@ class TestUrlLedger:
         ledger.place(
             CrawlTask(
                 url="http://a.com/docs/python/1",
-                priority=1.0,
+                discovery_value=1.0,
                 added_at=1000,
                 runnable_surface=SCHEDULER_SURFACE_RUNNABLE,
                 intent=INTENT_EXPLORE,
@@ -1341,7 +1343,7 @@ class TestUrlLedger:
         ledger.place(
             CrawlTask(
                 url="http://a.com/docs/python/2",
-                priority=1.0,
+                discovery_value=1.0,
                 added_at=1001,
                 runnable_surface=SCHEDULER_SURFACE_RUNNABLE,
                 intent=INTENT_EXPLORE,
@@ -1350,7 +1352,7 @@ class TestUrlLedger:
         ledger.place(
             CrawlTask(
                 url="http://a.com/docs/rust/1",
-                priority=1.0,
+                discovery_value=1.0,
                 added_at=2000,
                 runnable_surface=SCHEDULER_SURFACE_RUNNABLE,
                 intent=INTENT_EXPLORE,
@@ -1369,10 +1371,10 @@ class TestUrlLedger:
         }
 
     def test_lease_next_uses_host_first_breadth_without_branch_rotation(self, ledger):
-        ledger.place(CrawlTask(url="http://a.com/docs/python/1", priority=1.0, added_at=1000))
-        ledger.place(CrawlTask(url="http://a.com/docs/python/2", priority=1.0, added_at=1001))
-        ledger.place(CrawlTask(url="http://a.com/docs/rust/1", priority=1.0, added_at=2000))
-        ledger.place(CrawlTask(url="http://b.com/1", priority=1.5, added_at=5000))
+        ledger.place(CrawlTask(url="http://a.com/docs/python/1", discovery_value=1.0, added_at=1000))
+        ledger.place(CrawlTask(url="http://a.com/docs/python/2", discovery_value=1.0, added_at=1001))
+        ledger.place(CrawlTask(url="http://a.com/docs/rust/1", discovery_value=1.0, added_at=2000))
+        ledger.place(CrawlTask(url="http://b.com/1", discovery_value=1.5, added_at=5000))
 
         first = ledger.lease_next(
             lease_strategy=LEASE_STRATEGY_HOST_FIRST,
@@ -1505,6 +1507,35 @@ class TestUrlLedger:
         ledger.lease_next()
         assert ledger.recover_leased(expired_only=False) == 1
         assert ledger.pending_count() == 1
+
+    def test_recover_leased_rebuilds_retry_scheduler_score(self, ledger):
+        ledger.place(CrawlTask(url="http://example.com/retry", discovery_value=1.25))
+        first = ledger.lease_next()
+        assert first is not None
+        assert ledger.mark_failed(
+            first.url,
+            retryable=True,
+            error="timeout",
+            backoff_seconds=0,
+            lease_token=first.lease_token,
+        )
+
+        retry = ledger.lease_next(
+            runnable_surface=SCHEDULER_SURFACE_SCHEDULED,
+            lease_seconds=0.01,
+        )
+        assert retry is not None
+        time.sleep(0.02)
+
+        assert ledger.recover_leased(expired_only=True) == 1
+        with ledger._conn.cursor() as cur:
+            cur.execute(
+                f"SELECT scheduler_score FROM {PHYSICAL_QUEUE_TABLES[QUEUE_SCHEDULED]} WHERE url = %s",
+                (retry.url,),
+            )
+            (scheduler_score,) = cur.fetchone()
+
+        assert scheduler_score == 0.75
 
     def test_upsert_seeds_requeues_done_url(self, ledger):
         ledger.place(CrawlTask(url="http://example.com"))
@@ -2022,9 +2053,9 @@ class TestUrlLedger:
         assert "a.com" in result.url
 
     def test_lease_next_excludes_active_hosts(self, ledger):
-        ledger.place(CrawlTask(url="http://a.com/1", priority=3.0))
-        ledger.place(CrawlTask(url="http://a.com/2", priority=2.0))
-        ledger.place(CrawlTask(url="http://b.com/1", priority=1.0))
+        ledger.place(CrawlTask(url="http://a.com/1", discovery_value=3.0))
+        ledger.place(CrawlTask(url="http://a.com/2", discovery_value=2.0))
+        ledger.place(CrawlTask(url="http://b.com/1", discovery_value=1.0))
 
         result = ledger.lease_next(exclude_hosts=["a.com"])
 
@@ -2054,8 +2085,8 @@ class TestUrlLedger:
 
     def test_lease_next_skips_host_under_backoff(self, ledger):
         self.host_store.record_failure("a.com", backoff_seconds=60.0, now=time.time())
-        ledger.place(CrawlTask(url="http://a.com/page", priority=2.0))
-        ledger.place(CrawlTask(url="http://b.com/page", priority=1.0))
+        ledger.place(CrawlTask(url="http://a.com/page", discovery_value=2.0))
+        ledger.place(CrawlTask(url="http://b.com/page", discovery_value=1.0))
 
         result = ledger.lease_next()
 
@@ -2112,8 +2143,8 @@ class TestUrlLedger:
         assert terminal_reason is None
         assert terminalized_at is None
 
-    def test_retryable_failure_demotes_priority(self, ledger):
-        ledger.place(CrawlTask(url="http://example.com/retry", priority=1.25))
+    def test_retryable_failure_demotes_scheduler_score_only(self, ledger):
+        ledger.place(CrawlTask(url="http://example.com/retry", discovery_value=1.25))
         result = ledger.lease_next()
         assert result is not None
 
@@ -2127,13 +2158,19 @@ class TestUrlLedger:
 
         with ledger._conn.cursor() as cur:
             cur.execute(
-                f"SELECT fail_streak, priority FROM {URL_LEDGER_TABLE} WHERE url = %s",
+                f"SELECT fail_streak, discovery_value FROM {URL_LEDGER_TABLE} WHERE url = %s",
                 (result.url,),
             )
-            fail_streak, priority = cur.fetchone()
+            fail_streak, discovery_value = cur.fetchone()
+            cur.execute(
+                f"SELECT scheduler_score FROM {PHYSICAL_QUEUE_TABLES[QUEUE_SCHEDULED]} WHERE url = %s",
+                (result.url,),
+            )
+            (scheduler_score,) = cur.fetchone()
 
         assert fail_streak == 1
-        assert priority == 0.75
+        assert discovery_value == 1.25
+        assert scheduler_score == 0.75
 
     def test_compute_retry_backoff_uses_configured_values(self, ledger):
         configured = UrlLedger(
@@ -2145,7 +2182,7 @@ class TestUrlLedger:
         assert configured._compute_retry_backoff(3) == 12.0
 
     def test_lease_next_prefers_fresh_url_over_retried_url(self, ledger):
-        ledger.place(CrawlTask(url="http://retry.com/page", priority=1.25))
+        ledger.place(CrawlTask(url="http://retry.com/page", discovery_value=1.25))
         first = ledger.lease_next(host="retry.com")
         assert first is not None
 
@@ -2157,7 +2194,7 @@ class TestUrlLedger:
             lease_token=first.lease_token,
         )
 
-        ledger.place(CrawlTask(url="http://fresh.com/page", priority=1.0))
+        ledger.place(CrawlTask(url="http://fresh.com/page", discovery_value=1.0))
 
         next_task = ledger.lease_next()
 
@@ -2325,9 +2362,9 @@ class TestUrlLedger:
         assert terminalized_at is None
 
     def test_delay_overcrowded_scheduled_surface_delays_excess_ready_urls(self, ledger):
-        ledger.place(CrawlTask(url="http://a.com/1", priority=0.55, added_at=1000))
-        ledger.place(CrawlTask(url="http://a.com/2", priority=0.55, added_at=1001))
-        ledger.place(CrawlTask(url="http://a.com/3", priority=0.55, added_at=1002))
+        ledger.place(CrawlTask(url="http://a.com/1", discovery_value=0.55, added_at=1000))
+        ledger.place(CrawlTask(url="http://a.com/2", discovery_value=0.55, added_at=1001))
+        ledger.place(CrawlTask(url="http://a.com/3", discovery_value=0.55, added_at=1002))
 
         delayed = ledger.delay_overcrowded_scheduled_surface(
             keep_runnable_per_host=1,
@@ -2350,7 +2387,7 @@ class TestUrlLedger:
 
     def test_delay_overcrowded_scheduled_surface_honors_limit(self, ledger):
         for index in range(1, 5):
-            ledger.place(CrawlTask(url=f"http://a.com/{index}", priority=0.55, added_at=1000 + index))
+            ledger.place(CrawlTask(url=f"http://a.com/{index}", discovery_value=0.55, added_at=1000 + index))
 
         delayed = ledger.delay_overcrowded_scheduled_surface(
             keep_runnable_per_host=1,
@@ -2361,9 +2398,9 @@ class TestUrlLedger:
         assert delayed == 1
 
     def test_delay_overcrowded_scheduled_surface_delays_excess_branch_urls(self, ledger):
-        ledger.place(CrawlTask(url="http://a.com/docs/python/1", priority=0.55, added_at=1000))
-        ledger.place(CrawlTask(url="http://a.com/docs/python/2", priority=0.55, added_at=1001))
-        ledger.place(CrawlTask(url="http://a.com/docs/rust/1", priority=0.55, added_at=1002))
+        ledger.place(CrawlTask(url="http://a.com/docs/python/1", discovery_value=0.55, added_at=1000))
+        ledger.place(CrawlTask(url="http://a.com/docs/python/2", discovery_value=0.55, added_at=1001))
+        ledger.place(CrawlTask(url="http://a.com/docs/rust/1", discovery_value=0.55, added_at=1002))
 
         delayed = ledger.delay_overcrowded_scheduled_surface(
             keep_runnable_per_host=10,

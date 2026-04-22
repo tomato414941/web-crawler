@@ -84,7 +84,8 @@ class FakeLedger:
             prepared.append(
                 CrawlTask(
                     url=task.url,
-                    priority=task.priority,
+                    discovery_value=task.discovery_value,
+                    scheduler_score=task.scheduler_score,
                     runnable_surface=runnable_surface,
                     intent=intent,
                     source_url=task.source_url,
@@ -455,12 +456,12 @@ async def test_crawler_assigns_discovery_metadata_to_outlinks():
     by_url = {task.url: task for task in added}
 
     assert (
-        by_url["https://example.com/hosts"].priority
-        > by_url["https://docs.example.com/guide"].priority
+        by_url["https://example.com/hosts"].scheduler_score
+        > by_url["https://docs.example.com/guide"].scheduler_score
     )
     assert (
-        by_url["https://docs.example.com/guide"].priority
-        > by_url["https://external.example.net/project"].priority
+        by_url["https://docs.example.com/guide"].scheduler_score
+        > by_url["https://external.example.net/project"].scheduler_score
     )
     assert by_url["https://docs.example.com/guide"].runnable_surface == SCHEDULER_SURFACE_SCHEDULED
     assert by_url["https://docs.example.com/guide"].intent == INTENT_EXPLORE

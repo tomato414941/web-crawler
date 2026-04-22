@@ -39,19 +39,19 @@ class SchedulerQuarantine:
 
         with self._conn.cursor() as cur:
             cur.execute(
-                f"""SELECT queue.url, queue.host, queue.priority, queue.next_fetch_at, queue.added_at,
+                f"""SELECT queue.url, queue.host, queue.scheduler_score, queue.next_fetch_at, queue.added_at,
                            %s AS physical_queue
                     FROM {self._queue_table_sql(self._queue_runnable)} AS queue
                     JOIN host_state ON host_state.host_key = queue.host
                     WHERE host_state.backoff_until > %s
                     UNION ALL
-                    SELECT queue.url, queue.host, queue.priority, queue.next_fetch_at, queue.added_at,
+                    SELECT queue.url, queue.host, queue.scheduler_score, queue.next_fetch_at, queue.added_at,
                            %s AS physical_queue
                     FROM {self._queue_table_sql(self._queue_scheduled)} AS queue
                     JOIN host_state ON host_state.host_key = queue.host
                     WHERE host_state.backoff_until > %s
                     UNION ALL
-                    SELECT queue.url, queue.host, queue.priority, queue.next_fetch_at, queue.added_at,
+                    SELECT queue.url, queue.host, queue.scheduler_score, queue.next_fetch_at, queue.added_at,
                            %s AS physical_queue
                     FROM {self._queue_table_sql(self._queue_refresh)} AS queue
                     JOIN host_state ON host_state.host_key = queue.host
@@ -145,7 +145,7 @@ class SchedulerQuarantine:
                         SELECT
                             blocked.url,
                             blocked.host,
-                            blocked.priority,
+                            blocked.scheduler_score,
                             blocked.next_fetch_at,
                             blocked.added_at,
                             %s AS physical_queue,
@@ -161,7 +161,7 @@ class SchedulerQuarantine:
                         SELECT url
                         FROM ranked
                         WHERE host_rownum <= %s
-                        ORDER BY priority DESC, next_fetch_at ASC, added_at ASC, url ASC
+                        ORDER BY scheduler_score DESC, next_fetch_at ASC, added_at ASC, url ASC
                         LIMIT %s
                     )
                     DELETE FROM {self._blocked_queue_table} AS blocked
@@ -170,7 +170,7 @@ class SchedulerQuarantine:
                     RETURNING
                         blocked.url,
                         blocked.host,
-                        blocked.priority,
+                        blocked.scheduler_score,
                         blocked.next_fetch_at,
                         blocked.added_at,
                         %s AS physical_queue""",
@@ -206,7 +206,7 @@ class SchedulerQuarantine:
                         SELECT
                             blocked.url,
                             blocked.host,
-                            blocked.priority,
+                            blocked.scheduler_score,
                             blocked.next_fetch_at,
                             blocked.added_at,
                             %s AS physical_queue,
@@ -243,7 +243,7 @@ class SchedulerQuarantine:
                     RETURNING
                         blocked.url,
                         blocked.host,
-                        blocked.priority,
+                        blocked.scheduler_score,
                         blocked.next_fetch_at,
                         blocked.added_at,
                         %s AS physical_queue""",
