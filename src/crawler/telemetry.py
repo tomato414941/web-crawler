@@ -30,6 +30,13 @@ TIMING_STAGE_FIELDS = (
 FINALIZER_TIMING_FIELDS = (
     "discover_ms",
     "admit_ms",
+    "admit_update_intents_ms",
+    "admit_fetch_rows_ms",
+    "admit_delete_membership_ms",
+    "admit_insert_membership_ms",
+    "admit_host_heads_ms",
+    "admit_delete_leases_ms",
+    "admit_commit_ms",
     "host_success_ms",
     "host_failure_ms",
     "mark_done_ms",
@@ -118,6 +125,13 @@ class FinalizerTelemetry:
     new_tasks_count: int = 0
     discover_ms: float = 0.0
     admit_ms: float = 0.0
+    admit_update_intents_ms: float = 0.0
+    admit_fetch_rows_ms: float = 0.0
+    admit_delete_membership_ms: float = 0.0
+    admit_insert_membership_ms: float = 0.0
+    admit_host_heads_ms: float = 0.0
+    admit_delete_leases_ms: float = 0.0
+    admit_commit_ms: float = 0.0
     host_success_ms: float = 0.0
     host_failure_ms: float = 0.0
     mark_done_ms: float = 0.0

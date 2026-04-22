@@ -62,6 +62,7 @@ from .output import StreamingOutputWriter
 from .result import CrawlFailure, CrawlResult, CrawlStageTimings
 from .telemetry import (
     FetchTelemetry,
+    FINALIZER_TIMING_FIELDS,
     FinalizerTelemetry,
     LeaseTelemetry,
     PipelineTelemetry,
@@ -448,6 +449,12 @@ class CrawlerEngine:
                 admit_started = time.perf_counter()
                 scheduler.admit_discovered_tasks(new_tasks)
                 telemetry.admit_ms = _elapsed_ms(admit_started)
+                diagnostics_fn = getattr(scheduler, "last_admission_diagnostics", None)
+                if callable(diagnostics_fn):
+                    diagnostics = diagnostics_fn()
+                    for field in FINALIZER_TIMING_FIELDS:
+                        if field.startswith("admit_") and field in diagnostics:
+                            setattr(telemetry, field, float(diagnostics[field]))
             else:
                 admit_started = time.perf_counter()
                 scheduler.place_many(new_tasks)
