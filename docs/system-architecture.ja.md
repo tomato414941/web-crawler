@@ -169,6 +169,7 @@ runtime の stage code はこの境界を明示すべきである。
 
 - queue ownership と backpressure は pipeline runtime が持つ
 - stage ごとの liveness は pipeline runtime が持つ
+- parse は fetched page parsing と parse exception の finalizable failure 変換を持つ
 - finalize は parse 後の scheduler mutation を持つ
 - persist は blocking な storage / output write を持つ
 - crawler orchestration は stage を接続するが、stage policy を溜め込まない

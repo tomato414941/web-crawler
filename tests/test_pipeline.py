@@ -7,9 +7,13 @@ import pytest
 
 from crawler.pipeline import (
     FINALIZER_SENTINEL,
+    PARSER_SENTINEL,
     PUBLISHER_SENTINEL,
+    FailedTask,
+    FetchedPage,
     FinalizeItem,
     FinalizeStage,
+    ParseStage,
     ParsedPage,
     PipelineQueues,
     PublishItem,
@@ -18,7 +22,7 @@ from crawler.pipeline import (
     SkippedTask,
     StageLiveness,
 )
-from crawler.result import CrawlResult, CrawlStageTimings
+from crawler.result import CrawlFailure, CrawlResult, CrawlStageTimings
 from crawler.url_ledger import CrawlTask
 
 
@@ -32,6 +36,17 @@ def _crawl_result(url="https://example.com/"):
         content="<html></html>",
         outlinks=[],
         timings=CrawlStageTimings(),
+    )
+
+
+def _fetched_page(url="https://example.com/"):
+    return FetchedPage(
+        task=CrawlTask(url=url, lease_token="lease-1"),
+        response=object(),
+        timings=CrawlStageTimings(),
+        process_started=time.perf_counter(),
+        enqueued_at=time.perf_counter(),
+        queue_depth=0,
     )
 
 
@@ -60,6 +75,21 @@ def _record(records):
         records.append((outcome, timings))
 
     return record
+
+
+def _parse_failure(fetched, exc):
+    return FailedTask(
+        task=fetched.task,
+        failure=CrawlFailure(
+            url=fetched.task.url,
+            error=str(exc),
+            retryable=True,
+            timings=fetched.timings,
+        ),
+        process_started=fetched.process_started,
+        record_error=True,
+        backoff_seconds=1.0,
+    )
 
 
 def test_pipeline_queues_snapshot_records_depth_and_wait():
@@ -98,6 +128,120 @@ def test_stage_liveness_tracks_started_completed_failed_and_current_item():
         "current_url": None,
         "current_kind": None,
     }
+
+
+@pytest.mark.asyncio
+async def test_parse_stage_success_enqueues_parsed_finalize_item():
+    queues = PipelineQueues(maxsize=4)
+    liveness = StageLiveness(include_kind=True)
+    failures = []
+
+    async def parse_fetched(fetched):
+        return ParsedPage(
+            task=fetched.task,
+            result=_crawl_result(fetched.task.url),
+            new_tasks=[],
+            process_started=fetched.process_started,
+        )
+
+    stage = ParseStage(
+        parse_queue=queues.parse,
+        finalize_queue=queues.finalize,
+        parse_stats=queues.parse_stats,
+        finalize_stats=queues.finalize_stats,
+        liveness=liveness,
+        parse_fetched_page=parse_fetched,
+        build_failed_task=_parse_failure,
+        record_failure_category=failures.append,
+    )
+    worker = asyncio.create_task(stage.run())
+
+    await queues.parse.put(_fetched_page())
+    await asyncio.wait_for(queues.parse.join(), timeout=2)
+    await queues.parse.put(PARSER_SENTINEL)
+    await asyncio.wait_for(worker, timeout=2)
+
+    finalize_item = queues.finalize.get_nowait()
+    assert finalize_item.parsed is not None
+    assert finalize_item.failed is None
+    assert finalize_item.parsed.task.url == "https://example.com/"
+    assert failures == []
+    assert liveness.snapshot()["started"] == 1
+    assert liveness.snapshot()["completed"] == 1
+    assert liveness.snapshot()["failed"] == 0
+
+
+@pytest.mark.asyncio
+async def test_parse_stage_converts_parse_error_to_failed_finalize_item():
+    queues = PipelineQueues(maxsize=4)
+    failures = []
+
+    async def parse_fetched(_fetched):
+        raise RuntimeError("parse boom")
+
+    stage = ParseStage(
+        parse_queue=queues.parse,
+        finalize_queue=queues.finalize,
+        parse_stats=queues.parse_stats,
+        finalize_stats=queues.finalize_stats,
+        liveness=StageLiveness(include_kind=True),
+        parse_fetched_page=parse_fetched,
+        build_failed_task=_parse_failure,
+        record_failure_category=failures.append,
+    )
+    worker = asyncio.create_task(stage.run())
+
+    await queues.parse.put(_fetched_page())
+    await asyncio.wait_for(queues.parse.join(), timeout=2)
+    await queues.parse.put(PARSER_SENTINEL)
+    await asyncio.wait_for(worker, timeout=2)
+
+    finalize_item = queues.finalize.get_nowait()
+    assert finalize_item.failed is not None
+    assert finalize_item.parsed is None
+    assert finalize_item.failed.failure.error == "parse boom"
+    assert failures == ["parse boom"]
+
+
+@pytest.mark.asyncio
+async def test_parse_stage_survives_parse_error_and_drains_next_item():
+    queues = PipelineQueues(maxsize=4)
+    calls = []
+
+    async def parse_fetched(fetched):
+        calls.append(fetched.task.url)
+        if len(calls) == 1:
+            raise RuntimeError("parse boom")
+        return ParsedPage(
+            task=fetched.task,
+            result=_crawl_result(fetched.task.url),
+            new_tasks=[],
+            process_started=fetched.process_started,
+        )
+
+    stage = ParseStage(
+        parse_queue=queues.parse,
+        finalize_queue=queues.finalize,
+        parse_stats=queues.parse_stats,
+        finalize_stats=queues.finalize_stats,
+        liveness=StageLiveness(include_kind=True),
+        parse_fetched_page=parse_fetched,
+        build_failed_task=_parse_failure,
+        record_failure_category=lambda _error: None,
+    )
+    worker = asyncio.create_task(stage.run())
+
+    await queues.parse.put(_fetched_page("https://example.com/first"))
+    await queues.parse.put(_fetched_page("https://example.com/second"))
+    await asyncio.wait_for(queues.parse.join(), timeout=2)
+    await queues.parse.put(PARSER_SENTINEL)
+    await asyncio.wait_for(worker, timeout=2)
+
+    first = queues.finalize.get_nowait()
+    second = queues.finalize.get_nowait()
+    assert first.failed is not None
+    assert second.parsed is not None
+    assert calls == ["https://example.com/first", "https://example.com/second"]
 
 
 @pytest.mark.asyncio

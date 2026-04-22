@@ -363,7 +363,14 @@ async def test_crawler_engine_records_stage_timings():
     assert result.timings.publish_queue_depth >= 0
     assert result.timings.process_ms >= result.timings.fetch_ms
     assert result.timings.process_ms >= result.timings.slot_ms
-    timing_summary = engine.snapshot_runtime_stats()["timing_summary"]
+    runtime_stats = engine.snapshot_runtime_stats()
+    parser_liveness = runtime_stats["parser_liveness"]
+    assert parser_liveness["started"] == 1
+    assert parser_liveness["completed"] == 1
+    assert parser_liveness["failed"] == 0
+    assert parser_liveness["current_url"] is None
+    assert parser_liveness["current_kind"] is None
+    timing_summary = runtime_stats["timing_summary"]
     assert timing_summary["samples"] == 1
     assert timing_summary["outcomes"]["success"] == 1
     assert timing_summary["stages"]["robots_ms"]["count"] == 1

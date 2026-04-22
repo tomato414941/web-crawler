@@ -8,6 +8,7 @@ stall by making crawl pipeline stages explicit, observable, and testable:
 
 - `CrawlerEngine` should orchestrate stages, not own every stage policy.
 - Pipeline queues should be bounded and owned by a dedicated runtime object.
+- Parse should own fetched-page parsing and parse-failure conversion.
 - Finalize should own post-parse scheduler mutation.
 - Publish should own blocking storage/output writes.
 - Stage liveness should be visible in runtime stats.
@@ -31,8 +32,11 @@ stall by making crawl pipeline stages explicit, observable, and testable:
     the URL ledger.
 - Added bounded crawl pipeline queues and runtime liveness for finalizer/publisher workers.
 - Extracted pipeline queue metrics, finalizer stage, and publish stage out of `CrawlerEngine`.
+- Extracted parser stage orchestration out of `CrawlerEngine` and added parser liveness to runtime
+  stats.
 - Added pipeline contract tests for queue metrics, liveness, finalizer error survival, and publisher
   error survival.
+- Added parser-stage contract tests for success, parse-error conversion, and worker survival.
 - Preserved existing public scheduler telemetry methods and runtime payload behavior.
 
 ## Verification
@@ -44,7 +48,9 @@ stall by making crawl pipeline stages explicit, observable, and testable:
 - Admission projection now uses membership-store APIs instead of ledger-local queue projection helpers.
 - Active lease storage now has direct unit coverage and is no longer implemented inline in `UrlLedger`.
 - `CrawlerEngine` still exposes existing runtime queue and liveness keys.
+- `CrawlerEngine` now exposes `parser_liveness` alongside finalizer and publisher liveness.
 - Finalizer and publisher item-level failures are counted and do not kill the queue worker.
+- Parser exceptions are converted into finalizer failures without killing the parser worker.
 - Pipeline boundaries are documented in `docs/system-architecture.md` and
   `docs/system-architecture.ja.md`.
 - Existing tests covering scheduler stats, lease diagnostics, retry transitions, and runtime stats pass.
@@ -56,6 +62,6 @@ stall by making crawl pipeline stages explicit, observable, and testable:
   read-model store.
 - Continue reducing `UrlLedger` facade breadth around requeue, lease selection, and host-head
   operations.
-- Continue slimming `CrawlerEngine` by extracting parse-stage orchestration after the finalizer and
-  publisher boundary is stable in production.
+- Continue slimming `CrawlerEngine` by extracting fetch-stage orchestration after the pipeline
+  boundary is stable in production.
 - Keep detailed speed investigation separate from this design-simplification milestone.

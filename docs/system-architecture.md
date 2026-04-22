@@ -171,6 +171,7 @@ Runtime stage code should make these boundaries explicit:
 
 - queue ownership and backpressure belong to the pipeline runtime
 - per-stage liveness belongs to the pipeline runtime
+- parse owns fetched-page parsing and conversion of parse exceptions into finalizable failures
 - finalize owns scheduler mutation after parsing
 - persist owns blocking storage and output writes
 - crawler orchestration wires stages together, but should not accumulate stage policy

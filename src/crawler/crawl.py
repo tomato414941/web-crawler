@@ -36,6 +36,7 @@ from .pipeline import (
     FetchedPage as _FetchedPage,
     FinalizeItem as _FinalizeItem,
     FinalizeStage,
+    ParseStage,
     ParsedPage as _ParsedPage,
     PipelineQueues,
     PublishItem as _PublishItem,
@@ -280,6 +281,7 @@ class CrawlerEngine:
         self._publish_queue: asyncio.Queue[_PublishItem | object] | None = None
         self._pipeline_queue_maxsize = max(16, concurrency * 4)
         self._pipeline_queues: PipelineQueues | None = None
+        self._parser_liveness = StageLiveness(include_kind=True)
         self._finalizer_liveness = StageLiveness(include_kind=True)
         self._publisher_liveness = StageLiveness()
         self._timing_summary = TelemetryAccumulator()
@@ -353,6 +355,7 @@ class CrawlerEngine:
             },
             "active_hosts": len(self._active_host_counts),
             **queue_payload,
+            "parser_liveness": self._parser_liveness.snapshot(),
             "finalizer_liveness": self._finalizer_liveness.snapshot(),
             "publisher_liveness": self._publisher_liveness.snapshot(),
             "failure_breakdown": dict(self._failure_counts),
@@ -455,6 +458,11 @@ class CrawlerEngine:
 
     def _progress(self) -> tuple[int, int]:
         return self.pages_crawled, self.max_pages
+
+    def _record_failure_category(self, error: str) -> None:
+        category = categorize_crawl_error(error)
+        if category:
+            self._failure_counts[category] += 1
 
     def _record_error_runtime(self, url: str) -> float:
         """Advance runtime failure state without requiring durable writes on the event loop."""
@@ -991,86 +999,46 @@ class CrawlerEngine:
             ),
         )
 
+    def _build_parse_failed_task(self, fetched: _FetchedPage, exc: Exception) -> _FailedTask:
+        """Convert parse-stage exceptions into scheduler-finalizable failures."""
+        backoff_seconds = self._record_error_runtime(fetched.task.url)
+        failure = CrawlFailure(
+            url=fetched.task.url,
+            error=str(exc),
+            retryable=self.host_manager.should_retry(fetched.task.url),
+            timings=fetched.timings,
+        )
+        return _FailedTask(
+            task=fetched.task,
+            failure=failure,
+            process_started=fetched.process_started,
+            record_error=True,
+            backoff_seconds=backoff_seconds,
+        )
+
     async def _parser(self):
         """Drain fetched pages and parse them into crawl results."""
-        if self._parse_queue is None:
+        if self._parse_queue is None or self._finalize_queue is None:
             return
-
-        while True:
-            item = await self._parse_queue.get()
-            if item is _PARSER_SENTINEL:
-                self._parse_queue.task_done()
-                break
-
-            fetched = item
-            parse_stats = (
+        stage = ParseStage(
+            parse_queue=self._parse_queue,
+            finalize_queue=self._finalize_queue,
+            parse_stats=(
                 self._pipeline_queues.parse_stats
                 if self._pipeline_queues is not None
                 else QueueStats()
-            )
-            fetched.timings.parse_queue_wait_ms = parse_stats.record_dequeue(
-                fetched.enqueued_at,
-                fetched.queue_depth,
-            )
-            fetched.timings.parse_queue_depth = fetched.queue_depth
-            try:
-                parsed = await self._parse_fetched_page(fetched)
-                if self._finalize_queue is not None:
-                    queue_item = _FinalizeItem(
-                        parsed=parsed,
-                        enqueued_at=time.perf_counter(),
-                        queue_depth=self._finalize_queue.qsize(),
-                    )
-                    self._enqueue_finalize_item(queue_item)
-                    await self._finalize_queue.put(queue_item)
-                else:
-                    finalized = await self._finalize_parsed_page(parsed)
-                    await self._publish_result(finalized)
-                    self._record_timing("success", finalized.timings)
-                    logger.info(
-                        "[%d/%d] %s (%s)",
-                        self.pages_crawled,
-                        self.max_pages,
-                        finalized.url,
-                        _format_timings(finalized.timings),
-                    )
-            except Exception as exc:
-                backoff_seconds = self._record_error_runtime(fetched.task.url)
-                failure = CrawlFailure(
-                    url=fetched.task.url,
-                    error=str(exc),
-                    retryable=self.host_manager.should_retry(fetched.task.url),
-                    timings=fetched.timings,
-                )
-                category = categorize_crawl_error(str(exc))
-                if category:
-                    self._failure_counts[category] += 1
-                failed = _FailedTask(
-                    task=fetched.task,
-                    failure=failure,
-                    process_started=fetched.process_started,
-                    record_error=True,
-                    backoff_seconds=backoff_seconds,
-                )
-                if self._finalize_queue is not None:
-                    queue_item = _FinalizeItem(
-                        failed=failed,
-                        enqueued_at=time.perf_counter(),
-                        queue_depth=self._finalize_queue.qsize(),
-                    )
-                    self._enqueue_finalize_item(queue_item)
-                    await self._finalize_queue.put(queue_item)
-                else:
-                    finalized = await self._finalize_failed_task(failed)
-                    self._record_timing("failed", finalized.timings)
-                    logger.warning(
-                        "Failed %s during parse: %s (%s)",
-                        fetched.task.url,
-                        exc,
-                        _format_timings(finalized.timings),
-                    )
-            finally:
-                self._parse_queue.task_done()
+            ),
+            finalize_stats=(
+                self._pipeline_queues.finalize_stats
+                if self._pipeline_queues is not None
+                else QueueStats()
+            ),
+            liveness=self._parser_liveness,
+            parse_fetched_page=self._parse_fetched_page,
+            build_failed_task=self._build_parse_failed_task,
+            record_failure_category=self._record_failure_category,
+        )
+        await stage.run()
 
     async def _finalize_parsed_page(self, parsed: _ParsedPage) -> CrawlResult:
         """Apply scheduler mutations after parse and before persistence."""
@@ -1231,6 +1199,7 @@ class CrawlerEngine:
         self.failure_breakdown = {}
         self._failure_counts = Counter()
         self._claimed_pages = 0
+        self._parser_liveness = StageLiveness(include_kind=True)
         self._finalizer_liveness = StageLiveness(include_kind=True)
         self._publisher_liveness = StageLiveness()
         self._timing_summary = TelemetryAccumulator()
