@@ -45,6 +45,15 @@ FINALIZER_TIMING_FIELDS = (
 )
 
 
+STORAGE_TIMING_FIELDS = (
+    "prepare_ms",
+    "pages_upsert_ms",
+    "page_content_ms",
+    "commit_ms",
+    "total_ms",
+)
+
+
 @dataclass(slots=True)
 class FetchTelemetry:
     """Cause-oriented telemetry for one HTTP fetch."""
@@ -143,6 +152,23 @@ class FinalizerTelemetry:
         return asdict(self)
 
 
+@dataclass(slots=True)
+class StorageTelemetry:
+    """Detailed page persistence timings for one saved crawl result."""
+
+    prepare_ms: float = 0.0
+    pages_upsert_ms: float = 0.0
+    page_content_ms: float = 0.0
+    commit_ms: float = 0.0
+    total_ms: float = 0.0
+    stored_content_bytes: int = 0
+    storage_tier: str = "unknown"
+    content_truncated: bool = False
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
 def percentile(values: list[float], percentile_value: int) -> float:
     """Return a nearest-rank percentile for small cycle-local samples."""
     if not values:
@@ -195,6 +221,12 @@ class TelemetryAccumulator:
         self._finalizer_new_tasks_total = 0
         self._finalizer_new_tasks_nonzero_items = 0
         self._finalizer_batch_sizes: list[float] = []
+        self._storage_stages: dict[str, list[float]] = {
+            field: [] for field in STORAGE_TIMING_FIELDS
+        }
+        self._storage_tiers: Counter[str] = Counter()
+        self._storage_truncated: Counter[str] = Counter()
+        self._stored_content_bytes: list[float] = []
         self._discovery_admission: Counter[str] = Counter()
 
     def record_discovery_admission(self, counts: Mapping[str, int]) -> None:
@@ -243,6 +275,15 @@ class TelemetryAccumulator:
             for field in FINALIZER_TIMING_FIELDS:
                 self._finalizer_stages[field].append(float(getattr(finalizer, field)))
 
+        storage = getattr(timings, "storage", None)
+        if storage is not None:
+            for field in STORAGE_TIMING_FIELDS:
+                self._storage_stages[field].append(float(getattr(storage, field)))
+            self._storage_tiers[str(getattr(storage, "storage_tier", "unknown"))] += 1
+            truncated = bool(getattr(storage, "content_truncated", False))
+            self._storage_truncated[str(truncated).lower()] += 1
+            self._stored_content_bytes.append(float(getattr(storage, "stored_content_bytes", 0)))
+
     def snapshot(self) -> dict[str, object]:
         """Return a runtime-safe summary of observed cycle telemetry."""
         stages = {
@@ -251,6 +292,10 @@ class TelemetryAccumulator:
         finalizer = {
             field: _summarize_values(values)
             for field, values in self._finalizer_stages.items()
+        }
+        storage = {
+            field: _summarize_values(values)
+            for field, values in self._storage_stages.items()
         }
 
         outcomes = {
@@ -278,7 +323,11 @@ class TelemetryAccumulator:
                     "nonzero_items": self._finalizer_new_tasks_nonzero_items,
                 },
                 "finalizer_batch_size": _summarize_values(self._finalizer_batch_sizes),
+                "storage_tiers": dict(self._storage_tiers),
+                "storage_truncated": dict(self._storage_truncated),
+                "stored_content_bytes": _summarize_values(self._stored_content_bytes),
                 "discovery_admission": dict(self._discovery_admission),
             },
             "finalizer": finalizer,
+            "storage": storage,
         }

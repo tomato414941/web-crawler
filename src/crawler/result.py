@@ -11,6 +11,7 @@ from .telemetry import (
     LeaseTelemetry,
     PipelineTelemetry,
     RobotsDecision,
+    StorageTelemetry,
 )
 
 
@@ -44,6 +45,7 @@ class CrawlStageTimings:
     lease: LeaseTelemetry | None = None
     pipeline: PipelineTelemetry | None = None
     finalizer: FinalizerTelemetry | None = None
+    storage: StorageTelemetry | None = None
 
 
 @dataclass(slots=True)

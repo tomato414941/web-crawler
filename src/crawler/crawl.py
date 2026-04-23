@@ -1181,10 +1181,13 @@ class CrawlerEngine:
         if storage:
             persist_started = time.perf_counter()
             if executor is not None:
-                await loop.run_in_executor(executor, storage.save, result)
+                save_result = await loop.run_in_executor(executor, storage.save, result)
             else:
-                await asyncio.to_thread(storage.save, result)
+                save_result = await asyncio.to_thread(storage.save, result)
             result.timings.persist_ms = _elapsed_ms(persist_started)
+            storage_telemetry = getattr(save_result, "telemetry", None)
+            if storage_telemetry is not None:
+                result.timings.storage = storage_telemetry
         if self.output_writer:
             output_started = time.perf_counter()
             if executor is not None:
