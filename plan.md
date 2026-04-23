@@ -1,11 +1,12 @@
 # web-crawler plan
 
-## Current milestone: harden crawl pipeline and read-model boundaries
+## Current milestone: harden crawl pipeline and scheduler boundaries
 
-The crawler is now past the migration cleanup and host-first read-model deployment work. Speed is
-not the immediate focus for this slice. The current focus is to prevent another silent pipeline
-stall and read-model responsibility creep by making crawl pipeline stages and host runnable
-read-model boundaries explicit, observable, and testable:
+The crawler is now past the migration cleanup, host-first read-model deployment, and first
+pipeline-stage extraction work. Speed is not the immediate focus for this slice. The current focus
+is to prevent another silent pipeline stall or scheduler responsibility creep by making crawl
+pipeline stages, host runnable read-model boundaries, and URL scheduling responsibilities explicit,
+observable, and testable:
 
 - `CrawlerEngine` should orchestrate stages, not own every stage policy.
 - Pipeline queues should be bounded and owned by a dedicated runtime object.
@@ -18,6 +19,9 @@ read-model boundaries explicit, observable, and testable:
 - Host runnable capability and host runnable head should be documented as related but separate
   runtime execution concepts.
 - `host_runnable_heads` should remain a derived read model, not a second durable source of truth.
+- `UrlLedger` should remain the public facade for URL state, not the owner of every scheduling
+  strategy and mutation body.
+- Lease selection, scheduler admission, and requeue/recovery should be named scheduler services.
 
 ## Completed in this slice
 
@@ -65,6 +69,18 @@ read-model boundaries explicit, observable, and testable:
 - Moved host runnable-head maintenance SQL implementation into `HostRunnableHeadMaintenance`:
   - `HostRunnableHeadStore` keeps the public API, normal read/write path, and shared SQL primitives.
   - maintenance now owns rebuild, dirty refresh, repair, and stale-candidate deletion bodies.
+- Added `SchedulerLeaseSelector` and moved lease selection strategy out of `UrlLedger`:
+  - host-first read-model leasing, bounded fallback leasing, URL-order leasing, batch leasing, and
+    runnable-head SQL are now owned by the selector.
+  - `UrlLedger` still exposes the existing public lease API and compatibility private wrappers.
+- Added `SchedulerAdmissionService` and moved scheduler membership admission out of `UrlLedger`:
+  - known-URL admission, discovered-task admission, candidate-row selection, and admission
+    diagnostics now live behind a named service.
+- Added `SchedulerRequeueService` and moved requeue/recovery mutations out of `UrlLedger`:
+  - lease recovery, failed-URL retry requeue, refresh requeue, blocked-host backoff insertion, and
+    seed upsert/requeue now live behind a named service.
+- Kept database schema, public API, runtime telemetry, and deployment behavior unchanged for this
+  refactor slice.
 
 ## Verification
 
@@ -95,16 +111,20 @@ read-model boundaries explicit, observable, and testable:
   maintenance responsibility now have explicit names.
 - `HostRunnableHeadMaintenance` is no longer only a delegating facade; it owns maintenance control
   flow and SQL while preserving existing external behavior.
+- `UrlLedger` no longer owns the implementation bodies for lease selection, scheduler admission,
+  lease recovery, requeue, blocked-backoff insertion, or seed requeue.
+- Scheduler services are constructed lazily for tests that instantiate `UrlLedger` with `__new__`,
+  while normal runtime construction wires the services eagerly.
 - No schema migration or caller migration was required for this slice.
 - Existing tests covering scheduler stats, lease diagnostics, retry transitions, and runtime stats pass.
 - No production speed change was required for this slice.
 
 ## Next candidates
 
-- If host runnable maintenance grows again, move it to a dedicated module without changing the
-  current public API.
-- Continue reducing `UrlLedger` facade breadth around requeue, lease selection, and host-head
-  operations.
+- Remove compatibility private wrappers from `UrlLedger` only after tests and internal callers stop
+  patching or calling those private methods directly.
+- Continue reducing `UrlLedger` facade breadth around host-head operations and URL discovery/update
+  mutations.
 - Continue slimming `CrawlerEngine` by extracting reusable fetch failure classification if it starts
   obscuring HTTP behavior changes.
 - Evaluate whether dirty host-head repair remains exceptional under production crawl load before
