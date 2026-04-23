@@ -228,6 +228,10 @@ class FinalizeStage:
         record_timing: Callable[[str, CrawlStageTimings | None], None],
         progress: Callable[[], tuple[int, int]],
         format_timings: Callable[[CrawlStageTimings | None], str],
+        finalize_parsed_pages: Callable[[list[ParsedPage]], Awaitable[list[CrawlResult]]]
+        | None = None,
+        success_batch_size: int = 1,
+        success_batch_wait_ms: float = 0.0,
     ) -> None:
         self.finalize_queue = finalize_queue
         self.publish_queue = publish_queue
@@ -235,27 +239,31 @@ class FinalizeStage:
         self.publish_stats = publish_stats
         self.liveness = liveness
         self.finalize_parsed_page = finalize_parsed_page
+        self.finalize_parsed_pages = finalize_parsed_pages
         self.finalize_skipped_task = finalize_skipped_task
         self.finalize_failed_task = finalize_failed_task
         self.publish_result = publish_result
         self.record_timing = record_timing
         self.progress = progress
         self.format_timings = format_timings
+        self.success_batch_size = max(1, success_batch_size)
+        self.success_batch_wait_seconds = max(0.0, success_batch_wait_ms / 1000.0)
+        self._pending_item: FinalizeItem | object | None = None
 
     async def run(self) -> None:
         while True:
-            item = await self.finalize_queue.get()
+            item = await self._next_item()
             if item is FINALIZER_SENTINEL:
                 self.finalize_queue.task_done()
                 break
 
             queue_item = item
+            if queue_item.parsed is not None:
+                await self._process_success_batch(queue_item)
+                continue
+
             item_kind, item_url = finalize_item_context(queue_item)
-            self.liveness.start(kind=item_kind, url=item_url)
-            queue_wait_ms = self.finalize_stats.record_dequeue(
-                queue_item.enqueued_at,
-                queue_item.queue_depth,
-            )
+            queue_wait_ms = self._start_item(queue_item, item_kind, item_url)
             try:
                 await self._process_item(queue_item, queue_wait_ms)
                 self.liveness.complete()
@@ -269,6 +277,102 @@ class FinalizeStage:
             finally:
                 self.liveness.clear_current()
                 self.finalize_queue.task_done()
+
+    async def _next_item(self) -> FinalizeItem | object:
+        if self._pending_item is not None:
+            item = self._pending_item
+            self._pending_item = None
+            return item
+        return await self.finalize_queue.get()
+
+    def _start_item(
+        self,
+        queue_item: FinalizeItem,
+        item_kind: str,
+        item_url: str | None,
+    ) -> float:
+        self.liveness.start(kind=item_kind, url=item_url)
+        return self.finalize_stats.record_dequeue(
+            queue_item.enqueued_at,
+            queue_item.queue_depth,
+        )
+
+    async def _collect_success_batch(self, first_item: FinalizeItem) -> list[FinalizeItem]:
+        batch = [first_item]
+        waited = False
+        while len(batch) < self.success_batch_size:
+            try:
+                if self.finalize_queue.qsize() > 0:
+                    item = self.finalize_queue.get_nowait()
+                elif not waited and self.success_batch_wait_seconds > 0:
+                    waited = True
+                    item = await asyncio.wait_for(
+                        self.finalize_queue.get(),
+                        timeout=self.success_batch_wait_seconds,
+                    )
+                else:
+                    break
+            except (asyncio.QueueEmpty, TimeoutError):
+                break
+
+            if item is FINALIZER_SENTINEL or item.parsed is None:
+                self._pending_item = item
+                break
+            batch.append(item)
+        return batch
+
+    async def _process_success_batch(self, first_item: FinalizeItem) -> None:
+        batch = await self._collect_success_batch(first_item)
+        parsed_pages = [queue_item.parsed for queue_item in batch if queue_item.parsed is not None]
+        for queue_item in batch:
+            parsed = queue_item.parsed
+            if parsed is None:
+                continue
+            queue_wait_ms = self._start_item(queue_item, "success", parsed.task.url)
+            parsed.result.timings.finalize_queue_wait_ms = queue_wait_ms
+            parsed.result.timings.finalize_queue_depth = queue_item.queue_depth
+        try:
+            results = await self._finalize_parsed_batch(parsed_pages)
+            for result in results:
+                await self._handle_success_result(result)
+                self.liveness.complete()
+        except Exception:
+            for _queue_item in batch:
+                self.liveness.fail()
+            logger.exception(
+                "Finalizer failed while processing success batch: size=%d",
+                len(parsed_pages),
+            )
+        finally:
+            self.liveness.clear_current()
+            for _queue_item in batch:
+                self.finalize_queue.task_done()
+
+    async def _finalize_parsed_batch(self, parsed_pages: list[ParsedPage]) -> list[CrawlResult]:
+        if self.finalize_parsed_pages is not None:
+            return await self.finalize_parsed_pages(parsed_pages)
+        return [await self.finalize_parsed_page(parsed) for parsed in parsed_pages]
+
+    async def _handle_success_result(self, result: CrawlResult) -> None:
+        if self.publish_queue is not None:
+            publish_item = PublishItem(
+                result=result,
+                enqueued_at=time.perf_counter(),
+                queue_depth=self.publish_queue.qsize(),
+            )
+            self.publish_stats.record_enqueue(publish_item.queue_depth)
+            await self.publish_queue.put(publish_item)
+            return
+        await self.publish_result(result)
+        self.record_timing("success", result.timings)
+        pages_crawled, max_pages = self.progress()
+        logger.info(
+            "[%d/%d] %s (%s)",
+            pages_crawled,
+            max_pages,
+            result.url,
+            self.format_timings(result.timings),
+        )
 
     async def _process_item(self, queue_item: FinalizeItem, queue_wait_ms: float) -> None:
         if queue_item.parsed is not None:
