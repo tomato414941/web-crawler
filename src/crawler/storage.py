@@ -446,6 +446,11 @@ class PgStorage:
                 for prepared in prepared_results
             ]
 
+        prepared_by_hash: dict[str, _PreparedPageSave] = {}
+        for prepared in prepared_pages:
+            prepared_by_hash[prepared.url_hash] = prepared
+        batch_pages = list(prepared_by_hash.values())
+
         page_rows = [
             (
                 prepared.url_hash,
@@ -465,7 +470,7 @@ class PgStorage:
                 prepared.stored_outlink_count,
                 prepared.crawled_at,
             )
-            for prepared in prepared_pages
+            for prepared in batch_pages
         ]
         content_rows = [
             (
@@ -473,12 +478,12 @@ class PgStorage:
                 prepared.stored_content.content,
                 prepared.content_updated_at,
             )
-            for prepared in prepared_pages
+            for prepared in batch_pages
             if prepared.stored_content.content
         ]
         delete_hashes = [
             prepared.url_hash
-            for prepared in prepared_pages
+            for prepared in batch_pages
             if not prepared.stored_content.content
         ]
 
