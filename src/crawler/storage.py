@@ -2,6 +2,7 @@
 
 from collections import Counter
 from collections.abc import Mapping
+from dataclasses import dataclass
 import hashlib
 import json
 import logging
@@ -27,6 +28,7 @@ from .scheduler_observability import SchedulerObservability
 from .config import settings
 from .result import CrawlResult, result_to_dict
 from .schema import assert_public_table_columns
+from .telemetry import StorageTelemetry
 
 logger = logging.getLogger(__name__)
 PAGES_REQUIRED_COLUMNS = {
@@ -61,6 +63,21 @@ DIAGNOSTIC_STATS_STATEMENT_TIMEOUT_MS = 15000
 
 
 _TITLE_PATTERN = re.compile(r"<title[^>]*>(.*?)</title>", re.IGNORECASE | re.DOTALL)
+
+
+@dataclass(slots=True)
+class StorageSaveResult:
+    """Result of one page persistence attempt."""
+
+    saved: bool
+    telemetry: StorageTelemetry | None = None
+
+    def __bool__(self) -> bool:
+        return self.saved
+
+
+def _elapsed_ms(started: float) -> float:
+    return (time.perf_counter() - started) * 1000
 
 
 def _url_hash(url: str) -> str:
@@ -325,11 +342,13 @@ class PgStorage:
         """Close read-only transactions so API requests do not hold relation locks."""
         self._conn.commit()
 
-    def save(self, result: CrawlResult | Mapping[str, object]) -> bool:
-        """Save a single crawl result. Returns True if inserted."""
+    def save(self, result: CrawlResult | Mapping[str, object]) -> StorageSaveResult:
+        """Save a single crawl result and return persistence telemetry."""
+        total_started = time.perf_counter()
+        prepare_started = time.perf_counter()
         data = result_to_dict(result)
         if data.get("error"):
-            return False
+            return StorageSaveResult(saved=False)
 
         url = data["url"]
         url_hash = _url_hash(url)
@@ -362,9 +381,16 @@ class PgStorage:
             extended_min_discovery_value=settings.stored_content_extended_min_discovery_value,
         )
         crawled_at = data.get("timestamp", time.time())
+        telemetry = StorageTelemetry(
+            prepare_ms=_elapsed_ms(prepare_started),
+            stored_content_bytes=stored_content.stored_content_bytes,
+            storage_tier=stored_content.storage_tier,
+            content_truncated=stored_content.content_truncated,
+        )
 
         try:
             with self._conn.cursor() as cur:
+                pages_started = time.perf_counter()
                 cur.execute(
                     """INSERT INTO pages (
                            url_hash, url, host, title, status, content_length, content_type,
@@ -406,6 +432,8 @@ class PgStorage:
                         crawled_at,
                     ),
                 )
+                telemetry.pages_upsert_ms = _elapsed_ms(pages_started)
+                content_started = time.perf_counter()
                 if stored_content.content:
                     cur.execute(
                         """INSERT INTO page_content (url_hash, content, updated_at)
@@ -417,13 +445,18 @@ class PgStorage:
                     )
                 else:
                     cur.execute("DELETE FROM page_content WHERE url_hash = %s", (url_hash,))
+                telemetry.page_content_ms = _elapsed_ms(content_started)
+            commit_started = time.perf_counter()
             self._conn.commit()
+            telemetry.commit_ms = _elapsed_ms(commit_started)
+            telemetry.total_ms = _elapsed_ms(total_started)
             self._count += 1
-            return True
+            return StorageSaveResult(saved=True, telemetry=telemetry)
         except Exception:
             self._conn.rollback()
             logger.exception("Failed to save %s", url)
-            return False
+            telemetry.total_ms = _elapsed_ms(total_started)
+            return StorageSaveResult(saved=False, telemetry=telemetry)
 
     @property
     def count(self) -> int:
