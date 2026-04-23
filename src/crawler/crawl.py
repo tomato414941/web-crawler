@@ -204,12 +204,12 @@ class _LeaseLane:
 
 
 @dataclass(frozen=True, slots=True)
-class _TimedStorageSave:
-    """Timing wrapper result for one storage save call."""
+class _TimedStorageSaveMany:
+    """Timing wrapper result for one batch storage save call."""
 
     started_at: float
     finished_at: float
-    save_result: object | None = None
+    save_results: list[object] | None = None
     error: Exception | None = None
 
 
@@ -220,26 +220,6 @@ class _TimedOutputWrite:
     started_at: float
     finished_at: float
     error: Exception | None = None
-
-
-def _timed_storage_save(storage: object, result: CrawlResult) -> _TimedStorageSave:
-    started_at = time.perf_counter()
-    try:
-        save_result = storage.save(result)
-    except Exception as exc:  # pragma: no cover - exercised via caller path
-        finished_at = time.perf_counter()
-        return _TimedStorageSave(
-            started_at=started_at,
-            finished_at=finished_at,
-            error=exc,
-        )
-    finished_at = time.perf_counter()
-    return _TimedStorageSave(
-        started_at=started_at,
-        finished_at=finished_at,
-        save_result=save_result,
-    )
-
 
 def _timed_output_write(output_writer: object, result: CrawlResult) -> _TimedOutputWrite:
     started_at = time.perf_counter()
@@ -256,6 +236,28 @@ def _timed_output_write(output_writer: object, result: CrawlResult) -> _TimedOut
     return _TimedOutputWrite(
         started_at=started_at,
         finished_at=finished_at,
+    )
+
+
+def _timed_storage_save_many(
+    storage: object,
+    results: list[CrawlResult],
+) -> _TimedStorageSaveMany:
+    started_at = time.perf_counter()
+    try:
+        save_results = storage.save_many(results)
+    except Exception as exc:  # pragma: no cover - exercised via caller path
+        finished_at = time.perf_counter()
+        return _TimedStorageSaveMany(
+            started_at=started_at,
+            finished_at=finished_at,
+            error=exc,
+        )
+    finished_at = time.perf_counter()
+    return _TimedStorageSaveMany(
+        started_at=started_at,
+        finished_at=finished_at,
+        save_results=save_results,
     )
 
 class CrawlerEngine:
@@ -1236,74 +1238,93 @@ class CrawlerEngine:
 
     async def _publish_result(self, result: CrawlResult):
         """Persist crawl output outside fetch, parse, and finalize workers."""
+        await self._publish_results([result])
+
+    async def _publish_results(self, results: list[CrawlResult]):
+        """Persist crawl output for one or more finalized crawl results."""
+        if not results:
+            return
         loop = asyncio.get_running_loop()
         storage = self._publisher_storage or self.pg_storage
         executor = self._publisher_executor
         publisher_started = time.perf_counter()
-        publisher_telemetry = result.timings.publisher or PublisherTelemetry()
+        for result in results:
+            result.timings.publisher = result.timings.publisher or PublisherTelemetry()
 
         if storage:
             persist_started = time.perf_counter()
-            timed_save: _TimedStorageSave
+            timed_save_many: _TimedStorageSaveMany
             if executor is not None:
-                timed_save = await loop.run_in_executor(
+                timed_save_many = await loop.run_in_executor(
                     executor,
-                    _timed_storage_save,
+                    _timed_storage_save_many,
                     storage,
-                    result,
+                    results,
                 )
             else:
-                timed_save = await asyncio.to_thread(_timed_storage_save, storage, result)
-            result.timings.persist_ms = _elapsed_ms(persist_started)
-            publisher_telemetry.save_dispatch_wait_ms = _elapsed_ms_between(
+                timed_save_many = await asyncio.to_thread(
+                    _timed_storage_save_many,
+                    storage,
+                    results,
+                )
+            persist_ms = _elapsed_ms(persist_started)
+            save_dispatch_wait_ms = _elapsed_ms_between(
                 persist_started,
-                timed_save.started_at,
+                timed_save_many.started_at,
             )
-            publisher_telemetry.save_run_ms = _elapsed_ms_between(
-                timed_save.started_at,
-                timed_save.finished_at,
+            save_run_ms = _elapsed_ms_between(
+                timed_save_many.started_at,
+                timed_save_many.finished_at,
             )
-            save_result = timed_save.save_result
-            storage_telemetry = getattr(save_result, "telemetry", None)
-            if storage_telemetry is not None:
-                result.timings.storage = storage_telemetry
-            if timed_save.error is not None:
-                publisher_telemetry.total_ms = _elapsed_ms(publisher_started)
-                result.timings.publisher = publisher_telemetry
-                raise timed_save.error
+            for result in results:
+                result.timings.persist_ms = persist_ms
+                result.timings.publisher.save_dispatch_wait_ms = save_dispatch_wait_ms
+                result.timings.publisher.save_run_ms = save_run_ms
+            if timed_save_many.error is not None:
+                total_ms = _elapsed_ms(publisher_started)
+                for result in results:
+                    result.timings.publisher.total_ms = total_ms
+                raise timed_save_many.error
+            for result, save_result in zip(results, timed_save_many.save_results or [], strict=False):
+                storage_telemetry = getattr(save_result, "telemetry", None)
+                if storage_telemetry is not None:
+                    result.timings.storage = storage_telemetry
         if self.output_writer:
-            output_started = time.perf_counter()
-            timed_output: _TimedOutputWrite
-            if executor is not None:
-                timed_output = await loop.run_in_executor(
-                    executor,
-                    _timed_output_write,
-                    self.output_writer,
-                    result,
+            for result in results:
+                output_started = time.perf_counter()
+                timed_output: _TimedOutputWrite
+                if executor is not None:
+                    timed_output = await loop.run_in_executor(
+                        executor,
+                        _timed_output_write,
+                        self.output_writer,
+                        result,
+                    )
+                else:
+                    timed_output = await asyncio.to_thread(
+                        _timed_output_write,
+                        self.output_writer,
+                        result,
+                    )
+                result.timings.output_ms = _elapsed_ms(output_started)
+                result.timings.publisher.output_dispatch_wait_ms = _elapsed_ms_between(
+                    output_started,
+                    timed_output.started_at,
                 )
-            else:
-                timed_output = await asyncio.to_thread(
-                    _timed_output_write,
-                    self.output_writer,
-                    result,
+                result.timings.publisher.output_run_ms = _elapsed_ms_between(
+                    timed_output.started_at,
+                    timed_output.finished_at,
                 )
-            result.timings.output_ms = _elapsed_ms(output_started)
-            publisher_telemetry.output_dispatch_wait_ms = _elapsed_ms_between(
-                output_started,
-                timed_output.started_at,
-            )
-            publisher_telemetry.output_run_ms = _elapsed_ms_between(
-                timed_output.started_at,
-                timed_output.finished_at,
-            )
-            if timed_output.error is not None:
-                publisher_telemetry.total_ms = _elapsed_ms(publisher_started)
-                result.timings.publisher = publisher_telemetry
-                raise timed_output.error
+                if timed_output.error is not None:
+                    total_ms = _elapsed_ms(publisher_started)
+                    result.timings.publisher.total_ms = total_ms
+                    raise timed_output.error
         elif not storage:
-            self.results.append(result.to_dict())
-        publisher_telemetry.total_ms = _elapsed_ms(publisher_started)
-        result.timings.publisher = publisher_telemetry
+            for result in results:
+                self.results.append(result.to_dict())
+        total_ms = _elapsed_ms(publisher_started)
+        for result in results:
+            result.timings.publisher.total_ms = total_ms
 
     async def _finalizer(self):
         """Drain parsed payloads and apply scheduler mutations before persistence."""
@@ -1349,9 +1370,12 @@ class CrawlerEngine:
             ),
             liveness=self._publisher_liveness,
             publish_result=self._publish_result,
+            publish_results=self._publish_results,
             record_timing=self._record_timing,
             progress=self._progress,
             format_timings=_format_timings,
+            success_batch_size=settings.publisher_batch_size,
+            success_batch_wait_ms=settings.publisher_batch_wait_ms,
         )
         await stage.run()
 

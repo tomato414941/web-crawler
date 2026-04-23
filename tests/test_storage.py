@@ -121,6 +121,77 @@ def test_upsert_on_conflict(pg_storage):
         assert cur.fetchone()[0] == "V2"
 
 
+def test_save_many_persists_multiple_pages(pg_storage):
+    results = [
+        {
+            "url": "https://example.com/page1",
+            "status": 200,
+            "content_length": 1000,
+            "timestamp": 1710000000.0,
+            "content": "<html><title>Page 1</title><body>One</body></html>",
+            "outlinks": [],
+        },
+        {
+            "url": "https://example.com/page2",
+            "status": 200,
+            "content_length": 1000,
+            "timestamp": 1710000001.0,
+            "content": "<html><title>Page 2</title><body>Two</body></html>",
+            "outlinks": [],
+        },
+    ]
+
+    save_results = pg_storage.save_many(results)
+
+    assert [save_result.saved for save_result in save_results] == [True, True]
+    assert all(save_result.telemetry is not None for save_result in save_results)
+    assert all(save_result.telemetry.total_ms >= 0 for save_result in save_results)
+    assert pg_storage.count == 2
+
+    with pg_storage._conn.cursor() as cur:
+        cur.execute("SELECT count(*) FROM pages")
+        assert cur.fetchone()[0] == 2
+        cur.execute("SELECT count(*) FROM page_content")
+        assert cur.fetchone()[0] == 2
+
+
+def test_save_many_deletes_metadata_only_content_rows(pg_storage):
+    original = {
+        "url": "https://example.com/page1",
+        "status": 200,
+        "content_length": 1000,
+        "timestamp": 1710000000.0,
+        "content": "<html><title>Page 1</title><body>One</body></html>",
+        "outlinks": [],
+    }
+    pg_storage.save(original)
+
+    updated = {
+        "url": "https://example.com/page1",
+        "status": 200,
+        "content_length": 1000,
+        "timestamp": 1710000001.0,
+        "content": "prefix\x00suffix",
+        "outlinks": [],
+    }
+
+    save_results = pg_storage.save_many([updated])
+
+    assert save_results[0].saved is True
+    assert save_results[0].telemetry is not None
+    assert save_results[0].telemetry.storage_tier == "metadata_only"
+
+    with pg_storage._conn.cursor() as cur:
+        cur.execute(
+            """SELECT count(*)
+               FROM page_content
+               JOIN pages USING (url_hash)
+               WHERE pages.url = %s""",
+            ("https://example.com/page1",),
+        )
+        assert cur.fetchone()[0] == 0
+
+
 def test_save_drops_nul_content_to_metadata_only(pg_storage):
     result = {
         "url": "https://example.com/file.pdf",

@@ -587,3 +587,47 @@ async def test_publish_stage_survives_item_error_and_drains_next_item():
     assert liveness.snapshot()["started"] == 2
     assert liveness.snapshot()["completed"] == 1
     assert liveness.snapshot()["failed"] == 1
+
+
+@pytest.mark.asyncio
+async def test_publish_stage_batches_results():
+    queues = PipelineQueues(maxsize=8)
+    liveness = StageLiveness()
+    records = []
+    batches = []
+
+    async def publish_results(results):
+        batches.append([result.url for result in results])
+
+    stage = PublishStage(
+        publish_queue=queues.publish,
+        publish_stats=queues.publish_stats,
+        liveness=liveness,
+        publish_result=_no_publish,
+        publish_results=publish_results,
+        record_timing=_record(records),
+        progress=_progress,
+        format_timings=_format_timings,
+        success_batch_size=3,
+    )
+    worker = asyncio.create_task(stage.run())
+
+    results = [_crawl_result(f"https://example.com/{index}") for index in range(3)]
+    for result in results:
+        await queues.publish.put(
+            PublishItem(
+                result=result,
+                enqueued_at=time.perf_counter(),
+                queue_depth=queues.publish.qsize(),
+            )
+        )
+
+    await asyncio.wait_for(queues.publish.join(), timeout=2)
+    await queues.publish.put(PUBLISHER_SENTINEL)
+    await asyncio.wait_for(worker, timeout=2)
+
+    assert batches == [[result.url for result in results]]
+    assert records == [("success", result.timings) for result in results]
+    assert liveness.snapshot()["started"] == 3
+    assert liveness.snapshot()["completed"] == 3
+    assert liveness.snapshot()["failed"] == 0
