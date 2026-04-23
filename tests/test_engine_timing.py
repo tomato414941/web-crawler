@@ -149,6 +149,7 @@ def test_timing_accumulator_summarizes_stage_percentiles():
             finalizer=FinalizerTelemetry(
                 kind="success",
                 new_tasks_count=3,
+                batch_size=2,
                 discover_ms=2.0,
                 admit_ms=4.0,
                 admit_update_intents_ms=0.1,
@@ -190,6 +191,9 @@ def test_timing_accumulator_summarizes_stage_percentiles():
         "total": 3,
         "nonzero_items": 1,
     }
+    assert summary["counts"]["finalizer_batch_size"]["count"] == 1
+    assert summary["counts"]["finalizer_batch_size"]["avg"] == 2.0
+    assert summary["counts"]["finalizer_batch_size"]["max"] == 2.0
     assert summary["counts"]["discovery_admission"] == {
         "extracted": 5,
         "admitted": 2,
@@ -434,6 +438,87 @@ async def test_success_finalizer_records_operation_breakdown():
     assert finalized.timings.finalizer.mark_done_ms >= 0
     assert finalized.timings.finalizer.total_ms >= 0
     assert host_store.successes == [("example.com", 0.0)]
+
+
+@pytest.mark.asyncio
+async def test_success_finalizer_batches_scheduler_mutations():
+    class BatchLedger(_FakeLedger):
+        def __init__(self):
+            super().__init__(None)
+            self.discover_batches = []
+            self.admit_batches = []
+            self.done_batches = []
+
+        def discover_many(self, tasks):
+            self.discover_batches.append(list(tasks))
+            return len(tasks)
+
+        def admit_discovered_tasks(self, tasks):
+            self.admit_batches.append(list(tasks))
+            return len(tasks)
+
+        def mark_done_many(self, tasks):
+            self.done_batches.append(list(tasks))
+            return len(tasks)
+
+    class BatchHostStore(_RecordingHostStore):
+        def __init__(self):
+            super().__init__()
+            self.success_batches = []
+
+        def record_success_many(self, records):
+            self.success_batches.append(list(records))
+            return len(records)
+
+    ledger = BatchLedger()
+    engine = CrawlerEngine(
+        max_pages=2,
+        url_ledger=ledger,
+        host_manager=_FakeHostManager(),
+    )
+    host_store = BatchHostStore()
+    engine.host_manager._host_store = host_store
+    parsed_pages = []
+    for suffix in ("first", "second"):
+        result = _crawl_result(f"https://example.com/{suffix}")
+        parsed_pages.append(
+            _ParsedPage(
+                task=CrawlTask(url=result.url, lease_token=suffix),
+                result=result,
+                new_tasks=[CrawlTask(url=f"https://example.com/{suffix}/next")],
+                process_started=time.perf_counter(),
+            )
+        )
+
+    finalized = await engine._finalize_parsed_pages(parsed_pages)
+
+    assert [result.url for result in finalized] == [parsed.task.url for parsed in parsed_pages]
+    assert [[task.url for task in batch] for batch in ledger.discover_batches] == [
+        [
+            "https://example.com/first/next",
+            "https://example.com/second/next",
+        ]
+    ]
+    assert [[task.url for task in batch] for batch in ledger.admit_batches] == [
+        [
+            "https://example.com/first/next",
+            "https://example.com/second/next",
+        ]
+    ]
+    assert [[task.url for task in batch] for batch in ledger.done_batches] == [
+        [
+            "https://example.com/first",
+            "https://example.com/second",
+        ]
+    ]
+    assert host_store.success_batches == [
+        [
+            ("example.com", 0.0),
+            ("example.com", 0.0),
+        ]
+    ]
+    assert all(result.timings.finalizer.batch_size == 2 for result in finalized)
+    assert [result.timings.finalizer.new_tasks_count for result in finalized] == [1, 1]
 
 
 @pytest.mark.asyncio

@@ -122,3 +122,25 @@ class TestHostStore:
             abs=1e-6,
         )
         assert unobserved.latency_sample_count == observed.latency_sample_count
+
+    def test_record_success_many_updates_hosts_in_one_call(self, store):
+        store.record_failure("a.example", backoff_seconds=30.0, now=100.0)
+
+        updated = store.record_success_many(
+            [
+                ("a.example", 100.0),
+                ("a.example", 300.0),
+                ("b.example", None),
+            ],
+            now=120.0,
+        )
+
+        assert updated == 2
+        a_state = store.get_or_create("a.example")
+        b_state = store.get_or_create("b.example")
+        assert a_state.consecutive_failures == 0
+        assert a_state.backoff_until == 0.0
+        assert a_state.latency_last_ms == pytest.approx(300.0, abs=1e-6)
+        assert a_state.latency_sample_count == 2
+        assert b_state.consecutive_failures == 0
+        assert b_state.latency_sample_count == 0

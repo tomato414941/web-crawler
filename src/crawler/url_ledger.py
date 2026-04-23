@@ -1458,6 +1458,61 @@ class UrlLedger:
         self._conn.commit()
         return updated
 
+    def mark_done_many(self, tasks: list[CrawlTask]) -> int:
+        """Mark multiple leased URLs as successfully crawled in one transaction."""
+        rows_by_url: dict[str, tuple[str, str | None]] = {}
+        for task in tasks:
+            if task.url:
+                normalized = normalize_url(task.url)
+                rows_by_url[normalized] = (normalized, task.lease_token)
+        now = time.time()
+        rows = [
+            (normalized, lease_token, now, now)
+            for normalized, lease_token in rows_by_url.values()
+        ]
+        if not rows:
+            return 0
+
+        with self._conn.cursor() as cur:
+            psycopg2.extras.execute_values(
+                cur,
+                f"""WITH incoming(url, lease_token, next_fetch_at, last_success_at) AS (VALUES %s),
+                    updated AS (
+                        UPDATE {URL_LEDGER_TABLE} AS ledger
+                        SET next_fetch_at = incoming.next_fetch_at,
+                            current_intent = NULL,
+                            last_success_at = incoming.last_success_at,
+                            fail_streak = 0,
+                            last_error = NULL,
+                            terminal_reason = NULL,
+                            terminalized_at = NULL
+                        FROM incoming
+                        WHERE ledger.url = incoming.url
+                          AND (
+                              incoming.lease_token IS NULL
+                              OR EXISTS (
+                                  SELECT 1
+                                  FROM {LEASE_TABLE} AS active
+                                  WHERE active.url = ledger.url
+                                    AND active.lease_token = incoming.lease_token
+                              )
+                          )
+                        RETURNING ledger.url, ledger.host
+                    )
+                    SELECT url, host FROM updated""",
+                rows,
+                template="(%s, %s, %s, %s)",
+                page_size=200,
+            )
+            updated_rows = list(cur.fetchall())
+            updated_urls = [row[0] for row in updated_rows]
+            self._delete_queue_entries(cur, updated_urls)
+            self._leases.delete(cur, updated_urls)
+            for _url, host in updated_rows:
+                self._host_ledger.record_success_in_tx(cur, host, at=now)
+        self._conn.commit()
+        return len(updated_rows)
+
     def mark_failed(
         self,
         url: str,

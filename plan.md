@@ -6,7 +6,9 @@ The crawler is now past the migration cleanup, host-first read-model deployment,
 pipeline-stage extraction, scheduler service decomposition, bounded page-content storage, and
 discovery breadth cap work. The production DB was reset after unbounded page-body storage and URL
 frontier growth filled the disk. The crawler has since been redeployed with bounded storage and
-bounded discovery admission.
+bounded discovery admission. The next bottleneck observed in production was finalizer backpressure:
+fetch and parse could feed work faster than the finalizer could apply discovery admission, host
+success, and URL completion mutations one page at a time.
 
 The current focus is to keep the crawler honest under production load:
 
@@ -18,6 +20,7 @@ The current focus is to keep the crawler honest under production load:
 - Stage liveness should be visible in runtime stats.
 - Stage workers should survive item-level errors and record failures.
 - Finalizer bottlenecks should be explained by operation-level timing, not guessed from queue depth.
+- Success finalization should use bounded batches for set-shaped scheduler mutations.
 - Host runnable capability and host runnable head should be documented as related but separate
   runtime execution concepts.
 - `host_runnable_heads` should remain a derived read model, not a second durable source of truth.
@@ -111,6 +114,12 @@ The current focus is to keep the crawler honest under production load:
   - discovered URLs now carry URL archetype and parent-context signals with their discovery value.
   - low-value URL archetypes require a stronger value threshold before scheduler admission.
   - parser telemetry records extracted, admitted, cap-rejected, and value-rejected link counts.
+- Added bounded success-finalizer batching:
+  - finalizer workers now coalesce nearby successful parsed pages before applying scheduler mutations.
+  - discovery insertion and admission run once per batch.
+  - host success updates run through `HostStore.record_success_many`.
+  - URL completion runs through `UrlLedger.mark_done_many`.
+  - `timing_summary["counts"]["finalizer_batch_size"]` exposes actual batch sizes.
 
 ## Verification
 
@@ -152,6 +161,8 @@ The current focus is to keep the crawler honest under production load:
 - Storage policy and discovery cap behavior have direct unit coverage.
 - Discovery admission reasons have direct unit coverage and are exposed through runtime timing
   summary counts.
+- Success-finalizer batching has direct coverage at the pipeline, engine, host store, URL ledger, and
+  telemetry layers.
 - Production smoke checks passed after deploy:
   - API health returned `ok`.
   - no recent critical crawler/API log errors were observed.
@@ -161,36 +172,24 @@ The current focus is to keep the crawler honest under production load:
 
 ## Production observation
 
-Latest production sample after the bounded-storage deploy:
+The bounded-storage and bounded-discovery changes removed the old disk-filling failure mode: `pages`
+is no longer an unbounded text archive, `page_content` is tier-capped, and extracted links are not
+automatically admitted into the scheduler. The remaining production questions are operational:
 
-- Pages crawled: 568.
-- URL ledger rows: 9,983.
-- Pending scheduler rows: 7,859.
-- Stored content: about 35 MB logical stored text, about 66 MB database size.
-- Disk: 5.5 GB used on a 38 GB root volume, about 16%.
-- Storage tiers:
-  - `metadata_only`: 3 pages, 0 stored bytes.
-  - `summary`: 292 pages, max 32 KiB stored per page.
-  - `standard`: 218 pages, max 256 KiB stored per page.
-  - `extended`: 55 pages, max about 714 KiB stored per page.
-- Link extraction vs admission:
-  - maximum extracted links on one page: 3,817.
-  - maximum stored/admitted outlinks on one page: 200.
-  - total extracted links: 76,563.
-  - total stored/admitted outlinks: 25,842.
-
-Interpretation:
-
-- The old DB-capacity failure mode is addressed for page bodies: `pages` is no longer an unbounded
-  text archive, and `page_content` is tier-capped.
-- The URL frontier is no longer "admit every extracted link", but it can still grow quickly because
-  the crawler is intentionally discovering new URLs. This is now a scope/value-policy question, not
-  the same unbounded storage bug.
-- The next risk is not immediate disk exhaustion; it is whether admitted URLs are valuable enough and
-  whether frontier growth matches the intended crawl scope.
+- whether `finalize_queue_wait_ms` falls after success-finalizer batching is deployed.
+- whether actual `finalizer_batch_size` values are high enough to reduce DB round trips.
+- whether URL frontier growth remains appropriate for the intended broad-WWW crawl scope.
+- whether stored bytes, relation sizes, and disk usage remain bounded during sustained crawling.
+- whether fetch/robots latency, not DB mutation throughput, becomes the dominant speed limit after
+  finalizer backpressure is reduced.
 
 ## Next candidates
 
+- Evaluate the success-finalizer batching deployment with:
+  - API health and recent error logs.
+  - `finalize_queue_wait_ms` p50/p95/max.
+  - `finalizer_batch_size` count/avg/p95/max.
+  - page throughput and active queue depths.
 - Add a repeatable production observation command for:
   - URL ledger growth over time.
   - stored content growth over time.
