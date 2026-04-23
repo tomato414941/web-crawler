@@ -124,11 +124,12 @@ class TestHostFirstFallbackStats:
         ledger = UrlLedger.__new__(UrlLedger)
         ledger._conn = FakeConn()
         ledger.reset_host_first_fallback_stats()
+        selector = ledger._lease_selector()
 
         monkeypatch.setattr(ledger, "_recover_leased_locked", lambda *_args, **_kwargs: None)
         monkeypatch.setattr(
-            ledger,
-            "_lease_next_host_first_from_read_model",
+            selector,
+            "lease_next_host_first_from_read_model",
             lambda **_kwargs: SimpleNamespace(
                 task=None,
                 read_model="miss",
@@ -138,8 +139,8 @@ class TestHostFirstFallbackStats:
         )
         fallback_results = iter([CrawlTask(url="http://example.com/"), None])
         monkeypatch.setattr(
-            ledger,
-            "_lease_next_host_first_from_bounded_scan",
+            selector,
+            "lease_next_host_first_from_bounded_scan",
             lambda **_kwargs: next(fallback_results),
         )
 
