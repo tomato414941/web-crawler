@@ -192,6 +192,41 @@ def test_save_many_deletes_metadata_only_content_rows(pg_storage):
         assert cur.fetchone()[0] == 0
 
 
+def test_save_many_deduplicates_same_url_with_last_write_winning(pg_storage):
+    first = {
+        "url": "https://example.com/dup",
+        "status": 200,
+        "content_length": 1000,
+        "timestamp": 1710000000.0,
+        "content": "<html><title>First</title><body>One</body></html>",
+        "outlinks": [],
+    }
+    second = {
+        "url": "https://example.com/dup",
+        "status": 200,
+        "content_length": 1000,
+        "timestamp": 1710000001.0,
+        "content": "<html><title>Second</title><body>Two</body></html>",
+        "outlinks": [],
+    }
+
+    save_results = pg_storage.save_many([first, second])
+
+    assert [save_result.saved for save_result in save_results] == [True, True]
+
+    with pg_storage._conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT p.title, pc.content
+            FROM pages p
+            JOIN page_content pc USING (url_hash)
+            WHERE p.url = %s
+            """,
+            ("https://example.com/dup",),
+        )
+        assert cur.fetchone() == ("Second", "<html><title>Second</title><body>Two</body></html>")
+
+
 def test_save_drops_nul_content_to_metadata_only(pg_storage):
     result = {
         "url": "https://example.com/file.pdf",
