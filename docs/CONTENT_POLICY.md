@@ -5,7 +5,7 @@ This document defines how `web-crawler` handles fetched resources today.
 ## Current scope
 
 - HTML pages are first-class crawl targets.
-- HTML pages are fetched, stored in `pages.content`, and used for link extraction.
+- HTML pages are fetched, stored through tiered page content storage, and used for link extraction.
 - Text-like resources may also be stored when they can be represented safely as text.
 - Binary documents remain valid crawl targets, but they are not first-class stored content yet.
 
@@ -24,7 +24,7 @@ For these resources, the target behavior is:
 
 - keep the URL as a valid discovered page
 - record fetch metadata such as status, URL, timestamps, and content length
-- do not persist the full binary body into `pages.content`
+- do not persist the full binary body into page content storage
 - do not treat the resource as an extracted-link source
 - do not read the response body when headers already prove the resource is metadata-only
 
@@ -47,6 +47,31 @@ configured body-size limit.
 
 A metadata-only resource is a successful crawl result. It should be finalized in the scheduler as
 done, not counted as a fetch error.
+
+## Page content storage
+
+`pages` is the lightweight page index. Stored text content lives in `page_content` and is limited by
+storage tier:
+
+- `metadata_only`: no stored text body
+- `summary`: small sample for low-value or oversized text
+- `standard`: normal page text budget
+- `extended`: larger budget for high-discovery-value text
+
+`content_length` records the original response size when known. `stored_content_bytes` records the
+actual bytes persisted. `content_truncated` tells operators whether the stored text is only a
+sample. This keeps the crawler from becoming an unbounded page-body archive.
+
+## Discovery breadth
+
+Extracting links does not mean admitting every link. Each page applies bounded discovery:
+
+- ignore links below the minimum discovery value
+- cap total admitted links per page
+- cap admitted links per target host per page
+
+`outlink_count` records the number of extracted links. `stored_outlink_count` and `outlinks` record
+the bounded set kept for scheduler admission and API inspection.
 
 ## Deferred work
 

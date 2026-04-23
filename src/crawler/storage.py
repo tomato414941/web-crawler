@@ -14,6 +14,7 @@ import psycopg2.extras
 
 from .error_stats import categorize_crawl_error
 from .host_manager import compute_host_budget
+from .page_storage_policy import prepare_page_content
 from .url_ledger import (
     BLOCKED_HOST_BACKOFF_TABLE,
     LEASE_TABLE,
@@ -33,12 +34,23 @@ PAGES_REQUIRED_COLUMNS = {
     "url",
     "host",
     "title",
-    "content",
     "content_length",
+    "content_type",
     "source_url",
     "outlinks",
+    "storage_tier",
+    "storage_reason",
+    "stored_content_bytes",
+    "content_truncated",
+    "outlink_count",
+    "stored_outlink_count",
     "crawled_at",
     "created_at",
+}
+PAGE_CONTENT_REQUIRED_COLUMNS = {
+    "url_hash",
+    "content",
+    "updated_at",
 }
 URL_LEDGER_STATS_REQUIRED_COLUMNS = {
     "host",
@@ -306,6 +318,7 @@ class PgStorage:
         self._conn = psycopg2.connect(dsn)
         self._conn.autocommit = False
         assert_public_table_columns(self._conn, "pages", PAGES_REQUIRED_COLUMNS)
+        assert_public_table_columns(self._conn, "page_content", PAGE_CONTENT_REQUIRED_COLUMNS)
         self._count = 0
 
     def _finish_read(self) -> None:
@@ -330,33 +343,80 @@ class PgStorage:
                 title = m.group(1).strip()[:500]
 
         outlinks = data.get("outlinks", [])
+        if not isinstance(outlinks, list):
+            outlinks = []
+        outlink_count = data.get("outlink_count")
+        if not isinstance(outlink_count, int):
+            outlink_count = len(outlinks)
+        stored_outlink_count = len(outlinks)
+        content_type = str(data.get("content_type") or "")
+        discovery_value = float(data.get("discovery_value") or 1.0)
+        stored_content = prepare_page_content(
+            content=content,
+            content_type=content_type,
+            discovery_value=discovery_value,
+            summary_bytes=settings.stored_content_summary_bytes,
+            standard_bytes=settings.stored_content_standard_bytes,
+            extended_bytes=settings.stored_content_extended_bytes,
+            standard_min_discovery_value=settings.stored_content_standard_min_discovery_value,
+            extended_min_discovery_value=settings.stored_content_extended_min_discovery_value,
+        )
+        crawled_at = data.get("timestamp", time.time())
 
         try:
             with self._conn.cursor() as cur:
                 cur.execute(
-                    """INSERT INTO pages (url_hash, url, host, title, content, status,
-                           content_length, source_url, outlinks, crawled_at)
-                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    """INSERT INTO pages (
+                           url_hash, url, host, title, status, content_length, content_type,
+                           source_url, outlinks, storage_tier, storage_reason,
+                           stored_content_bytes, content_truncated, outlink_count,
+                           stored_outlink_count, crawled_at
+                       )
+                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                        ON CONFLICT (url_hash) DO UPDATE SET
-                           content = EXCLUDED.content,
                            title = EXCLUDED.title,
                            status = EXCLUDED.status,
                            content_length = EXCLUDED.content_length,
+                           content_type = EXCLUDED.content_type,
+                           source_url = EXCLUDED.source_url,
                            outlinks = EXCLUDED.outlinks,
+                           storage_tier = EXCLUDED.storage_tier,
+                           storage_reason = EXCLUDED.storage_reason,
+                           stored_content_bytes = EXCLUDED.stored_content_bytes,
+                           content_truncated = EXCLUDED.content_truncated,
+                           outlink_count = EXCLUDED.outlink_count,
+                           stored_outlink_count = EXCLUDED.stored_outlink_count,
                            crawled_at = EXCLUDED.crawled_at""",
                     (
                         url_hash,
                         url,
                         host,
                         title,
-                        content,
                         data.get("status"),
                         data.get("content_length"),
+                        content_type,
                         data.get("source_url"),
                         outlinks,
-                        data.get("timestamp", time.time()),
+                        stored_content.storage_tier,
+                        stored_content.storage_reason,
+                        stored_content.stored_content_bytes,
+                        stored_content.content_truncated,
+                        outlink_count,
+                        stored_outlink_count,
+                        crawled_at,
                     ),
                 )
+                if stored_content.content:
+                    cur.execute(
+                        """INSERT INTO page_content (url_hash, content, updated_at)
+                           VALUES (%s, %s, %s)
+                           ON CONFLICT (url_hash) DO UPDATE SET
+                               content = EXCLUDED.content,
+                               updated_at = EXCLUDED.updated_at""",
+                        (url_hash, stored_content.content, time.time()),
+                    )
+                else:
+                    cur.execute("DELETE FROM page_content WHERE url_hash = %s", (url_hash,))
             self._conn.commit()
             self._count += 1
             return True
@@ -396,7 +456,9 @@ class PgStorage:
             with self._conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
                 cur.execute(
                     f"""SELECT url_hash, url, host, title, status, content_length,
-                               outlinks, crawled_at
+                               content_type, outlinks, storage_tier, storage_reason,
+                               stored_content_bytes, content_truncated, outlink_count,
+                               stored_outlink_count, crawled_at
                         FROM pages WHERE {where}
                         ORDER BY crawled_at ASC
                         LIMIT %s OFFSET %s""",
@@ -469,9 +531,16 @@ class PgStorage:
         try:
             with self._conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
                 cur.execute(
-                    """SELECT url_hash, url, host, title, content, status,
-                              content_length, source_url, outlinks, crawled_at
-                       FROM pages WHERE url_hash = %s""",
+                    """SELECT pages.url_hash, pages.url, pages.host, pages.title,
+                              COALESCE(page_content.content, '') AS content,
+                              pages.status, pages.content_length, pages.content_type,
+                              pages.source_url, pages.outlinks, pages.storage_tier,
+                              pages.storage_reason, pages.stored_content_bytes,
+                              pages.content_truncated, pages.outlink_count,
+                              pages.stored_outlink_count, pages.crawled_at
+                       FROM pages
+                       LEFT JOIN page_content ON page_content.url_hash = pages.url_hash
+                       WHERE pages.url_hash = %s""",
                     (url_hash,),
                 )
                 row = cur.fetchone()
@@ -491,7 +560,8 @@ class PgStorage:
                          count(DISTINCT host) as hosts,
                          min(crawled_at) as oldest,
                          max(crawled_at) as newest,
-                         sum(content_length) as total_bytes
+                         sum(content_length) as total_bytes,
+                         sum(stored_content_bytes) as total_stored_bytes
                        FROM pages"""
                 )
                 page_stats_row = cur.fetchone()
@@ -534,6 +604,7 @@ class PgStorage:
             "oldest_crawl": page_stats_row[2],
             "newest_crawl": page_stats_row[3],
             "total_bytes": page_stats_row[4],
+            "total_stored_bytes": page_stats_row[5],
             "scheduler_status": scheduler_status,
             "scheduler_state_snapshot": dict(scheduler_state_views["scheduler_state_snapshot"]),
             "intent_counts": dict(scheduler_status.get("intent_counts", {})),
@@ -569,7 +640,8 @@ class PgStorage:
                          count(DISTINCT host) as hosts,
                          min(crawled_at) as oldest,
                          max(crawled_at) as newest,
-                         sum(content_length) as total_bytes
+                         sum(content_length) as total_bytes,
+                         sum(stored_content_bytes) as total_stored_bytes
                        FROM pages"""
                 )
                 page_stats_row = cur.fetchone()
@@ -935,6 +1007,7 @@ class PgStorage:
             "oldest_crawl": page_stats_row[2],
             "newest_crawl": page_stats_row[3],
             "total_bytes": page_stats_row[4],
+            "total_stored_bytes": page_stats_row[5],
             "scheduler_status": scheduler_status,
             "scheduler_state_snapshot": dict(scheduler_state_views["scheduler_state_snapshot"]),
             "intent_counts": dict(scheduler_status.get("intent_counts", {})),

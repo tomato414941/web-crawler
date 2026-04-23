@@ -46,6 +46,7 @@ def _reset_schema(dsn: str) -> None:
             cur.execute(f"DROP TABLE IF EXISTS public.{LEASE_TABLE}")
             cur.execute(f"DROP TABLE IF EXISTS public.{URL_LEDGER_TABLE} CASCADE")
             cur.execute("DROP TABLE IF EXISTS public.crawler_runtime_stats")
+            cur.execute("DROP TABLE IF EXISTS public.page_content")
             cur.execute("DROP TABLE IF EXISTS public.pages")
         conn.commit()
     finally:

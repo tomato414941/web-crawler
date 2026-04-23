@@ -75,11 +75,17 @@ CREATE TABLE public.pages (
     url text NOT NULL,
     host text NOT NULL,
     title text,
-    content text,
     status integer,
     content_length integer,
+    content_type text,
     source_url text,
     outlinks text[],
+    storage_tier text DEFAULT 'metadata_only'::text NOT NULL,
+    storage_reason text DEFAULT 'metadata_only'::text NOT NULL,
+    stored_content_bytes integer DEFAULT 0 NOT NULL,
+    content_truncated boolean DEFAULT false NOT NULL,
+    outlink_count integer DEFAULT 0 NOT NULL,
+    stored_outlink_count integer DEFAULT 0 NOT NULL,
     crawled_at double precision NOT NULL,
     created_at double precision DEFAULT EXTRACT(epoch FROM now()) NOT NULL,
     CONSTRAINT pages_pkey PRIMARY KEY (url_hash)
@@ -90,6 +96,18 @@ CREATE INDEX idx_pages_host
 
 CREATE INDEX idx_pages_crawled_at
     ON public.pages(crawled_at);
+
+CREATE INDEX idx_pages_storage_tier
+    ON public.pages(storage_tier);
+
+CREATE TABLE public.page_content (
+    url_hash text NOT NULL,
+    content text DEFAULT ''::text NOT NULL,
+    updated_at double precision DEFAULT EXTRACT(epoch FROM now()) NOT NULL,
+    CONSTRAINT page_content_pkey PRIMARY KEY (url_hash),
+    CONSTRAINT page_content_url_hash_fkey
+        FOREIGN KEY (url_hash) REFERENCES public.pages(url_hash) ON DELETE CASCADE
+);
 
 CREATE TABLE public.crawler_runtime_stats (
     component text NOT NULL,
