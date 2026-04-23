@@ -43,11 +43,14 @@ from .scheduler_leases import (
     LEASE_REQUIRED_COLUMNS,
     ExecutionLeaseStore,
 )
+from .scheduler_admission import SchedulerAdmissionService
+from .scheduler_requeue import SchedulerRequeueService
+from .scheduler_selection import SchedulerLeaseSelector
 from .scheduler_observability import SchedulerObservability, SchedulerReadiness
 from .scheduler_quarantine import SchedulerQuarantine
 from .scheduler_retry_policy import SchedulerRetryPolicy
 from .schema import assert_public_table_columns
-from .urls import normalize_url, url_branch_key
+from .urls import normalize_url
 
 if TYPE_CHECKING:
     from .host_store import HostStore
@@ -309,6 +312,35 @@ class UrlLedger:
         )
         self._membership.attach_host_heads(self._host_heads)
         self._lease_telemetry = HostFirstLeaseTelemetry()
+        self._selection = SchedulerLeaseSelector(
+            self,
+            task_cls=CrawlTask,
+            runnable_host_head_cls=RunnableHostHead,
+            url_ledger_table=URL_LEDGER_TABLE,
+            lease_strategy_url_order=LEASE_STRATEGY_URL_ORDER,
+            lease_strategy_host_first=LEASE_STRATEGY_HOST_FIRST,
+            host_head_lookahead=HOST_HEAD_LOOKAHEAD,
+            host_head_read_model_lookahead=HOST_HEAD_READ_MODEL_LOOKAHEAD,
+        )
+        self._admission = SchedulerAdmissionService(
+            self,
+            task_cls=CrawlTask,
+            url_ledger_table=URL_LEDGER_TABLE,
+            blocked_host_backoff_table=BLOCKED_HOST_BACKOFF_TABLE,
+            lease_table=LEASE_TABLE,
+            host_head_update_dirty=HOST_HEAD_UPDATE_DIRTY,
+        )
+        self._requeue = SchedulerRequeueService(
+            self,
+            url_ledger_table=URL_LEDGER_TABLE,
+            blocked_host_backoff_table=BLOCKED_HOST_BACKOFF_TABLE,
+            intent_explore=INTENT_EXPLORE,
+            intent_retry=INTENT_RETRY,
+            intent_refresh=INTENT_REFRESH,
+            scheduler_surface_runnable=SCHEDULER_SURFACE_RUNNABLE,
+            scheduler_surface_refresh=SCHEDULER_SURFACE_REFRESH,
+            scheduler_surface_scheduled=SCHEDULER_SURFACE_SCHEDULED,
+        )
         self._observability = SchedulerObservability(
             conn,
             physical_queue_tables=PHYSICAL_QUEUE_TABLES,
@@ -325,7 +357,7 @@ class UrlLedger:
             blocked_queue_table=BLOCKED_HOST_BACKOFF_TABLE,
             queue_table_sql=self._queue_table_sql,
             delete_queue_entries=self._delete_queue_entries,
-            insert_blocked_rows=self._insert_blocked_host_backoff_rows,
+            insert_blocked_rows=self._requeue_service().insert_blocked_host_backoff_rows,
             insert_pending_rows=self._insert_pending_queue_rows,
         )
         self._last_admission_diagnostics = self._empty_admission_diagnostics()
@@ -416,6 +448,53 @@ class UrlLedger:
             )
             self._retry_policy = policy
         return policy
+
+    def _lease_selector(self) -> SchedulerLeaseSelector:
+        selector = getattr(self, "_selection", None)
+        if selector is None:
+            selector = SchedulerLeaseSelector(
+                self,
+                task_cls=CrawlTask,
+                runnable_host_head_cls=RunnableHostHead,
+                url_ledger_table=URL_LEDGER_TABLE,
+                lease_strategy_url_order=LEASE_STRATEGY_URL_ORDER,
+                lease_strategy_host_first=LEASE_STRATEGY_HOST_FIRST,
+                host_head_lookahead=HOST_HEAD_LOOKAHEAD,
+                host_head_read_model_lookahead=HOST_HEAD_READ_MODEL_LOOKAHEAD,
+            )
+            self._selection = selector
+        return selector
+
+    def _admission_service(self) -> SchedulerAdmissionService:
+        admission = getattr(self, "_admission", None)
+        if admission is None:
+            admission = SchedulerAdmissionService(
+                self,
+                task_cls=CrawlTask,
+                url_ledger_table=URL_LEDGER_TABLE,
+                blocked_host_backoff_table=BLOCKED_HOST_BACKOFF_TABLE,
+                lease_table=LEASE_TABLE,
+                host_head_update_dirty=HOST_HEAD_UPDATE_DIRTY,
+            )
+            self._admission = admission
+        return admission
+
+    def _requeue_service(self) -> SchedulerRequeueService:
+        requeue = getattr(self, "_requeue", None)
+        if requeue is None:
+            requeue = SchedulerRequeueService(
+                self,
+                url_ledger_table=URL_LEDGER_TABLE,
+                blocked_host_backoff_table=BLOCKED_HOST_BACKOFF_TABLE,
+                intent_explore=INTENT_EXPLORE,
+                intent_retry=INTENT_RETRY,
+                intent_refresh=INTENT_REFRESH,
+                scheduler_surface_runnable=SCHEDULER_SURFACE_RUNNABLE,
+                scheduler_surface_refresh=SCHEDULER_SURFACE_REFRESH,
+                scheduler_surface_scheduled=SCHEDULER_SURFACE_SCHEDULED,
+            )
+            self._requeue = requeue
+        return requeue
 
     def _physical_queues(self) -> list[str]:
         """Return physical queues in stable scheduler order."""
@@ -570,46 +649,7 @@ class UrlLedger:
 
     def _recover_leased_locked(self, now: float, expired_only: bool) -> int:
         """Reset leased URLs back to pending inside an open transaction."""
-        with self._conn.cursor() as cur:
-            recovered_rows = self._leases.recover_rows(cur, now=now, expired_only=expired_only)
-            if not recovered_rows:
-                return 0
-            psycopg2.extras.execute_values(
-                cur,
-                f"""SELECT ledger.url,
-                           ledger.host,
-                           ledger.discovery_value,
-                           ledger.fail_streak,
-                           ledger.next_fetch_at,
-                           ledger.added_at,
-                           recovered.physical_queue
-                    FROM {URL_LEDGER_TABLE} AS ledger
-                    JOIN (VALUES %s) AS recovered(url, host, physical_queue)
-                      ON recovered.url = ledger.url""",
-                recovered_rows,
-            )
-            rows = cur.fetchall()
-            pending_rows = [
-                (
-                    url,
-                    host,
-                    self._compute_retry_scheduler_score(discovery_value, fail_streak),
-                    next_fetch_at,
-                    added_at,
-                    physical_queue,
-                )
-                for (
-                    url,
-                    host,
-                    discovery_value,
-                    fail_streak,
-                    next_fetch_at,
-                    added_at,
-                    physical_queue,
-                ) in rows
-            ]
-            self._membership.replace_pending_rows(cur, pending_rows)
-            return len(rows)
+        return self._requeue_service().recover_leased_locked(now, expired_only)
 
     def _assert_current_schema(self) -> None:
         assert_public_table_columns(self._conn, URL_LEDGER_TABLE, URL_LEDGER_REQUIRED_COLUMNS)
@@ -845,14 +885,7 @@ class UrlLedger:
 
     def _host_head_order_by_sql(self, alias: str, *, latency_ms_sql: str | None = None) -> str:
         """Return ORDER BY used to compare the best runnable URL for each host."""
-        latency_penalty = self._latency_penalty_sql(alias, latency_ms_sql=latency_ms_sql)
-        return (
-            f"{alias}.next_fetch_at ASC, "
-            f"{latency_penalty} ASC, "
-            f"{alias}.added_at ASC, "
-            f"{alias}.scheduler_score DESC, "
-            f"{alias}.url ASC"
-        )
+        return self._lease_selector().host_head_order_by_sql(alias, latency_ms_sql=latency_ms_sql)
 
     def _runnable_host_heads_sql(
         self,
@@ -861,57 +894,16 @@ class UrlLedger:
         runnable_sql: _RunnableSql,
     ) -> tuple[str, tuple[object, ...]]:
         """Return SQL that derives one ready head URL per host."""
-        table_name = self._queue_table_sql(physical_queue)
-        host_head_order = self._host_head_order_by_sql(
-            "candidate",
-            latency_ms_sql=runnable_sql.latency_ms_sql,
+        return self._lease_selector().runnable_host_heads_sql(
+            physical_queue=physical_queue,
+            runnable_sql=runnable_sql,
         )
-        latency_penalty = self._latency_penalty_sql(
-            "candidate",
-            latency_ms_sql=runnable_sql.latency_ms_sql,
-        )
-        sql = f"""SELECT selected.host,
-                         selected.url,
-                         selected.next_fetch_at,
-                         selected.added_at,
-                         selected.scheduler_score,
-                         selected.latency_penalty,
-                         selected.host_pending_count
-                  FROM (
-                      SELECT DISTINCT ON (candidate.host)
-                          candidate.host,
-                          candidate.url,
-                          candidate.next_fetch_at,
-                          candidate.added_at,
-                          candidate.scheduler_score,
-                          {latency_penalty} AS latency_penalty,
-                          COUNT(*) OVER (PARTITION BY candidate.host) AS host_pending_count
-                      FROM {table_name} AS candidate
-                      {runnable_sql.join_sql}
-                      WHERE {runnable_sql.where}
-                      ORDER BY candidate.host, {host_head_order}
-                  ) AS selected
-                  ORDER BY
-                      selected.host_pending_count ASC,
-                      selected.latency_penalty ASC,
-                      selected.next_fetch_at ASC,
-                      selected.added_at ASC,
-                      selected.scheduler_score DESC,
-                      selected.url ASC"""
-        return sql, runnable_sql.params
 
     def _runnable_host_head_sort_key(
         self, head: RunnableHostHead
     ) -> tuple[int, int, float, float, float, str]:
         """Return the canonical host-first comparison key for runnable host heads."""
-        return (
-            head.host_pending_count,
-            head.latency_penalty,
-            head.next_fetch_at,
-            head.added_at,
-            -head.scheduler_score,
-            head.url,
-        )
+        return self._lease_selector().runnable_host_head_sort_key(head)
 
     def runnable_host_heads(
         self,
@@ -924,52 +916,14 @@ class UrlLedger:
         now: float | None = None,
     ) -> list[RunnableHostHead]:
         """Return one ready runnable head per host as a derived read model."""
-        if limit <= 0:
-            return []
-
-        runnable_at = time.time() if now is None else now
-        normalized_physical_queues = self._normalized_surface_queues(
+        return self._lease_selector().runnable_host_heads(
+            limit=limit,
+            host=host,
+            exclude_hosts=exclude_hosts,
             runnable_surface=runnable_surface,
             physical_queues=physical_queues,
+            now=now,
         )
-        heads: list[RunnableHostHead] = []
-
-        with self._conn.cursor() as cur:
-            for physical_queue in normalized_physical_queues:
-                runnable_sql = self._queue_runnable_sql(
-                    alias="candidate",
-                    now=runnable_at,
-                    host=host,
-                    exclude_hosts=exclude_hosts,
-                )
-                sql, params = self._runnable_host_heads_sql(
-                    physical_queue=physical_queue,
-                    runnable_sql=runnable_sql,
-                )
-                cur.execute(f"{sql} LIMIT %s", (*params, limit))
-                heads.extend(
-                    RunnableHostHead(
-                        host_key=host_key,
-                        url=url,
-                        next_fetch_at=next_fetch_at,
-                        added_at=added_at,
-                        scheduler_score=scheduler_score,
-                        latency_penalty=latency_penalty,
-                        host_pending_count=host_pending_count,
-                    )
-                    for (
-                        host_key,
-                        url,
-                        next_fetch_at,
-                        added_at,
-                        scheduler_score,
-                        latency_penalty,
-                        host_pending_count,
-                    ) in cur.fetchall()
-                )
-
-        heads.sort(key=self._runnable_host_head_sort_key)
-        return heads[:limit]
 
     def select_runnable_host_head(
         self,
@@ -981,17 +935,13 @@ class UrlLedger:
         now: float | None = None,
     ) -> RunnableHostHead | None:
         """Return the next host-level runnable head for host-first leasing."""
-        heads = self.runnable_host_heads(
-            limit=HOST_HEAD_LOOKAHEAD,
+        return self._lease_selector().select_runnable_host_head(
             host=host,
             exclude_hosts=exclude_hosts,
             runnable_surface=runnable_surface,
             physical_queues=physical_queues,
             now=now,
         )
-        if not heads:
-            return None
-        return min(heads, key=self._runnable_host_head_sort_key)
 
     def rebuild_host_runnable_heads(
         self,
@@ -1128,50 +1078,17 @@ class UrlLedger:
         quarantined_at: float | None = None,
     ) -> None:
         """Insert URLs into the blocked-host-backoff physical queue."""
-        now = time.time() if quarantined_at is None else quarantined_at
-        blocked_rows = [
-            (
-                normalize_url(url),
-                host,
-                self._normalize_physical_queue(physical_queue),
-                scheduler_score,
-                next_fetch_at,
-                added_at,
-                now,
-                url_branch_key(normalize_url(url)),
-            )
-            for url, host, scheduler_score, next_fetch_at, added_at, physical_queue in rows
-        ]
-        if not blocked_rows:
-            return
-        psycopg2.extras.execute_values(
+        self._requeue_service().insert_blocked_host_backoff_rows(
             cur,
-            f"""INSERT INTO {BLOCKED_HOST_BACKOFF_TABLE}
-                    (url, host, physical_queue, scheduler_score, next_fetch_at, added_at, quarantined_at, branch_key)
-                VALUES %s
-                ON CONFLICT (url) DO UPDATE
-                SET host = EXCLUDED.host,
-                    physical_queue = EXCLUDED.physical_queue,
-                    scheduler_score = EXCLUDED.scheduler_score,
-                    next_fetch_at = EXCLUDED.next_fetch_at,
-                    added_at = EXCLUDED.added_at,
-                    quarantined_at = EXCLUDED.quarantined_at,
-                    branch_key = EXCLUDED.branch_key""",
-            blocked_rows,
-            page_size=200,
+            rows,
+            quarantined_at=quarantined_at,
         )
 
     def _admission_physical_queue_by_url(
         self,
         tasks: list[CrawlTask],
     ) -> dict[str, str]:
-        return {
-            task.url: self._physical_queue_for_model(
-                runnable_surface=task.runnable_surface,
-                intent=task.intent,
-            )
-            for task in tasks
-        }
+        return self._admission_service().admission_physical_queue_by_url(tasks)
 
     def _fetch_admission_ledger_rows_for_tasks(
         self,
@@ -1179,16 +1096,10 @@ class UrlLedger:
         tasks: list[CrawlTask],
     ) -> list[tuple[str, str, float, float, float]]:
         """Load known ledger rows used by scheduler admission."""
-        normalized_urls = sorted({task.url for task in tasks if task.url})
-        if not normalized_urls:
-            return []
-        cur.execute(
-            f"""SELECT url, host, discovery_value, next_fetch_at, added_at
-                FROM {URL_LEDGER_TABLE}
-                WHERE url = ANY(%s)""",
-            (normalized_urls,),
+        return self._admission_service().fetch_admission_ledger_rows_for_tasks(
+            cur,
+            tasks,
         )
-        return list(cur.fetchall())
 
     def _new_host_counts_for_tasks(self, cur, tasks: list[CrawlTask]) -> Counter[str]:
         """Return per-host counts for task URLs that are not already known."""
@@ -1212,54 +1123,13 @@ class UrlLedger:
         current_statuses: list[str] | None = None,
     ) -> int:
         """Move known URLs back into a pending physical queue and synchronize scheduler state."""
-        normalized_urls = sorted({normalize_url(url) for url in urls if url})
-        if not normalized_urls:
-            return 0
-
-        scheduled_at = time.time() if next_fetch_at is None else next_fetch_at
-        normalized_physical_queue = self._physical_queue_for_model(
+        return self._requeue_service().requeue_urls(
+            urls,
             runnable_surface=runnable_surface,
             intent=intent,
+            next_fetch_at=next_fetch_at,
+            current_statuses=current_statuses,
         )
-        normalized_intent = self._intent_for_model(
-            runnable_surface=runnable_surface,
-            intent=intent,
-        )
-
-        with self._conn.cursor() as cur:
-            if current_statuses is None:
-                cur.execute(
-                    f"""UPDATE {URL_LEDGER_TABLE} AS ledger
-                        SET next_fetch_at = %s,
-                            current_intent = %s,
-                            terminal_reason = NULL,
-                            terminalized_at = NULL
-                        WHERE url = ANY(%s)
-                        RETURNING url, host, discovery_value, next_fetch_at, added_at""",
-                    (scheduled_at, normalized_intent, normalized_urls),
-                )
-            else:
-                cur.execute(
-                    f"""UPDATE {URL_LEDGER_TABLE} AS ledger
-                        SET next_fetch_at = %s,
-                            current_intent = %s,
-                            terminal_reason = NULL,
-                            terminalized_at = NULL
-                        WHERE url = ANY(%s)
-                        RETURNING url, host, discovery_value, next_fetch_at, added_at""",
-                    (scheduled_at, normalized_intent, normalized_urls),
-                )
-            rows = cur.fetchall()
-            pending_rows = [
-                (url, host, discovery_value, next_fetch_at, added_at, normalized_physical_queue)
-                for url, host, discovery_value, next_fetch_at, added_at in rows
-            ]
-            self._membership.replace_pending_rows(cur, pending_rows)
-            self._leases.delete(cur, self._membership.row_urls(pending_rows))
-            count = len(pending_rows)
-
-        self._conn.commit()
-        return count
 
     def requeue_refresh_urls(
         self,
@@ -1269,10 +1139,8 @@ class UrlLedger:
         current_statuses: list[str] | None = None,
     ) -> int:
         """Requeue known URLs for refresh intent on the refresh runnable surface."""
-        return self.requeue_urls(
+        return self._requeue_service().requeue_refresh_urls(
             urls,
-            runnable_surface=SCHEDULER_SURFACE_REFRESH,
-            intent=INTENT_REFRESH,
             next_fetch_at=next_fetch_at,
             current_statuses=current_statuses,
         )
@@ -1350,62 +1218,11 @@ class UrlLedger:
 
     def _admit_queue_membership(self, tasks: list[CrawlTask]) -> int:
         """Assign scheduler membership for known ledger URLs."""
-        diagnostics = self._empty_admission_diagnostics()
-        if not tasks:
-            self._last_admission_diagnostics = diagnostics
-            return 0
-
-        prepared_tasks = self._prepare_tasks(tasks)
-        try:
-            with self._conn.cursor() as cur:
-                started = time.perf_counter()
-                self._update_task_intents(cur, prepared_tasks)
-                diagnostics["admit_update_intents_ms"] = _elapsed_ms(started)
-
-                started = time.perf_counter()
-                ledger_rows = self._fetch_admission_ledger_rows_for_tasks(cur, prepared_tasks)
-                diagnostics["admit_fetch_rows_ms"] = _elapsed_ms(started)
-                pending_rows = self._membership.rows_for_ledger_rows(
-                    ledger_rows,
-                    physical_queue_by_url=self._admission_physical_queue_by_url(prepared_tasks),
-                    default_physical_queue=self._default_scheduled_physical_queue(),
-                )
-                membership_timings = self._membership.replace_pending_rows(
-                    cur,
-                    pending_rows,
-                    host_head_update=HOST_HEAD_UPDATE_DIRTY,
-                )
-                diagnostics["admit_delete_membership_ms"] = membership_timings.get(
-                    "delete_membership_ms",
-                    0.0,
-                )
-                diagnostics["admit_insert_membership_ms"] = membership_timings.get(
-                    "insert_membership_ms",
-                    0.0,
-                )
-                diagnostics["admit_host_heads_ms"] = membership_timings.get(
-                    "host_heads_ms",
-                    0.0,
-                )
-                started = time.perf_counter()
-                self._leases.delete(cur, self._membership.row_urls(pending_rows))
-                diagnostics["admit_delete_leases_ms"] = _elapsed_ms(started)
-                count = len(pending_rows)
-        except Exception:
-            self._conn.rollback()
-            self._last_admission_diagnostics = diagnostics
-            logger.exception("Failed to admit %d URLs", len(tasks))
-            return 0
-
-        started = time.perf_counter()
-        self._conn.commit()
-        diagnostics["admit_commit_ms"] = _elapsed_ms(started)
-        self._last_admission_diagnostics = diagnostics
-        return count
+        return self._admission_service().admit_queue_membership(tasks)
 
     def admit_discovered_tasks(self, tasks: list[CrawlTask]) -> int:
         """Assign scheduler membership to discovered URLs using task admission metadata."""
-        return self._admit_queue_membership(tasks)
+        return self._admission_service().admit_discovered_tasks(tasks)
 
     def admit_urls(
         self,
@@ -1415,19 +1232,11 @@ class UrlLedger:
         intent: str | None = None,
     ) -> int:
         """Assign scheduler membership to known ledger URLs using surface and intent."""
-        normalized_urls = sorted({normalize_url(url) for url in urls if url})
-        if not normalized_urls:
-            return 0
-
-        admission_tasks = [
-            CrawlTask(
-                url=url,
-                runnable_surface=runnable_surface,
-                intent=intent,
-            )
-            for url in normalized_urls
-        ]
-        return self._admit_queue_membership(admission_tasks)
+        return self._admission_service().admit_urls(
+            urls,
+            runnable_surface=runnable_surface,
+            intent=intent,
+        )
 
     def _select_admission_candidate_rows(
         self,
@@ -1436,33 +1245,7 @@ class UrlLedger:
         limit: int,
     ) -> list[tuple[str, str, float, float, float]]:
         """Return ledger rows that are known but lack current scheduler membership."""
-        queue_joins, queue_absence = self._queue_membership_join_sql(ledger_alias="ledger")
-        cur.execute(
-            f"""SELECT ledger.url,
-                       ledger.host,
-                       ledger.discovery_value,
-                       ledger.next_fetch_at,
-                       ledger.added_at
-                FROM {URL_LEDGER_TABLE} AS ledger
-                {queue_joins}
-                LEFT JOIN {BLOCKED_HOST_BACKOFF_TABLE} AS blocked
-                    ON blocked.url = ledger.url
-                LEFT JOIN {LEASE_TABLE} AS lease
-                    ON lease.url = ledger.url
-                WHERE {queue_absence}
-                  AND blocked.url IS NULL
-                  AND lease.url IS NULL
-                  AND ledger.last_success_at IS NULL
-                  AND ledger.terminal_reason IS NULL
-                ORDER BY ledger.discovery_value DESC,
-                         ledger.next_fetch_at ASC,
-                         ledger.added_at ASC,
-                         ledger.url ASC
-                LIMIT %s
-                FOR UPDATE OF ledger SKIP LOCKED""",
-            (limit,),
-        )
-        return list(cur.fetchall())
+        return self._admission_service().select_admission_candidate_rows(cur, limit=limit)
 
     def admit_discovered_urls(
         self,
@@ -1472,45 +1255,11 @@ class UrlLedger:
         intent: str | None = None,
     ) -> int:
         """Assign scheduler membership to discovered ledger rows without task metadata."""
-        if limit <= 0:
-            return 0
-
-        normalized_physical_queue = self._physical_queue_for_model(
+        return self._admission_service().admit_discovered_urls(
+            limit,
             runnable_surface=runnable_surface,
             intent=intent,
         )
-        resolved_intent = self._intent_for_model(
-            runnable_surface=runnable_surface,
-            intent=intent,
-        )
-
-        try:
-            with self._conn.cursor() as cur:
-                candidate_rows = self._select_admission_candidate_rows(cur, limit=limit)
-                if resolved_intent is not None and candidate_rows:
-                    cur.execute(
-                        f"""UPDATE {URL_LEDGER_TABLE}
-                            SET current_intent = %s
-                            WHERE url = ANY(%s)""",
-                        (resolved_intent, [row[0] for row in candidate_rows]),
-                    )
-                pending_rows = self._membership.rows_for_physical_queue(
-                    candidate_rows,
-                    normalized_physical_queue,
-                )
-                self._membership.replace_pending_rows(
-                    cur,
-                    pending_rows,
-                    host_head_update=HOST_HEAD_UPDATE_DIRTY,
-                )
-                count = len(pending_rows)
-        except Exception:
-            self._conn.rollback()
-            logger.exception("Failed to admit discovered URLs (limit=%d)", limit)
-            return 0
-
-        self._conn.commit()
-        return count
 
     def preview_tasks(self, tasks: list[CrawlTask]) -> list[CrawlTask]:
         """Return normalized tasks with physical queues implied without writing them."""
@@ -1540,47 +1289,13 @@ class UrlLedger:
         execution_tiers: list[int] | None = None,
     ) -> CrawlTask | None:
         """Lease the next runnable URL, optionally filtered by host."""
-        normalized_physical_queues = self._normalized_surface_queues(
-            runnable_surface=runnable_surface,
-            physical_queues=None,
-        )
-        normalized_lease_strategy = self._normalize_lease_strategy(lease_strategy)
-        if len(normalized_physical_queues) != 1:
-            if normalized_lease_strategy == LEASE_STRATEGY_HOST_FIRST:
-                return self._lease_next_host_first(
-                    host=host,
-                    lease_seconds=lease_seconds,
-                    exclude_hosts=exclude_hosts,
-                    physical_queues=normalized_physical_queues,
-                    execution_tiers=execution_tiers,
-                )
-
-            for physical_queue in normalized_physical_queues:
-                task = self._lease_next_url_order(
-                    host=host,
-                    lease_seconds=lease_seconds,
-                    exclude_hosts=exclude_hosts,
-                    physical_queue=physical_queue,
-                )
-                if task is not None:
-                    return task
-            return None
-
-        physical_queue = normalized_physical_queues[0]
-        if normalized_lease_strategy == LEASE_STRATEGY_HOST_FIRST:
-            return self._lease_next_host_first(
-                host=host,
-                lease_seconds=lease_seconds,
-                exclude_hosts=exclude_hosts,
-                physical_queue=physical_queue,
-                execution_tiers=execution_tiers,
-            )
-
-        return self._lease_next_url_order(
+        return self._lease_selector().lease_next(
             host=host,
             lease_seconds=lease_seconds,
+            lease_strategy=lease_strategy,
             exclude_hosts=exclude_hosts,
-            physical_queue=physical_queue,
+            runnable_surface=runnable_surface,
+            execution_tiers=execution_tiers,
         )
 
     def _lease_next_host_first(
@@ -1594,75 +1309,14 @@ class UrlLedger:
         execution_tiers: list[int] | None = None,
     ) -> CrawlTask | None:
         """Lease from the next selected runnable host head."""
-        if physical_queues is None:
-            if physical_queue is None:
-                physical_queues = [self._default_scheduled_physical_queue()]
-            else:
-                physical_queues = [physical_queue]
-        normalized_physical_queues = self._normalized_physical_queues(physical_queues)
-
-        now = time.time()
-        self._recover_leased_locked(now, expired_only=True)
-        self._conn.commit()
-
-        try:
-            read_model_result = self._lease_next_host_first_from_read_model(
-                host=host,
-                lease_seconds=lease_seconds,
-                exclude_hosts=exclude_hosts,
-                physical_queues=normalized_physical_queues,
-                execution_tiers=execution_tiers,
-                now=now,
-            )
-        except Exception:
-            self._conn.rollback()
-            logger.debug(
-                "Failed to lease from host runnable-head read model; using bounded fallback",
-                exc_info=True,
-            )
-            read_model_result = _HostFirstReadModelResult(
-                task=None,
-                read_model="error",
-            )
-
-        self._record_host_first_read_model(read_model_result.read_model)
-        if read_model_result.task is not None:
-            self._set_last_lease_diagnostics(
-                read_model=read_model_result.read_model,
-                fallback="none",
-                read_model_candidates=read_model_result.candidates,
-                stale_candidates=read_model_result.stale_candidates,
-                execution_tier=getattr(read_model_result, "execution_tier", None),
-            )
-            return read_model_result.task
-
-        if execution_tiers:
-            self._set_last_lease_diagnostics(
-                read_model=read_model_result.read_model,
-                fallback="tier_filtered",
-                read_model_candidates=read_model_result.candidates,
-                stale_candidates=read_model_result.stale_candidates,
-                execution_tier=getattr(read_model_result, "execution_tier", None),
-            )
-            return None
-
-        fallback_task = self._lease_next_host_first_from_bounded_scan(
+        return self._lease_selector().lease_next_host_first(
             host=host,
             lease_seconds=lease_seconds,
             exclude_hosts=exclude_hosts,
-            physical_queues=normalized_physical_queues,
-            now=now,
+            physical_queue=physical_queue,
+            physical_queues=physical_queues,
+            execution_tiers=execution_tiers,
         )
-        self._record_host_first_fallback(fallback_task)
-        fallback = "hit" if fallback_task is not None else "miss"
-        self._set_last_lease_diagnostics(
-            read_model=read_model_result.read_model,
-            fallback=fallback,
-            read_model_candidates=read_model_result.candidates,
-            stale_candidates=read_model_result.stale_candidates,
-            execution_tier=getattr(read_model_result, "execution_tier", None),
-        )
-        return fallback_task
 
     def _lease_next_host_first_from_read_model(
         self,
@@ -1675,43 +1329,13 @@ class UrlLedger:
         now: float,
     ) -> _HostFirstReadModelResult:
         """Lease host-first candidates from the loose read model first."""
-        candidate_heads = self.host_runnable_heads_from_read_model(
-            limit=HOST_HEAD_READ_MODEL_LOOKAHEAD,
+        return self._lease_selector().lease_next_host_first_from_read_model(
             host=host,
+            lease_seconds=lease_seconds,
             exclude_hosts=exclude_hosts,
             physical_queues=physical_queues,
             execution_tiers=execution_tiers,
             now=now,
-        )
-        stale_candidates = 0
-        for head in candidate_heads:
-            task = self._lease_candidate_url(
-                candidate_url=head.url,
-                physical_queue=head.physical_queue,
-                lease_seconds=lease_seconds,
-                host=host,
-                exclude_hosts=exclude_hosts,
-                now=now,
-            )
-            if task is not None:
-                return _HostFirstReadModelResult(
-                    task=task,
-                    read_model="hit",
-                    candidates=len(candidate_heads),
-                    stale_candidates=stale_candidates,
-                    execution_tier=head.execution_tier,
-                )
-            stale_candidates += 1
-            self._delete_host_runnable_head_candidate(
-                physical_queue=head.physical_queue,
-                url=head.url,
-            )
-
-        return _HostFirstReadModelResult(
-            task=None,
-            read_model="stale" if stale_candidates else "miss",
-            candidates=len(candidate_heads),
-            stale_candidates=stale_candidates,
         )
 
     def _lease_next_host_first_from_bounded_scan(
@@ -1724,17 +1348,13 @@ class UrlLedger:
         now: float,
     ) -> CrawlTask | None:
         """Lease from a bounded queue scan when the host-head cache misses."""
-        for physical_queue in physical_queues:
-            task = self._lease_next_host_first_from_bounded_scan_queue(
-                host=host,
-                lease_seconds=lease_seconds,
-                exclude_hosts=exclude_hosts,
-                physical_queue=physical_queue,
-                now=now,
-            )
-            if task is not None:
-                return task
-        return None
+        return self._lease_selector().lease_next_host_first_from_bounded_scan(
+            host=host,
+            lease_seconds=lease_seconds,
+            exclude_hosts=exclude_hosts,
+            physical_queues=physical_queues,
+            now=now,
+        )
 
     def _lease_next_host_first_from_bounded_scan_queue(
         self,
@@ -1746,55 +1366,13 @@ class UrlLedger:
         now: float,
     ) -> CrawlTask | None:
         """Lease from one physical queue using a bounded host-first scan."""
-        started_at = time.perf_counter()
-        runnable_sql = self._queue_runnable_sql(
-            alias="candidate",
-            now=now,
+        return self._lease_selector().lease_next_host_first_from_bounded_scan_queue(
             host=host,
+            lease_seconds=lease_seconds,
             exclude_hosts=exclude_hosts,
+            physical_queue=physical_queue,
+            now=now,
         )
-        order_by = self._lease_order_by_sql(
-            "candidate",
-            LEASE_STRATEGY_HOST_FIRST,
-            latency_ms_sql=runnable_sql.latency_ms_sql,
-        )
-        candidate_from = (
-            f"FROM {self._queue_table_sql(physical_queue)} AS candidate {runnable_sql.join_sql}"
-        )
-        try:
-            with self._conn.cursor() as cur:
-                cur.execute(
-                    f"""SELECT candidate.url
-                        {candidate_from}
-                        WHERE {runnable_sql.where}
-                        ORDER BY {order_by}, candidate.url ASC
-                        LIMIT %s""",
-                    (*runnable_sql.params, HOST_HEAD_LOOKAHEAD),
-                )
-                candidate_urls = [url for (url,) in cur.fetchall()]
-            self._conn.commit()
-        except Exception:
-            self._conn.rollback()
-            logger.debug("Failed bounded host-first fallback scan", exc_info=True)
-            return None
-        logger.debug(
-            "Host runnable-head cache miss; queue=%s bounded fallback candidates=%d elapsed=%0.1fms",
-            physical_queue,
-            len(candidate_urls),
-            (time.perf_counter() - started_at) * 1000,
-        )
-        for candidate_url in candidate_urls:
-            task = self._lease_candidate_url(
-                candidate_url=candidate_url,
-                physical_queue=physical_queue,
-                lease_seconds=lease_seconds,
-                host=host,
-                exclude_hosts=exclude_hosts,
-                now=now,
-            )
-            if task is not None:
-                return task
-        return None
 
     def _lease_next_url_order(
         self,
@@ -1805,46 +1383,11 @@ class UrlLedger:
         physical_queue: str,
     ) -> CrawlTask | None:
         """Lease using URL-order selection from one physical queue."""
-        now = time.time()
-        runnable_sql = self._queue_runnable_sql(
-            alias="candidate",
-            now=now,
+        return self._lease_selector().lease_next_url_order(
             host=host,
-            exclude_hosts=exclude_hosts,
-        )
-        candidate_from = (
-            f"FROM {self._queue_table_sql(physical_queue)} AS candidate {runnable_sql.join_sql}"
-        )
-        order_by = self._lease_order_by_sql(
-            "candidate",
-            LEASE_STRATEGY_URL_ORDER,
-            latency_ms_sql=runnable_sql.latency_ms_sql,
-        )
-        with self._conn.cursor() as cur:
-            cur.execute(
-                f"""SELECT candidate.url
-                    {candidate_from}
-                    WHERE candidate.url = (
-                        SELECT candidate.url
-                        {candidate_from}
-                        WHERE {runnable_sql.where}
-                        ORDER BY {order_by}
-                        LIMIT 1
-                        FOR UPDATE OF candidate SKIP LOCKED
-                    )""",
-                runnable_sql.params,
-            )
-            row = cur.fetchone()
-        if row is None:
-            self._conn.commit()
-            return None
-        return self._lease_candidate_url(
-            candidate_url=row[0],
-            physical_queue=physical_queue,
             lease_seconds=lease_seconds,
-            host=host,
             exclude_hosts=exclude_hosts,
-            now=now,
+            physical_queue=physical_queue,
         )
 
     def _lease_candidate_url(
@@ -1858,63 +1401,13 @@ class UrlLedger:
         now: float,
     ) -> CrawlTask | None:
         """Lease one concrete candidate URL when it is still runnable and unlocked."""
-        lease_token = self._leases.new_token()
-        duration = self._lease_seconds if lease_seconds is None else lease_seconds
-        lease_expires_at = now + duration
-        runnable_sql = self._queue_runnable_sql(
-            alias="candidate",
-            now=now,
+        return self._lease_selector().lease_candidate_url(
+            candidate_url=candidate_url,
+            physical_queue=physical_queue,
+            lease_seconds=lease_seconds,
             host=host,
             exclude_hosts=exclude_hosts,
-        )
-        candidate_from = (
-            f"FROM {self._queue_table_sql(physical_queue)} AS candidate {runnable_sql.join_sql}"
-        )
-
-        try:
-            with self._conn.cursor() as cur:
-                cur.execute(
-                    f"""SELECT
-                            candidate.url,
-                            candidate.scheduler_score,
-                            ledger.discovery_value,
-                            ledger.source_url,
-                            candidate.added_at,
-                            candidate.next_fetch_at,
-                            candidate.host
-                        {candidate_from}
-                        JOIN {URL_LEDGER_TABLE} AS ledger ON ledger.url = candidate.url
-                        WHERE candidate.url = %s
-                          AND {runnable_sql.where}
-                        FOR UPDATE OF candidate SKIP LOCKED""",
-                    (candidate_url, *runnable_sql.params),
-                )
-                row = cur.fetchone()
-                if row:
-                    self._delete_queue_entries(cur, [row[0]])
-                    self._leases.upsert(
-                        cur,
-                        [(row[0], row[6], physical_queue, lease_token, lease_expires_at)],
-                    )
-            self._conn.commit()
-        except Exception:
-            self._conn.rollback()
-            logger.exception("Failed to lease next URL")
-            return None
-
-        if row is None:
-            return None
-
-        url, scheduler_score, discovery_value, source_url, added_at, next_fetch_at, _host = row
-        return CrawlTask(
-            url=url,
-            discovery_value=discovery_value,
-            scheduler_score=scheduler_score,
-            source_url=source_url,
-            added_at=added_at,
-            next_fetch_at=next_fetch_at,
-            lease_token=lease_token,
-            lease_expires_at=lease_expires_at,
+            now=now,
         )
 
     def lease_batch(
@@ -1927,139 +1420,14 @@ class UrlLedger:
         runnable_surface: str | None = None,
     ) -> list[CrawlTask]:
         """Lease a batch of runnable URLs."""
-        normalized_physical_queues = self._normalized_surface_queues(
-            runnable_surface=runnable_surface,
-            physical_queues=None,
-        )
-        normalized_lease_strategy = self._normalize_lease_strategy(lease_strategy)
-        if len(normalized_physical_queues) != 1:
-            tasks: list[CrawlTask] = []
-            while len(tasks) < count:
-                task = self.lease_next(
-                    host=host,
-                    lease_seconds=lease_seconds,
-                    lease_strategy=normalized_lease_strategy,
-                    exclude_hosts=exclude_hosts,
-                    runnable_surface=runnable_surface,
-                )
-                if task is None:
-                    break
-                tasks.append(task)
-            return tasks
-
-        if normalized_lease_strategy == LEASE_STRATEGY_HOST_FIRST:
-            tasks: list[CrawlTask] = []
-            while len(tasks) < count:
-                task = self.lease_next(
-                    host=host,
-                    lease_seconds=lease_seconds,
-                    lease_strategy=normalized_lease_strategy,
-                    exclude_hosts=exclude_hosts,
-                    runnable_surface=runnable_surface,
-                )
-                if task is None:
-                    break
-                tasks.append(task)
-            return tasks
-
-        now = time.time()
-        lease_token = self._leases.new_token()
-        duration = self._lease_seconds if lease_seconds is None else lease_seconds
-        lease_expires_at = now + duration
-        runnable_sql = self._queue_runnable_sql(
-            alias="candidate",
-            now=now,
+        return self._lease_selector().lease_batch(
+            count=count,
             host=host,
+            lease_seconds=lease_seconds,
+            lease_strategy=lease_strategy,
             exclude_hosts=exclude_hosts,
+            runnable_surface=runnable_surface,
         )
-        candidate_from = (
-            f"FROM {self._queue_table_sql(normalized_physical_queues[0])} AS candidate "
-            f"{runnable_sql.join_sql}"
-        )
-        if normalized_lease_strategy == LEASE_STRATEGY_HOST_FIRST:
-            lease_order = self._lease_order_by_sql(
-                "candidate",
-                normalized_lease_strategy,
-                latency_ms_sql=runnable_sql.latency_ms_sql,
-            )
-            order_by = f"{lease_order}, candidate.url ASC"
-        else:
-            order_by = self._lease_order_by_sql(
-                "candidate",
-                normalized_lease_strategy,
-                latency_ms_sql=runnable_sql.latency_ms_sql,
-            )
-        params: list[object] = [*runnable_sql.params, count]
-
-        try:
-            self._recover_leased_locked(now, expired_only=True)
-            with self._conn.cursor() as cur:
-                cur.execute(
-                    f"""SELECT
-                            candidate.url,
-                            candidate.scheduler_score,
-                            ledger.discovery_value,
-                            ledger.source_url,
-                            candidate.added_at,
-                            candidate.next_fetch_at,
-                            candidate.host
-                        {candidate_from}
-                        JOIN {URL_LEDGER_TABLE} AS ledger ON ledger.url = candidate.url
-                        WHERE candidate.url IN (
-                            SELECT candidate.url
-                            {candidate_from}
-                            WHERE {runnable_sql.where}
-                            ORDER BY {order_by}
-                            LIMIT %s
-                            FOR UPDATE OF candidate SKIP LOCKED
-                        )
-                        ORDER BY {order_by}, candidate.url ASC
-                        FOR UPDATE OF candidate""",
-                    params,
-                )
-                rows = cur.fetchall()
-                if rows:
-                    self._delete_queue_entries(cur, [row[0] for row in rows])
-                    self._leases.upsert(
-                        cur,
-                        [
-                            (
-                                row[0],
-                                row[6],
-                                normalized_physical_queues[0],
-                                lease_token,
-                                lease_expires_at,
-                            )
-                            for row in rows
-                        ],
-                    )
-            self._conn.commit()
-        except Exception:
-            self._conn.rollback()
-            logger.exception("Failed to lease batch of URLs")
-            return []
-
-        return [
-            CrawlTask(
-                url=url,
-                discovery_value=discovery_value,
-                scheduler_score=scheduler_score,
-                source_url=source_url,
-                added_at=added_at,
-                next_fetch_at=next_fetch_at,
-                lease_token=lease_token,
-                lease_expires_at=lease_expires_at,
-            )
-            for (
-                url,
-                scheduler_score,
-                discovery_value,
-                source_url,
-                added_at,
-                next_fetch_at,
-                _host,
-            ) in rows
-        ]
 
     def mark_done(self, url: str, lease_token: str | None = None) -> bool:
         """Mark a URL as successfully crawled."""
@@ -2186,28 +1554,7 @@ class UrlLedger:
 
     def requeue_failed(self) -> int:
         """Requeue failed URLs for retry."""
-        now = time.time()
-        with self._conn.cursor() as cur:
-            cur.execute(
-                f"""UPDATE {URL_LEDGER_TABLE}
-                   SET next_fetch_at = %s,
-                       current_intent = %s,
-                       terminal_reason = NULL,
-                       terminalized_at = NULL
-                   WHERE terminal_reason IS NOT NULL
-                   RETURNING url, host, discovery_value, next_fetch_at, added_at""",
-                (now, INTENT_RETRY),
-            )
-            rows = cur.fetchall()
-            pending_rows = self._pending_rows_for_physical_queue(
-                rows,
-                self._single_physical_queue_for_surface(SCHEDULER_SURFACE_SCHEDULED),
-            )
-            self._membership.replace_pending_rows(cur, pending_rows)
-            self._leases.delete(cur, self._membership.row_urls(pending_rows))
-            count = len(pending_rows)
-        self._conn.commit()
-        return count
+        return self._requeue_service().requeue_failed()
 
     def rebalance_blocked_host_backoff(self, now: float | None = None) -> tuple[int, int]:
         """Move backoff-blocked URLs out of the normal scheduler queues."""
@@ -2257,9 +1604,7 @@ class UrlLedger:
 
     def recover_leased(self, expired_only: bool = True) -> int:
         """Reset leased URLs back to pending."""
-        count = self._recover_leased_locked(time.time(), expired_only=expired_only)
-        self._conn.commit()
-        return count
+        return self._requeue_service().recover_leased(expired_only=expired_only)
 
     def delay_overcrowded_scheduled_surface(
         self,
@@ -2391,66 +1736,7 @@ class UrlLedger:
 
     def upsert_seeds(self, urls: list[str], discovery_value: float = 2.0) -> int:
         """Insert or requeue seed URLs."""
-        if not urls:
-            return 0
-
-        rows = []
-        now = time.time()
-        for url in urls:
-            normalized = normalize_url(url)
-            host = urlparse(normalized).netloc
-            rows.append(
-                (
-                    normalized,
-                    host,
-                    discovery_value,
-                    now,
-                    now,
-                )
-            )
-
-        with self._conn.cursor() as cur:
-            normalized_urls = [row[0] for row in rows]
-            cur.execute(
-                f"SELECT url FROM {URL_LEDGER_TABLE} WHERE url = ANY(%s)",
-                (normalized_urls,),
-            )
-            existing_urls = {url for (url,) in cur.fetchall()}
-            new_host_counts = Counter(host for url, host, *_ in rows if url not in existing_urls)
-            psycopg2.extras.execute_values(
-                cur,
-                f"""INSERT INTO {URL_LEDGER_TABLE} (
-                       url, host, discovery_value, source_url, added_at, next_fetch_at, current_intent
-                   )
-                   VALUES %s
-                   ON CONFLICT (url) DO UPDATE SET
-                       added_at = EXCLUDED.added_at,
-                       next_fetch_at = EXCLUDED.next_fetch_at,
-                       current_intent = EXCLUDED.current_intent,
-                       discovery_value = EXCLUDED.discovery_value,
-                       fail_streak = 0,
-                       last_error = NULL,
-                       terminal_reason = NULL,
-                       terminalized_at = NULL
-                   RETURNING url, host, discovery_value, next_fetch_at, added_at""",
-                rows,
-                template=f"(%s, %s, %s, NULL, %s, %s, '{INTENT_EXPLORE}')",
-                page_size=200,
-            )
-            ledger_rows = cur.fetchall()
-            seen_hosts = {host for _url, host, *_ in rows if host}
-            host_counts = Counter({host: 0 for host in seen_hosts})
-            host_counts.update(new_host_counts)
-            self._host_ledger.record_discovered_urls_in_tx(cur, host_counts, seen_at=now)
-            pending_rows = self._pending_rows_for_physical_queue(
-                ledger_rows,
-                self._single_physical_queue_for_surface(SCHEDULER_SURFACE_RUNNABLE),
-            )
-            self._membership.replace_pending_rows(cur, pending_rows)
-            self._leases.delete(cur, self._membership.row_urls(pending_rows))
-            affected = len(ledger_rows)
-        self._conn.commit()
-        return affected
+        return self._requeue_service().upsert_seeds(urls, discovery_value=discovery_value)
 
     def stats(self) -> dict:
         """Get queue statistics."""
