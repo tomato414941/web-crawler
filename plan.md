@@ -127,6 +127,11 @@ The current focus is to keep the crawler honest under production load:
   - batch persistence deduplicates repeated `url_hash` values inside one batch so last write wins and
     `ON CONFLICT` remains valid.
   - single-item `save()` now delegates to the batch path so storage semantics stay aligned.
+- Started the greenfield-alignment refactor without changing schema or public behavior:
+  - `CrawlerRuntime` now owns cycle-local queues, liveness, timing, and failure counters.
+  - `CycleSnapshotBuilder` now owns runtime snapshot shaping instead of `CrawlerEngine`.
+  - `PgStorage` now exposes explicit write/query/runtime-stats/diagnostics facades.
+  - `UrlLedger` now exposes explicit store/kernel/topology facades behind the compatibility API.
 
 ## Verification
 
@@ -146,6 +151,12 @@ The current focus is to keep the crawler honest under production load:
 - `timing_summary["finalizer"]` now exposes admission sub-stage p50/p95/max values.
 - `timing_summary["publisher"]` now exposes publisher sub-stage p50/p95/max values.
 - `timing_summary["storage"]` now stays valid for both single-item and batched persistence.
+- `CrawlerEngine` runtime stats shape is still unchanged, but queue/liveness/timing state now lives
+  behind `CrawlerRuntime`.
+- `PgStorage` public methods still behave the same, but write/query/runtime/diagnostics
+  responsibilities now have explicit owners.
+- `UrlLedger` still exposes the same public API, but durable fact and live scheduler ownership now
+  have named facade boundaries.
 - `admit_host_heads_ms` now measures set-based host-head differential refresh for admission.
 - Runtime stats expose `host_head_dirty_refresh` alongside bounded host-head repair.
   `remaining_hosts` shows whether dirty refresh is keeping up.
