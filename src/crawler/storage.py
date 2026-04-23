@@ -407,6 +407,71 @@ def _runtime_scheduler_status_from_payload(payload: Mapping[str, object]) -> dic
     }
 
 
+class PageWriteStore:
+    """Own page persistence mutations."""
+
+    def __init__(self, storage: "PgStorage") -> None:
+        self._storage = storage
+
+    def save(self, result: CrawlResult | Mapping[str, object]) -> StorageSaveResult:
+        return self.save_many([result])[0]
+
+    def save_many(
+        self,
+        results: list[CrawlResult | Mapping[str, object]],
+    ) -> list[StorageSaveResult]:
+        return self._storage._save_many_impl(results)
+
+    @property
+    def count(self) -> int:
+        return self._storage._count
+
+
+class PageQueryStore:
+    """Own page read queries."""
+
+    def __init__(self, storage: "PgStorage") -> None:
+        self._storage = storage
+
+    def list_pages(
+        self,
+        since: float = 0,
+        limit: int = 100,
+        offset: int = 0,
+        host: str | None = None,
+    ) -> list[dict]:
+        return self._storage._list_pages_impl(since=since, limit=limit, offset=offset, host=host)
+
+    def get_page(self, url_hash: str) -> dict | None:
+        return self._storage._get_page_impl(url_hash)
+
+
+class RuntimeStatsStore:
+    """Own persisted runtime snapshot reads and writes."""
+
+    def __init__(self, storage: "PgStorage") -> None:
+        self._storage = storage
+
+    def upsert(self, component: str, payload: Mapping[str, object]) -> None:
+        self._storage._upsert_runtime_stats_impl(component, payload)
+
+    def get(self, component: str | None = None) -> dict[str, object]:
+        return self._storage._get_runtime_stats_impl(component)
+
+    def summary(self) -> dict:
+        return self._storage._get_runtime_stats_summary_impl()
+
+
+class DiagnosticsReader:
+    """Own operator-facing diagnostics queries."""
+
+    def __init__(self, storage: "PgStorage") -> None:
+        self._storage = storage
+
+    def get_stats(self) -> dict:
+        return self._storage._get_stats_impl()
+
+
 class PgStorage:
     """Store crawl results in Postgres."""
 
@@ -417,6 +482,10 @@ class PgStorage:
         assert_public_table_columns(self._conn, "pages", PAGES_REQUIRED_COLUMNS)
         assert_public_table_columns(self._conn, "page_content", PAGE_CONTENT_REQUIRED_COLUMNS)
         self._count = 0
+        self.page_writes = PageWriteStore(self)
+        self.page_queries = PageQueryStore(self)
+        self.runtime_stats = RuntimeStatsStore(self)
+        self.diagnostics = DiagnosticsReader(self)
 
     def _finish_read(self) -> None:
         """Close read-only transactions so API requests do not hold relation locks."""
@@ -424,9 +493,16 @@ class PgStorage:
 
     def save(self, result: CrawlResult | Mapping[str, object]) -> StorageSaveResult:
         """Save a single crawl result and return persistence telemetry."""
-        return self.save_many([result])[0]
+        return self.page_writes.save(result)
 
     def save_many(
+        self,
+        results: list[CrawlResult | Mapping[str, object]],
+    ) -> list[StorageSaveResult]:
+        """Save multiple crawl results in one transaction."""
+        return self.page_writes.save_many(results)
+
+    def _save_many_impl(
         self,
         results: list[CrawlResult | Mapping[str, object]],
     ) -> list[StorageSaveResult]:
@@ -575,6 +651,16 @@ class PgStorage:
         host: str | None = None,
     ) -> list[dict]:
         """List crawled pages with optional filters."""
+        return self.page_queries.list_pages(since=since, limit=limit, offset=offset, host=host)
+
+    def _list_pages_impl(
+        self,
+        since: float = 0,
+        limit: int = 100,
+        offset: int = 0,
+        host: str | None = None,
+    ) -> list[dict]:
+        """List crawled pages with optional filters."""
         conditions = ["crawled_at > %s"]
         params: list = [since]
 
@@ -606,6 +692,10 @@ class PgStorage:
 
     def upsert_runtime_stats(self, component: str, payload: Mapping[str, object]) -> None:
         """Store runtime crawler stats for API consumption."""
+        self.runtime_stats.upsert(component, payload)
+
+    def _upsert_runtime_stats_impl(self, component: str, payload: Mapping[str, object]) -> None:
+        """Store runtime crawler stats for API consumption."""
         try:
             with self._conn.cursor() as cur:
                 cur.execute(
@@ -622,6 +712,10 @@ class PgStorage:
             logger.exception("Failed to update runtime stats for %s", component)
 
     def get_runtime_stats(self, component: str | None = None) -> dict[str, object]:
+        """Fetch runtime crawler stats snapshots."""
+        return self.runtime_stats.get(component)
+
+    def _get_runtime_stats_impl(self, component: str | None = None) -> dict[str, object]:
         """Fetch runtime crawler stats snapshots."""
         try:
             with self._conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
@@ -661,6 +755,10 @@ class PgStorage:
 
     def get_page(self, url_hash: str) -> dict | None:
         """Get a single page with full content."""
+        return self.page_queries.get_page(url_hash)
+
+    def _get_page_impl(self, url_hash: str) -> dict | None:
+        """Get a single page with full content."""
         try:
             with self._conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
                 cur.execute(
@@ -685,6 +783,10 @@ class PgStorage:
 
     def get_runtime_stats_summary(self) -> dict:
         """Get fast operator stats from the persisted runtime snapshot."""
+        return self.runtime_stats.summary()
+
+    def _get_runtime_stats_summary_impl(self) -> dict:
+        """Get fast operator stats from the persisted runtime snapshot."""
         try:
             with self._conn.cursor() as cur:
                 cur.execute(
@@ -700,7 +802,7 @@ class PgStorage:
                 page_stats_row = cur.fetchone()
             self._finish_read()
 
-            runtime = self.get_runtime_stats("crawler")
+            runtime = self._get_runtime_stats_impl("crawler")
         except Exception:
             self._conn.rollback()
             raise
@@ -761,6 +863,10 @@ class PgStorage:
 
     def get_stats(self) -> dict:
         """Get crawl statistics."""
+        return self.diagnostics.get_stats()
+
+    def _get_stats_impl(self) -> dict:
+        """Get crawl statistics."""
         try:
             with self._conn.cursor() as cur:
                 cur.execute(
@@ -807,10 +913,10 @@ class PgStorage:
                     )
                     runtime_row = cur.fetchone()
                     if runtime_row:
-                        runtime = {
-                            "payload": runtime_row[0],
-                            "updated_at": runtime_row[1],
-                        }
+                            runtime = {
+                                "payload": runtime_row[0],
+                                "updated_at": runtime_row[1],
+                            }
 
                 if url_ledger_exists:
                     cur.execute("SAVEPOINT scheduler_diagnostics")

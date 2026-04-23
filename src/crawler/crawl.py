@@ -66,12 +66,12 @@ from .url_ledger import (
 )
 from .output import StreamingOutputWriter
 from .result import CrawlFailure, CrawlResult, CrawlStageTimings
+from .runtime import CrawlerRuntime, CycleSnapshotBuilder
 from .telemetry import (
     FetchTelemetry,
     FINALIZER_TIMING_FIELDS,
     FinalizerTelemetry,
     LeaseTelemetry,
-    PipelineTelemetry,
     PublisherTelemetry,
     TelemetryAccumulator,
 )
@@ -346,31 +346,135 @@ class CrawlerEngine:
             self.fetcher = HttpFetcher(timeout=settings.timeout)
 
         self.results: list[dict] = []
-        self.pages_crawled = 0
         self.failure_breakdown: dict[str, int] = {}
-        self._running = False
-        self._claimed_pages = 0
         self._page_lock = asyncio.Lock()
         self._lease_lock = asyncio.Lock()
-        self._failure_counts: Counter[str] = Counter()
-        self._active_host_counts: Counter[str] = Counter()
-        self._parse_queue: asyncio.Queue[_FetchedPage | object] | None = None
-        self._finalize_queue: asyncio.Queue[_FinalizeItem | object] | None = None
-        self._publish_queue: asyncio.Queue[_PublishItem | object] | None = None
         self._pipeline_queue_maxsize = max(16, concurrency * 4)
-        self._pipeline_queues: PipelineQueues | None = None
-        self._parser_liveness = StageLiveness(include_kind=True)
-        self._finalizer_liveness = StageLiveness(include_kind=True)
-        self._publisher_liveness = StageLiveness()
-        self._timing_summary = TelemetryAccumulator()
+        self._runtime = CrawlerRuntime(queue_maxsize=self._pipeline_queue_maxsize)
+        self._snapshot_builder = CycleSnapshotBuilder(
+            max_pages=self.max_pages,
+            concurrency=self.concurrency,
+            parser_workers=self.parser_workers,
+            normal_workers=self.normal_workers,
+            warm_workers=self.warm_workers,
+            probing_workers=self.probing_workers,
+            runnable_workers=self.runnable_workers,
+            scheduled_workers=self.scheduled_workers,
+            refresh_workers=self.refresh_workers,
+            host_first_fallback_stats=self._host_first_fallback_stats,
+        )
 
     @property
     def _last_finalizer_progress_at(self) -> float:
-        return self._finalizer_liveness.last_progress_at
+        return self._runtime.finalizer_liveness.last_progress_at
 
     @property
     def _last_publisher_progress_at(self) -> float:
-        return self._publisher_liveness.last_progress_at
+        return self._runtime.publisher_liveness.last_progress_at
+
+    @property
+    def pages_crawled(self) -> int:
+        return self._runtime.pages_crawled
+
+    @pages_crawled.setter
+    def pages_crawled(self, value: int) -> None:
+        self._runtime.pages_crawled = value
+
+    @property
+    def _running(self) -> bool:
+        return self._runtime.running
+
+    @_running.setter
+    def _running(self, value: bool) -> None:
+        self._runtime.running = value
+
+    @property
+    def _claimed_pages(self) -> int:
+        return self._runtime.claimed_pages
+
+    @_claimed_pages.setter
+    def _claimed_pages(self, value: int) -> None:
+        self._runtime.claimed_pages = value
+
+    @property
+    def _failure_counts(self) -> Counter[str]:
+        return self._runtime.failure_counts
+
+    @_failure_counts.setter
+    def _failure_counts(self, value: Counter[str]) -> None:
+        self._runtime.failure_counts = value
+
+    @property
+    def _active_host_counts(self) -> Counter[str]:
+        return self._runtime.active_host_counts
+
+    @_active_host_counts.setter
+    def _active_host_counts(self, value: Counter[str]) -> None:
+        self._runtime.active_host_counts = value
+
+    @property
+    def _pipeline_queues(self) -> PipelineQueues | None:
+        return self._runtime.pipeline_queues
+
+    @_pipeline_queues.setter
+    def _pipeline_queues(self, value: PipelineQueues | None) -> None:
+        self._runtime.pipeline_queues = value
+
+    @property
+    def _parse_queue(self) -> asyncio.Queue[_FetchedPage | object] | None:
+        return self._runtime.parse_queue  # type: ignore[return-value]
+
+    @_parse_queue.setter
+    def _parse_queue(self, value: asyncio.Queue[_FetchedPage | object] | None) -> None:
+        self._runtime.parse_queue = value
+
+    @property
+    def _finalize_queue(self) -> asyncio.Queue[_FinalizeItem | object] | None:
+        return self._runtime.finalize_queue  # type: ignore[return-value]
+
+    @_finalize_queue.setter
+    def _finalize_queue(self, value: asyncio.Queue[_FinalizeItem | object] | None) -> None:
+        self._runtime.finalize_queue = value
+
+    @property
+    def _publish_queue(self) -> asyncio.Queue[_PublishItem | object] | None:
+        return self._runtime.publish_queue  # type: ignore[return-value]
+
+    @_publish_queue.setter
+    def _publish_queue(self, value: asyncio.Queue[_PublishItem | object] | None) -> None:
+        self._runtime.publish_queue = value
+
+    @property
+    def _parser_liveness(self) -> StageLiveness:
+        return self._runtime.parser_liveness
+
+    @_parser_liveness.setter
+    def _parser_liveness(self, value: StageLiveness) -> None:
+        self._runtime.parser_liveness = value
+
+    @property
+    def _finalizer_liveness(self) -> StageLiveness:
+        return self._runtime.finalizer_liveness
+
+    @_finalizer_liveness.setter
+    def _finalizer_liveness(self, value: StageLiveness) -> None:
+        self._runtime.finalizer_liveness = value
+
+    @property
+    def _publisher_liveness(self) -> StageLiveness:
+        return self._runtime.publisher_liveness
+
+    @_publisher_liveness.setter
+    def _publisher_liveness(self, value: StageLiveness) -> None:
+        self._runtime.publisher_liveness = value
+
+    @property
+    def _timing_summary(self) -> TelemetryAccumulator:
+        return self._runtime.timing_summary
+
+    @_timing_summary.setter
+    def _timing_summary(self, value: TelemetryAccumulator) -> None:
+        self._runtime.timing_summary = value
 
     def _host_first_fallback_stats(self) -> dict[str, int]:
         stats_fn = getattr(self.scheduler, "host_first_fallback_stats", None)
@@ -397,65 +501,15 @@ class CrawlerEngine:
 
     def _active_cycle_payload(self) -> dict[str, object]:
         """Return active cycle stats without completed-cycle fields."""
-        queue_payload = (
-            self._pipeline_queues.snapshot()
-            if self._pipeline_queues is not None
-            else PipelineQueues.empty_snapshot(self._pipeline_queue_maxsize)
-        )
-        if self._pipeline_queues is None:
-            queue_payload["parse_queue_size"] = (
-                self._parse_queue.qsize() if self._parse_queue is not None else 0
-            )
-            queue_payload["finalize_queue_size"] = (
-                self._finalize_queue.qsize() if self._finalize_queue is not None else 0
-            )
-            queue_payload["publish_queue_size"] = (
-                self._publish_queue.qsize() if self._publish_queue is not None else 0
-            )
-        return {
-            "running": self._running,
-            "state": "active" if self._running else "idle",
-            "pages_crawled": self.pages_crawled,
-            "claimed_pages": self._claimed_pages,
-            "max_pages": self.max_pages,
-            "concurrency": self.concurrency,
-            "parser_workers": self.parser_workers,
-            "normal_workers": self.normal_workers,
-            "warm_workers": self.warm_workers,
-            "probing_workers": self.probing_workers,
-            "runnable_workers": self.runnable_workers,
-            "scheduled_workers": self.scheduled_workers,
-            "refresh_workers": self.refresh_workers,
-            "execution_workers": {
-                "warm": self.warm_workers,
-                "probing": self.probing_workers,
-                "refresh": self.refresh_workers,
-            },
-            "active_hosts": len(self._active_host_counts),
-            **queue_payload,
-            "parser_liveness": self._parser_liveness.snapshot(),
-            "finalizer_liveness": self._finalizer_liveness.snapshot(),
-            "publisher_liveness": self._publisher_liveness.snapshot(),
-            "failure_breakdown": dict(self._failure_counts),
-            "timing_summary": self._timing_summary.snapshot(),
-            "host_first_fallback": self._host_first_fallback_stats(),
-        }
+        return self._snapshot_builder.active_cycle_payload(self._runtime)
 
     def snapshot_runtime_stats(self) -> dict[str, object]:
         """Return live queue/backpressure stats for external observers."""
-        active_cycle = self._active_cycle_payload()
-        return {
-            **active_cycle,
-            "pages": None,
-            "elapsed_seconds": None,
-            "pages_per_second": None,
-            "errors": dict(self._failure_counts),
-            "active_cycle": active_cycle,
-        }
+        return self._snapshot_builder.runtime_stats(self._runtime)
 
     def timing_summary(self) -> dict[str, object]:
         """Return the current cycle timing summary."""
-        return self._timing_summary.snapshot()
+        return self._runtime.timing_summary.snapshot()
 
     def timing_summary_log(self) -> str:
         """Return a compact log representation of the current cycle timings."""
@@ -463,16 +517,7 @@ class CrawlerEngine:
 
     def _record_timing(self, outcome: str, timings: CrawlStageTimings | None) -> None:
         """Record one finalized crawl attempt in cycle-local timing stats."""
-        if timings is not None and timings.pipeline is None:
-            timings.pipeline = PipelineTelemetry(
-                parse_queue_wait_ms=timings.parse_queue_wait_ms,
-                finalize_queue_wait_ms=timings.finalize_queue_wait_ms,
-                publish_queue_wait_ms=timings.publish_queue_wait_ms,
-                parse_queue_depth=timings.parse_queue_depth,
-                finalize_queue_depth=timings.finalize_queue_depth,
-                publish_queue_depth=timings.publish_queue_depth,
-            )
-        self._timing_summary.record(outcome, timings)
+        self._runtime.record_timing(outcome, timings)
 
     async def __aenter__(self) -> "CrawlerEngine":
         return self
@@ -1430,15 +1475,9 @@ class CrawlerEngine:
 
     async def crawl(self) -> list[dict]:
         """Run the crawler and return results."""
+        self._runtime.reset_cycle()
         self._running = True
-        self.pages_crawled = 0
         self.failure_breakdown = {}
-        self._failure_counts = Counter()
-        self._claimed_pages = 0
-        self._parser_liveness = StageLiveness(include_kind=True)
-        self._finalizer_liveness = StageLiveness(include_kind=True)
-        self._publisher_liveness = StageLiveness()
-        self._timing_summary = TelemetryAccumulator()
         reset_fallback_stats = getattr(self.scheduler, "reset_host_first_fallback_stats", None)
         if callable(reset_fallback_stats):
             reset_fallback_stats()
