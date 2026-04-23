@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections import Counter
 from dataclasses import asdict, dataclass
 import math
-from typing import Any
+from typing import Any, Mapping
 
 
 TIMING_STAGE_FIELDS = (
@@ -193,6 +193,13 @@ class TelemetryAccumulator:
         self._finalizer_kinds: Counter[str] = Counter()
         self._finalizer_new_tasks_total = 0
         self._finalizer_new_tasks_nonzero_items = 0
+        self._discovery_admission: Counter[str] = Counter()
+
+    def record_discovery_admission(self, counts: Mapping[str, int]) -> None:
+        """Record discovered-link admission reasons for one parsed page."""
+        self._discovery_admission.update(
+            {str(key): int(value) for key, value in counts.items() if int(value) > 0}
+        )
 
     def record(self, outcome: str, timings: object | None) -> None:
         """Record one finalized crawl attempt."""
@@ -267,6 +274,7 @@ class TelemetryAccumulator:
                     "total": self._finalizer_new_tasks_total,
                     "nonzero_items": self._finalizer_new_tasks_nonzero_items,
                 },
+                "discovery_admission": dict(self._discovery_admission),
             },
             "finalizer": finalizer,
         }

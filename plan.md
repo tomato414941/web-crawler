@@ -1,11 +1,14 @@
 # web-crawler plan
 
-## Current milestone: bounded storage and frontier growth
+## Current milestone: production observation and bounded growth
 
 The crawler is now past the migration cleanup, host-first read-model deployment, first
-pipeline-stage extraction, and scheduler service decomposition work. The production DB was reset
-after unbounded page-body storage and URL frontier growth filled the disk. The current focus is to
-make crawl storage and discovery breadth bounded before the crawler is restarted:
+pipeline-stage extraction, scheduler service decomposition, bounded page-content storage, and
+discovery breadth cap work. The production DB was reset after unbounded page-body storage and URL
+frontier growth filled the disk. The crawler has since been redeployed with bounded storage and
+bounded discovery admission.
+
+The current focus is to keep the crawler honest under production load:
 
 - `CrawlerEngine` should orchestrate stages, not own every stage policy.
 - Pipeline queues should be bounded and owned by a dedicated runtime object.
@@ -24,6 +27,11 @@ make crawl storage and discovery breadth bounded before the crawler is restarted
 - `pages` should be a lightweight page index, not an unbounded page-body archive.
 - Stored page text should live behind explicit storage tiers.
 - Link extraction should not imply admitting every discovered URL into the frontier.
+- Production observation should distinguish "growth is bounded per page" from "the total frontier
+  will stop growing"; the latter still depends on crawl scope, host policy, and value filtering.
+- DB growth should be watched as stored bytes, relation size, and URL ledger size separately.
+- Discovery value should explain both ranking and admission decisions; rejected links need
+  operator-visible reasons.
 
 ## Completed in this slice
 
@@ -97,6 +105,12 @@ make crawl storage and discovery breadth bounded before the crawler is restarted
   - maximum admitted links per page.
   - maximum admitted links per target host per page.
   - `outlink_count` records extracted links while stored `outlinks` records admitted links.
+- Deployed bounded storage and frontier caps to production in `d3225c9`.
+- Restarted the production crawler after applying `004_page_content_storage.sql`.
+- Added discovery admission policy visibility:
+  - discovered URLs now carry URL archetype and parent-context signals with their discovery value.
+  - low-value URL archetypes require a stronger value threshold before scheduler admission.
+  - parser telemetry records extracted, admitted, cap-rejected, and value-rejected link counts.
 
 ## Verification
 
@@ -136,12 +150,69 @@ make crawl storage and discovery breadth bounded before the crawler is restarted
 - Fresh and migrated schemas converge on `pages` plus `page_content`.
 - `/pages/{url_hash}` still returns `content` through a join, preserving API shape.
 - Storage policy and discovery cap behavior have direct unit coverage.
+- Discovery admission reasons have direct unit coverage and are exposed through runtime timing
+  summary counts.
+- Production smoke checks passed after deploy:
+  - API health returned `ok`.
+  - no recent critical crawler/API log errors were observed.
+  - storage tiers were populated and stayed within configured per-page byte caps.
+  - extracted outlinks and stored/admitted outlinks diverged as expected, proving the admission cap is
+    active.
+
+## Production observation
+
+Latest production sample after the bounded-storage deploy:
+
+- Pages crawled: 568.
+- URL ledger rows: 9,983.
+- Pending scheduler rows: 7,859.
+- Stored content: about 35 MB logical stored text, about 66 MB database size.
+- Disk: 5.5 GB used on a 38 GB root volume, about 16%.
+- Storage tiers:
+  - `metadata_only`: 3 pages, 0 stored bytes.
+  - `summary`: 292 pages, max 32 KiB stored per page.
+  - `standard`: 218 pages, max 256 KiB stored per page.
+  - `extended`: 55 pages, max about 714 KiB stored per page.
+- Link extraction vs admission:
+  - maximum extracted links on one page: 3,817.
+  - maximum stored/admitted outlinks on one page: 200.
+  - total extracted links: 76,563.
+  - total stored/admitted outlinks: 25,842.
+
+Interpretation:
+
+- The old DB-capacity failure mode is addressed for page bodies: `pages` is no longer an unbounded
+  text archive, and `page_content` is tier-capped.
+- The URL frontier is no longer "admit every extracted link", but it can still grow quickly because
+  the crawler is intentionally discovering new URLs. This is now a scope/value-policy question, not
+  the same unbounded storage bug.
+- The next risk is not immediate disk exhaustion; it is whether admitted URLs are valuable enough and
+  whether frontier growth matches the intended crawl scope.
 
 ## Next candidates
 
-- Restart crawler only after production migration and bounded-storage smoke checks pass.
-- Watch `stored_content_bytes`, storage tier distribution, and URL ledger growth during the first
-  production crawl cycle.
+- Add a repeatable production observation command for:
+  - URL ledger growth over time.
+  - stored content growth over time.
+  - tier distribution.
+  - extracted vs admitted outlinks.
+  - admission reason counts.
+  - queue backpressure.
+- Decide the crawl scope policy explicitly:
+  - keep broad WWW discovery and rely on value scoring/caps.
+  - restrict by host/domain allowlist.
+  - add stronger admission thresholds for low-value hosts or pages.
+- Tune discovery admission if production URL growth remains too fast:
+  - lower `max_discovered_urls_per_page`.
+  - lower `max_discovered_urls_per_target_host_per_page`.
+  - raise `min_discovery_value`.
+  - raise `low_value_archetype_min_discovery_value`.
+  - add host-level or registrable-domain-level budgets only if URL-level and host-level caps are not
+    enough.
+- Watch `stored_content_bytes`, storage tier distribution, relation sizes, and URL ledger growth
+  during production crawl cycles.
+- Keep detailed speed investigation separate unless queue backpressure or fetch latency becomes the
+  dominant production risk.
 - Remove compatibility private wrappers from `UrlLedger` only after tests and internal callers stop
   patching or calling those private methods directly.
 - Continue reducing `UrlLedger` facade breadth around host-head operations and URL discovery/update
@@ -150,4 +221,3 @@ make crawl storage and discovery breadth bounded before the crawler is restarted
   obscuring HTTP behavior changes.
 - Evaluate whether dirty host-head repair remains exceptional under production crawl load before
   adding any larger scheduler projection.
-- Keep detailed speed investigation separate from this design-simplification milestone.

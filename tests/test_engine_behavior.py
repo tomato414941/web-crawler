@@ -7,6 +7,7 @@ import pytest
 from crawler.core import Response
 from crawler.config import settings
 from crawler.crawl import CrawlerEngine
+from crawler.discovery import PageSignals
 from crawler.url_ledger import (
     CrawlTask,
     INTENT_EXPLORE,
@@ -209,9 +210,13 @@ def test_discovered_tasks_are_capped_by_value_total_and_target_host(monkeypatch)
         "https://b.example/docs/1",
         "https://b.example/docs/2",
         "https://c.example/redirect/1",
+        "https://d.example/docs/1",
     ]
 
-    tasks = engine._build_discovered_tasks("https://seed.example/", links)
+    tasks, admission_counts = engine._build_discovered_tasks_with_admission_counts(
+        "https://seed.example/",
+        links,
+    )
 
     assert [task.url for task in tasks] == [
         "https://a.example/docs/1",
@@ -220,6 +225,41 @@ def test_discovered_tasks_are_capped_by_value_total_and_target_host(monkeypatch)
         "https://b.example/docs/2",
     ]
     assert all(task.discovery_value >= 0.5 for task in tasks)
+    assert admission_counts["extracted"] == 7
+    assert admission_counts["admitted"] == 4
+    assert admission_counts["per_page_cap"] == 1
+    assert admission_counts["low_value_archetype"] == 1
+
+
+def test_discovered_tasks_explain_low_value_rejections(monkeypatch):
+    monkeypatch.setattr(settings, "min_discovery_value", 0.5)
+    monkeypatch.setattr(settings, "max_discovered_urls_per_page", 10)
+    monkeypatch.setattr(settings, "max_discovered_urls_per_target_host_per_page", 10)
+    engine = CrawlerEngine(
+        start_url="https://seed.example/",
+        same_host=False,
+        url_ledger=FakeLedger([]),
+        host_manager=FakeHostManager(),
+    )
+
+    tasks, admission_counts = engine._build_discovered_tasks_with_admission_counts(
+        "https://seed.example/archive/",
+        [
+            "https://example.net/archive/index",
+            "https://docs.example.net/doc/rfc9000",
+        ],
+        parent_signals=PageSignals(
+            content_type="text/html",
+            content_length=900_000,
+            title="Archive Table Index",
+            meta_robots="nofollow",
+        ),
+    )
+
+    assert [task.url for task in tasks] == ["https://docs.example.net/doc/rfc9000"]
+    assert admission_counts["extracted"] == 2
+    assert admission_counts["admitted"] == 1
+    assert admission_counts["nofollow_parent"] == 1
 
 
 @pytest.mark.asyncio
