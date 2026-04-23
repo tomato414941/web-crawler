@@ -17,6 +17,7 @@ from crawler.crawl import (
     _PublishItem,
     _SkippedTask,
 )
+from crawler.config import settings
 from crawler.result import CrawlFailure, CrawlResult, CrawlStageTimings
 from crawler.storage import StorageSaveResult
 from crawler.telemetry import (
@@ -125,6 +126,9 @@ class _FakeStorage:
                 content_truncated=True,
             ),
         )
+
+    def save_many(self, results):
+        return [self.save(result) for result in results]
 
 
 class _RecordingHostStore:
@@ -425,23 +429,24 @@ async def test_finalizer_survives_item_error_and_drains_next_item():
 
 
 @pytest.mark.asyncio
-async def test_publisher_survives_item_error_and_drains_next_item():
+async def test_publisher_survives_item_error_and_drains_next_item(monkeypatch):
     class FlakyStorage(_FakeStorage):
         def __init__(self):
             super().__init__()
             self.fail_once = True
 
-        def save(self, result):
+        def save_many(self, results):
             if self.fail_once:
                 self.fail_once = False
                 raise RuntimeError("boom")
-            return super().save(result)
+            return super().save_many(results)
 
     engine = CrawlerEngine(
         max_pages=1,
         url_ledger=_FakeLedger(None),
         host_manager=_FakeHostManager(),
     )
+    monkeypatch.setattr(settings, "publisher_batch_size", 1)
     storage = FlakyStorage()
     engine.pg_storage = storage
     engine._publish_queue = asyncio.Queue()
