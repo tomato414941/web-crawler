@@ -54,6 +54,15 @@ STORAGE_TIMING_FIELDS = (
 )
 
 
+PUBLISHER_TIMING_FIELDS = (
+    "save_dispatch_wait_ms",
+    "save_run_ms",
+    "output_dispatch_wait_ms",
+    "output_run_ms",
+    "total_ms",
+)
+
+
 @dataclass(slots=True)
 class FetchTelemetry:
     """Cause-oriented telemetry for one HTTP fetch."""
@@ -169,6 +178,20 @@ class StorageTelemetry:
         return asdict(self)
 
 
+@dataclass(slots=True)
+class PublisherTelemetry:
+    """Detailed publisher timings for one persisted crawl result."""
+
+    save_dispatch_wait_ms: float = 0.0
+    save_run_ms: float = 0.0
+    output_dispatch_wait_ms: float = 0.0
+    output_run_ms: float = 0.0
+    total_ms: float = 0.0
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
 def percentile(values: list[float], percentile_value: int) -> float:
     """Return a nearest-rank percentile for small cycle-local samples."""
     if not values:
@@ -227,6 +250,9 @@ class TelemetryAccumulator:
         self._storage_tiers: Counter[str] = Counter()
         self._storage_truncated: Counter[str] = Counter()
         self._stored_content_bytes: list[float] = []
+        self._publisher_stages: dict[str, list[float]] = {
+            field: [] for field in PUBLISHER_TIMING_FIELDS
+        }
         self._discovery_admission: Counter[str] = Counter()
 
     def record_discovery_admission(self, counts: Mapping[str, int]) -> None:
@@ -284,6 +310,11 @@ class TelemetryAccumulator:
             self._storage_truncated[str(truncated).lower()] += 1
             self._stored_content_bytes.append(float(getattr(storage, "stored_content_bytes", 0)))
 
+        publisher = getattr(timings, "publisher", None)
+        if publisher is not None:
+            for field in PUBLISHER_TIMING_FIELDS:
+                self._publisher_stages[field].append(float(getattr(publisher, field)))
+
     def snapshot(self) -> dict[str, object]:
         """Return a runtime-safe summary of observed cycle telemetry."""
         stages = {
@@ -296,6 +327,10 @@ class TelemetryAccumulator:
         storage = {
             field: _summarize_values(values)
             for field, values in self._storage_stages.items()
+        }
+        publisher = {
+            field: _summarize_values(values)
+            for field, values in self._publisher_stages.items()
         }
 
         outcomes = {
@@ -330,4 +365,5 @@ class TelemetryAccumulator:
             },
             "finalizer": finalizer,
             "storage": storage,
+            "publisher": publisher,
         }

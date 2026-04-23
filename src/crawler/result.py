@@ -10,6 +10,7 @@ from .telemetry import (
     FinalizerTelemetry,
     LeaseTelemetry,
     PipelineTelemetry,
+    PublisherTelemetry,
     RobotsDecision,
     StorageTelemetry,
 )
@@ -46,6 +47,7 @@ class CrawlStageTimings:
     pipeline: PipelineTelemetry | None = None
     finalizer: FinalizerTelemetry | None = None
     storage: StorageTelemetry | None = None
+    publisher: PublisherTelemetry | None = None
 
 
 @dataclass(slots=True)
