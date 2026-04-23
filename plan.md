@@ -239,13 +239,37 @@ Interpretation:
 - The likely next bottlenecks are publisher serialization, executor wait, and queue coupling around
   persistence.
 
+Latest production sample after deploying publisher wait telemetry in `8d4fc61`:
+
+- API health returned `ok`; no recent traceback/exception/critical/panic logs were observed.
+- `timing_summary["publisher"]` is now populated in runtime stats.
+- Early publisher breakdown sample:
+  - `publisher.total_ms` p95: about 483 ms.
+  - `publisher.save_dispatch_wait_ms` p95: about 16.5 ms.
+  - `publisher.save_run_ms` p95: about 66 ms.
+  - `storage.total_ms` p95: about 66 ms.
+- Cross-check against queue pressure:
+  - `persist_ms` p95: about 242 ms.
+  - `publish_queue_wait_ms` p95: about 5.7 s.
+  - active `publish_queue_size`: about 83.
+
+Interpretation:
+
+- Executor dispatch wait is not the main problem; it stays comparatively small.
+- `publisher.save_run_ms` and `storage.total_ms` are effectively the same, so the wrapper confirms
+  that save execution time is dominated by the same storage work already measured.
+- The dominant remaining speed problem is queue-level publisher saturation: one publisher lane cannot
+  drain results fast enough under the current crawl rate.
+- The next optimization step should move from instrumentation to throughput changes in the publisher
+  path.
+
 ## Next candidates
 
 - Investigate publisher/persistence backpressure:
-  - whether page saves are serialized too strongly.
-  - whether publisher worker count or publish batching should change.
-  - whether `persist_ms - storage.total_ms` should be split into executor wait vs actual save time.
+  - whether publisher worker count should increase beyond one.
+  - whether page persistence should support `save_many` batching.
   - whether `page_content` writes should be batched or otherwise reduced for larger bodies.
+  - whether queue maxsize and publisher lane count should scale together.
 - Add a repeatable production observation command for:
   - URL ledger growth over time.
   - stored content growth over time.
