@@ -210,13 +210,42 @@ Interpretation:
 - The next speed work should focus on persistence throughput and a repeatable observation command,
   not another broad conceptual rewrite.
 
+Latest production sample after deploying storage persistence telemetry in `73bfda8`:
+
+- API health returned `ok`; no recent traceback/exception/critical/panic logs were observed.
+- `timing_summary["storage"]` is now populated in runtime stats.
+- Early storage breakdown sample:
+  - `storage.total_ms` p95: about 68 ms.
+  - `storage.page_content_ms` p95: about 34 ms.
+  - `storage.pages_upsert_ms` p95: about 22 ms.
+  - `storage.commit_ms` p95: about 22 ms.
+  - `storage.prepare_ms` p95: about 17 ms.
+- Early cross-check against outer publish timing:
+  - `persist_ms` p95: about 320 ms.
+  - `publish_queue_wait_ms` p95: about 3.2 s.
+- Early storage distribution sample:
+  - `standard`: 30 pages.
+  - `extended`: 5 pages.
+  - `summary`: 4 pages.
+  - stored content bytes p95: about 256 KiB.
+
+Interpretation:
+
+- The storage breakdown is now visible enough to guide the next optimization step.
+- Inside one save, `page_content` writes are the largest single component so far, but not by an
+  order of magnitude.
+- The outer `persist_ms` remains much larger than the internal `storage.total_ms`, which means the
+  next bottleneck is not just SQL execution inside `PgStorage.save()`.
+- The likely next bottlenecks are publisher serialization, executor wait, and queue coupling around
+  persistence.
+
 ## Next candidates
 
 - Investigate publisher/persistence backpressure:
   - whether page saves are serialized too strongly.
-  - whether `page_content` writes dominate p95 latency.
-  - whether publisher worker count, queue size, or batching should change.
-  - whether storage telemetry needs a sub-stage breakdown similar to finalizer telemetry.
+  - whether publisher worker count or publish batching should change.
+  - whether `persist_ms - storage.total_ms` should be split into executor wait vs actual save time.
+  - whether `page_content` writes should be batched or otherwise reduced for larger bodies.
 - Add a repeatable production observation command for:
   - URL ledger growth over time.
   - stored content growth over time.
