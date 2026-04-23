@@ -19,7 +19,12 @@ from crawler.crawl import (
 )
 from crawler.result import CrawlFailure, CrawlResult, CrawlStageTimings
 from crawler.storage import StorageSaveResult
-from crawler.telemetry import FinalizerTelemetry, StorageTelemetry, TelemetryAccumulator
+from crawler.telemetry import (
+    FinalizerTelemetry,
+    PublisherTelemetry,
+    StorageTelemetry,
+    TelemetryAccumulator,
+)
 from crawler.url_ledger import CrawlTask
 
 _ADMISSION_DIAGNOSTICS = {
@@ -134,6 +139,14 @@ class _RecordingHostStore:
         self.failures.append((host, backoff_seconds))
 
 
+class _FakeOutputWriter:
+    def __init__(self):
+        self.written = []
+
+    def write_one(self, result):
+        self.written.append(result)
+
+
 def _crawl_result(url="https://example.com/"):
     return CrawlResult(
         url=url,
@@ -185,6 +198,13 @@ def test_timing_accumulator_summarizes_stage_percentiles():
                 storage_tier="summary",
                 content_truncated=True,
             ),
+            publisher=PublisherTelemetry(
+                save_dispatch_wait_ms=5.0,
+                save_run_ms=6.0,
+                output_dispatch_wait_ms=7.0,
+                output_run_ms=8.0,
+                total_ms=20.0,
+            ),
         ),
     )
     timings.record("failed", CrawlStageTimings(lease_ms=3.0, fetch_ms=30.0))
@@ -220,6 +240,10 @@ def test_timing_accumulator_summarizes_stage_percentiles():
     assert summary["storage"]["page_content_ms"]["p95"] == 3.0
     assert summary["storage"]["commit_ms"]["p95"] == 4.0
     assert summary["storage"]["total_ms"]["p95"] == 10.0
+    assert summary["publisher"]["save_dispatch_wait_ms"]["p95"] == 5.0
+    assert summary["publisher"]["save_run_ms"]["p95"] == 6.0
+    assert summary["publisher"]["output_run_ms"]["p95"] == 8.0
+    assert summary["publisher"]["total_ms"]["p95"] == 20.0
     assert summary["counts"]["storage_tiers"] == {"summary": 1}
     assert summary["counts"]["storage_truncated"] == {"true": 1}
     assert summary["counts"]["stored_content_bytes"]["max"] == 128.0
@@ -251,6 +275,13 @@ def test_timing_accumulator_handles_empty_samples():
         "max": 0.0,
     }
     assert summary["storage"]["total_ms"] == {
+        "count": 0,
+        "avg": 0.0,
+        "p50": 0.0,
+        "p95": 0.0,
+        "max": 0.0,
+    }
+    assert summary["publisher"]["total_ms"] == {
         "count": 0,
         "avg": 0.0,
         "p50": 0.0,
@@ -655,6 +686,10 @@ async def test_crawler_engine_records_stage_timings():
     assert result.timings.storage is not None
     assert result.timings.storage.page_content_ms == 3.0
     assert result.timings.storage.storage_tier == "summary"
+    assert result.timings.publisher is not None
+    assert result.timings.publisher.save_dispatch_wait_ms >= 0
+    assert result.timings.publisher.save_run_ms >= 0
+    assert result.timings.publisher.total_ms >= 0
     assert result.timings.lease_ms >= 0
     assert result.timings.precheck_ms >= 0
     assert result.timings.robots_ms >= 0
@@ -691,6 +726,8 @@ async def test_crawler_engine_records_stage_timings():
     assert timing_summary["finalizer"]["admit_host_heads_ms"]["p95"] == 0.5
     assert timing_summary["storage"]["total_ms"]["count"] == 1
     assert timing_summary["storage"]["page_content_ms"]["p95"] == 3.0
+    assert timing_summary["publisher"]["total_ms"]["count"] == 1
+    assert timing_summary["publisher"]["save_run_ms"]["count"] == 1
     assert timing_summary["counts"]["storage_tiers"] == {"summary": 1}
     assert timing_summary["counts"]["finalizer_kinds"] == {"success": 1}
     assert timing_summary["counts"]["finalizer_new_tasks"]["total"] == 1
@@ -753,3 +790,29 @@ async def test_queue_wait_metrics_record_backpressure():
     assert result.timings.finalize_queue_depth >= 0
     assert result.timings.publish_queue_wait_ms >= 0
     assert result.timings.publish_queue_depth >= 0
+    assert result.timings.publisher is not None
+    assert result.timings.publisher.save_run_ms >= 200
+
+
+@pytest.mark.asyncio
+async def test_publish_result_records_output_writer_breakdown():
+    engine = CrawlerEngine(
+        max_pages=1,
+        url_ledger=_FakeLedger(None),
+        host_manager=_FakeHostManager(),
+    )
+    storage = _FakeStorage()
+    output_writer = _FakeOutputWriter()
+    engine.pg_storage = storage
+    engine.output_writer = output_writer
+    engine._publisher_executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+
+    result = _crawl_result()
+    await engine._publish_result(result)
+    await engine.close()
+
+    assert output_writer.written == [result]
+    assert result.timings.publisher is not None
+    assert result.timings.publisher.output_dispatch_wait_ms >= 0
+    assert result.timings.publisher.output_run_ms >= 0
+    assert result.timings.output_ms >= 0

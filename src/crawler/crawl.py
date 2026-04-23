@@ -72,6 +72,7 @@ from .telemetry import (
     FinalizerTelemetry,
     LeaseTelemetry,
     PipelineTelemetry,
+    PublisherTelemetry,
     TelemetryAccumulator,
 )
 from .urls import extract_links
@@ -128,6 +129,11 @@ def _split_execution_worker_pools(normal_workers: int, probing_ratio: float) -> 
 def _elapsed_ms(started_at: float) -> float:
     """Return elapsed wall-clock time in milliseconds."""
     return round((time.perf_counter() - started_at) * 1000, 1)
+
+
+def _elapsed_ms_between(started_at: float, finished_at: float) -> float:
+    """Return elapsed wall-clock time between two captured timestamps."""
+    return round((finished_at - started_at) * 1000, 1)
 
 
 def _format_timings(timings: CrawlStageTimings | None) -> str:
@@ -195,6 +201,62 @@ class _LeaseLane:
     lease_strategy: str
     intent: str | None = None
     execution_tiers: tuple[int, ...] | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _TimedStorageSave:
+    """Timing wrapper result for one storage save call."""
+
+    started_at: float
+    finished_at: float
+    save_result: object | None = None
+    error: Exception | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _TimedOutputWrite:
+    """Timing wrapper result for one output write call."""
+
+    started_at: float
+    finished_at: float
+    error: Exception | None = None
+
+
+def _timed_storage_save(storage: object, result: CrawlResult) -> _TimedStorageSave:
+    started_at = time.perf_counter()
+    try:
+        save_result = storage.save(result)
+    except Exception as exc:  # pragma: no cover - exercised via caller path
+        finished_at = time.perf_counter()
+        return _TimedStorageSave(
+            started_at=started_at,
+            finished_at=finished_at,
+            error=exc,
+        )
+    finished_at = time.perf_counter()
+    return _TimedStorageSave(
+        started_at=started_at,
+        finished_at=finished_at,
+        save_result=save_result,
+    )
+
+
+def _timed_output_write(output_writer: object, result: CrawlResult) -> _TimedOutputWrite:
+    started_at = time.perf_counter()
+    try:
+        output_writer.write_one(result)
+    except Exception as exc:  # pragma: no cover - exercised via caller path
+        finished_at = time.perf_counter()
+        return _TimedOutputWrite(
+            started_at=started_at,
+            finished_at=finished_at,
+            error=exc,
+        )
+    finished_at = time.perf_counter()
+    return _TimedOutputWrite(
+        started_at=started_at,
+        finished_at=finished_at,
+    )
 
 class CrawlerEngine:
     """Async crawler engine with concurrent processing."""
@@ -1177,26 +1239,71 @@ class CrawlerEngine:
         loop = asyncio.get_running_loop()
         storage = self._publisher_storage or self.pg_storage
         executor = self._publisher_executor
+        publisher_started = time.perf_counter()
+        publisher_telemetry = result.timings.publisher or PublisherTelemetry()
 
         if storage:
             persist_started = time.perf_counter()
+            timed_save: _TimedStorageSave
             if executor is not None:
-                save_result = await loop.run_in_executor(executor, storage.save, result)
+                timed_save = await loop.run_in_executor(
+                    executor,
+                    _timed_storage_save,
+                    storage,
+                    result,
+                )
             else:
-                save_result = await asyncio.to_thread(storage.save, result)
+                timed_save = await asyncio.to_thread(_timed_storage_save, storage, result)
             result.timings.persist_ms = _elapsed_ms(persist_started)
+            publisher_telemetry.save_dispatch_wait_ms = _elapsed_ms_between(
+                persist_started,
+                timed_save.started_at,
+            )
+            publisher_telemetry.save_run_ms = _elapsed_ms_between(
+                timed_save.started_at,
+                timed_save.finished_at,
+            )
+            save_result = timed_save.save_result
             storage_telemetry = getattr(save_result, "telemetry", None)
             if storage_telemetry is not None:
                 result.timings.storage = storage_telemetry
+            if timed_save.error is not None:
+                publisher_telemetry.total_ms = _elapsed_ms(publisher_started)
+                result.timings.publisher = publisher_telemetry
+                raise timed_save.error
         if self.output_writer:
             output_started = time.perf_counter()
+            timed_output: _TimedOutputWrite
             if executor is not None:
-                await loop.run_in_executor(executor, self.output_writer.write_one, result)
+                timed_output = await loop.run_in_executor(
+                    executor,
+                    _timed_output_write,
+                    self.output_writer,
+                    result,
+                )
             else:
-                await asyncio.to_thread(self.output_writer.write_one, result)
+                timed_output = await asyncio.to_thread(
+                    _timed_output_write,
+                    self.output_writer,
+                    result,
+                )
             result.timings.output_ms = _elapsed_ms(output_started)
+            publisher_telemetry.output_dispatch_wait_ms = _elapsed_ms_between(
+                output_started,
+                timed_output.started_at,
+            )
+            publisher_telemetry.output_run_ms = _elapsed_ms_between(
+                timed_output.started_at,
+                timed_output.finished_at,
+            )
+            if timed_output.error is not None:
+                publisher_telemetry.total_ms = _elapsed_ms(publisher_started)
+                result.timings.publisher = publisher_telemetry
+                raise timed_output.error
         elif not storage:
             self.results.append(result.to_dict())
+        publisher_telemetry.total_ms = _elapsed_ms(publisher_started)
+        result.timings.publisher = publisher_telemetry
 
     async def _finalizer(self):
         """Drain parsed payloads and apply scheduler mutations before persistence."""
