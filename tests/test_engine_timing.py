@@ -18,7 +18,8 @@ from crawler.crawl import (
     _SkippedTask,
 )
 from crawler.result import CrawlFailure, CrawlResult, CrawlStageTimings
-from crawler.telemetry import FinalizerTelemetry, TelemetryAccumulator
+from crawler.storage import StorageSaveResult
+from crawler.telemetry import FinalizerTelemetry, StorageTelemetry, TelemetryAccumulator
 from crawler.url_ledger import CrawlTask
 
 _ADMISSION_DIAGNOSTICS = {
@@ -106,7 +107,19 @@ class _FakeStorage:
 
     def save(self, result):
         self.saved.append(result)
-        return True
+        return StorageSaveResult(
+            saved=True,
+            telemetry=StorageTelemetry(
+                prepare_ms=1.0,
+                pages_upsert_ms=2.0,
+                page_content_ms=3.0,
+                commit_ms=4.0,
+                total_ms=10.0,
+                stored_content_bytes=128,
+                storage_tier="summary",
+                content_truncated=True,
+            ),
+        )
 
 
 class _RecordingHostStore:
@@ -162,6 +175,16 @@ def test_timing_accumulator_summarizes_stage_percentiles():
                 mark_done_ms=1.0,
                 total_ms=8.0,
             ),
+            storage=StorageTelemetry(
+                prepare_ms=1.0,
+                pages_upsert_ms=2.0,
+                page_content_ms=3.0,
+                commit_ms=4.0,
+                total_ms=10.0,
+                stored_content_bytes=128,
+                storage_tier="summary",
+                content_truncated=True,
+            ),
         ),
     )
     timings.record("failed", CrawlStageTimings(lease_ms=3.0, fetch_ms=30.0))
@@ -194,6 +217,12 @@ def test_timing_accumulator_summarizes_stage_percentiles():
     assert summary["counts"]["finalizer_batch_size"]["count"] == 1
     assert summary["counts"]["finalizer_batch_size"]["avg"] == 2.0
     assert summary["counts"]["finalizer_batch_size"]["max"] == 2.0
+    assert summary["storage"]["page_content_ms"]["p95"] == 3.0
+    assert summary["storage"]["commit_ms"]["p95"] == 4.0
+    assert summary["storage"]["total_ms"]["p95"] == 10.0
+    assert summary["counts"]["storage_tiers"] == {"summary": 1}
+    assert summary["counts"]["storage_truncated"] == {"true": 1}
+    assert summary["counts"]["stored_content_bytes"]["max"] == 128.0
     assert summary["counts"]["discovery_admission"] == {
         "extracted": 5,
         "admitted": 2,
@@ -215,6 +244,13 @@ def test_timing_accumulator_handles_empty_samples():
         "max": 0.0,
     }
     assert summary["finalizer"]["total_ms"] == {
+        "count": 0,
+        "avg": 0.0,
+        "p50": 0.0,
+        "p95": 0.0,
+        "max": 0.0,
+    }
+    assert summary["storage"]["total_ms"] == {
         "count": 0,
         "avg": 0.0,
         "p50": 0.0,
@@ -616,6 +652,9 @@ async def test_crawler_engine_records_stage_timings():
     assert result.timings.finalizer.admit_host_heads_ms == 0.5
     assert result.timings.finalizer.mark_done_ms >= 0
     assert result.timings.finalizer.total_ms >= 0
+    assert result.timings.storage is not None
+    assert result.timings.storage.page_content_ms == 3.0
+    assert result.timings.storage.storage_tier == "summary"
     assert result.timings.lease_ms >= 0
     assert result.timings.precheck_ms >= 0
     assert result.timings.robots_ms >= 0
@@ -650,6 +689,9 @@ async def test_crawler_engine_records_stage_timings():
     assert timing_summary["finalizer"]["total_ms"]["count"] == 1
     assert timing_summary["finalizer"]["admit_host_heads_ms"]["count"] == 1
     assert timing_summary["finalizer"]["admit_host_heads_ms"]["p95"] == 0.5
+    assert timing_summary["storage"]["total_ms"]["count"] == 1
+    assert timing_summary["storage"]["page_content_ms"]["p95"] == 3.0
+    assert timing_summary["counts"]["storage_tiers"] == {"summary": 1}
     assert timing_summary["counts"]["finalizer_kinds"] == {"success": 1}
     assert timing_summary["counts"]["finalizer_new_tasks"]["total"] == 1
     assert timing_summary["counts"]["fetch_outcomes"]["ok"] == 1

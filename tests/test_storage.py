@@ -78,13 +78,24 @@ def test_save_page(pg_storage):
         "content": "<html><title>Test Page</title><body>Hello</body></html>",
         "outlinks": ["https://example.com/page2"],
     }
-    assert pg_storage.save(result) is True
+    save_result = pg_storage.save(result)
+    assert save_result.saved is True
+    assert save_result.telemetry is not None
+    assert save_result.telemetry.prepare_ms >= 0
+    assert save_result.telemetry.pages_upsert_ms >= 0
+    assert save_result.telemetry.page_content_ms >= 0
+    assert save_result.telemetry.commit_ms >= 0
+    assert save_result.telemetry.total_ms >= 0
+    assert save_result.telemetry.storage_tier == "standard"
+    assert save_result.telemetry.stored_content_bytes > 0
     assert pg_storage.count == 1
 
 
 def test_skip_error_result(pg_storage):
     result = {"url": "https://example.com/fail", "error": "timeout"}
-    assert pg_storage.save(result) is False
+    save_result = pg_storage.save(result)
+    assert save_result.saved is False
+    assert save_result.telemetry is None
     assert pg_storage.count == 0
 
 
@@ -120,7 +131,12 @@ def test_save_drops_nul_content_to_metadata_only(pg_storage):
         "outlinks": [],
     }
 
-    assert pg_storage.save(result) is True
+    save_result = pg_storage.save(result)
+    assert save_result.saved is True
+    assert save_result.telemetry is not None
+    assert save_result.telemetry.storage_tier == "metadata_only"
+    assert save_result.telemetry.stored_content_bytes == 0
+    assert save_result.telemetry.content_truncated is False
 
     listed = pg_storage.list_pages()
     page = pg_storage.get_page(listed[0]["url_hash"])
