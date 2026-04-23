@@ -11,6 +11,15 @@ ARCHETYPE_DOCUMENT_PAGE = "document_page"
 ARCHETYPE_REDIRECT_HUB = "redirect_hub"
 ARCHETYPE_REGISTRY_LISTING = "registry_listing"
 
+PARENT_CONTEXT_GENERIC = "generic_parent"
+PARENT_CONTEXT_NOFOLLOW = "nofollow_parent"
+PARENT_CONTEXT_LOW_SIGNAL = "low_signal_parent"
+
+ADMISSION_REASON_CANDIDATE = "candidate"
+ADMISSION_REASON_BELOW_MIN_VALUE = "below_min_value"
+ADMISSION_REASON_LOW_VALUE_ARCHETYPE = "low_value_archetype"
+ADMISSION_REASON_NOFOLLOW_PARENT = "nofollow_parent"
+
 SEED_DISCOVERY_VALUE = 2.0
 SAME_HOST_DISCOVERY_VALUE = 1.25
 SEED_HOST_DISCOVERY_VALUE = 1.1
@@ -22,6 +31,7 @@ _ARCHETYPE_ADJUSTMENTS = {
     ARCHETYPE_REDIRECT_HUB: -0.3,
     ARCHETYPE_REGISTRY_LISTING: -0.35,
 }
+_LOW_VALUE_ARCHETYPES = {ARCHETYPE_REDIRECT_HUB, ARCHETYPE_REGISTRY_LISTING}
 
 _MIN_DISCOVERY_VALUE = 0.25
 _REDIRECT_SEGMENTS = {"go", "goto", "redirect", "r", "out", "jump"}
@@ -70,6 +80,21 @@ class EnqueueDecision:
     """Discovery value assigned when enqueueing a URL."""
 
     discovery_value: float
+    archetype: str = ARCHETYPE_GENERIC_PAGE
+    parent_archetype: str = ARCHETYPE_GENERIC_PAGE
+    parent_context: str = PARENT_CONTEXT_GENERIC
+
+
+@dataclass(frozen=True)
+class DiscoveryAdmissionDecision:
+    """Scheduler admission decision for a discovered URL."""
+
+    url: str
+    discovery_value: float
+    archetype: str
+    parent_context: str
+    admitted: bool
+    reason: str
 
 
 def host_key(url: str) -> str:
@@ -165,6 +190,19 @@ def classify_parent_archetype(parent_url: str, parent_signals: PageSignals | Non
     return classify_url_archetype(parent_url)
 
 
+def classify_parent_context(
+    parent_archetype: str,
+    parent_signals: PageSignals | None,
+) -> str:
+    """Classify why a parent page weakens child discovery confidence."""
+    meta_robots = (parent_signals.meta_robots or "").lower() if parent_signals else ""
+    if "nofollow" in meta_robots:
+        return PARENT_CONTEXT_NOFOLLOW
+    if parent_archetype in {ARCHETYPE_REGISTRY_LISTING, ARCHETYPE_REDIRECT_HUB}:
+        return PARENT_CONTEXT_LOW_SIGNAL
+    return PARENT_CONTEXT_GENERIC
+
+
 def _context_penalty(parent_archetype: str, parent_signals: PageSignals | None) -> float:
     """Reduce child value when discovered from low-signal parent pages."""
     penalty = 0.0
@@ -215,27 +253,88 @@ def rank_discovered_url(
     known_seed_hosts = seed_hosts or set()
 
     if child_host and child_host == parent_host:
-        discovery_value, _archetype = _adjust_discovery_value(
+        discovery_value, archetype = _adjust_discovery_value(
             SAME_HOST_DISCOVERY_VALUE,
             url=url,
             parent_url=parent_url,
             parent_signals=parent_signals,
         )
-        return EnqueueDecision(discovery_value=discovery_value)
+        parent_archetype = classify_parent_archetype(parent_url, parent_signals)
+        return EnqueueDecision(
+            discovery_value=discovery_value,
+            archetype=archetype,
+            parent_archetype=parent_archetype,
+            parent_context=classify_parent_context(parent_archetype, parent_signals),
+        )
 
     if child_host and child_host in known_seed_hosts:
-        discovery_value, _archetype = _adjust_discovery_value(
+        discovery_value, archetype = _adjust_discovery_value(
             SEED_HOST_DISCOVERY_VALUE,
             url=url,
             parent_url=parent_url,
             parent_signals=parent_signals,
         )
-        return EnqueueDecision(discovery_value=discovery_value)
+        parent_archetype = classify_parent_archetype(parent_url, parent_signals)
+        return EnqueueDecision(
+            discovery_value=discovery_value,
+            archetype=archetype,
+            parent_archetype=parent_archetype,
+            parent_context=classify_parent_context(parent_archetype, parent_signals),
+        )
 
-    discovery_value, _archetype = _adjust_discovery_value(
+    discovery_value, archetype = _adjust_discovery_value(
         EXTERNAL_DISCOVERY_VALUE,
         url=url,
         parent_url=parent_url,
         parent_signals=parent_signals,
     )
-    return EnqueueDecision(discovery_value=discovery_value)
+    parent_archetype = classify_parent_archetype(parent_url, parent_signals)
+    return EnqueueDecision(
+        discovery_value=discovery_value,
+        archetype=archetype,
+        parent_archetype=parent_archetype,
+        parent_context=classify_parent_context(parent_archetype, parent_signals),
+    )
+
+
+def _rejection_reason(decision: EnqueueDecision) -> str:
+    """Return the operator-facing reason a ranked URL should not be admitted."""
+    if decision.parent_context == PARENT_CONTEXT_NOFOLLOW:
+        return ADMISSION_REASON_NOFOLLOW_PARENT
+    if decision.archetype in _LOW_VALUE_ARCHETYPES:
+        return ADMISSION_REASON_LOW_VALUE_ARCHETYPE
+    return ADMISSION_REASON_BELOW_MIN_VALUE
+
+
+def decide_discovered_url_admission(
+    *,
+    parent_url: str,
+    url: str,
+    seed_hosts: set[str] | None = None,
+    parent_signals: PageSignals | None = None,
+    min_discovery_value: float,
+    low_value_archetype_min_discovery_value: float,
+) -> DiscoveryAdmissionDecision:
+    """Decide whether a discovered URL is valuable enough for scheduler admission."""
+    decision = rank_discovered_url(
+        parent_url=parent_url,
+        url=url,
+        seed_hosts=seed_hosts,
+        parent_signals=parent_signals,
+    )
+    admitted = True
+    reason = ADMISSION_REASON_CANDIDATE
+    if (
+        decision.archetype in _LOW_VALUE_ARCHETYPES
+        and decision.discovery_value < low_value_archetype_min_discovery_value
+    ) or decision.discovery_value < min_discovery_value:
+        admitted = False
+        reason = _rejection_reason(decision)
+    return DiscoveryAdmissionDecision(
+        url=url,
+        discovery_value=decision.discovery_value,
+        archetype=decision.archetype,
+        parent_context=decision.parent_context,
+        admitted=admitted,
+        reason=reason,
+    )

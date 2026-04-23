@@ -165,6 +165,7 @@ def test_timing_accumulator_summarizes_stage_percentiles():
     )
     timings.record("failed", CrawlStageTimings(lease_ms=3.0, fetch_ms=30.0))
     timings.record("skipped", CrawlStageTimings(lease_ms=2.0, fetch_ms=20.0))
+    timings.record_discovery_admission({"extracted": 5, "admitted": 2, "per_page_cap": 3})
 
     summary = timings.snapshot()
 
@@ -188,6 +189,11 @@ def test_timing_accumulator_summarizes_stage_percentiles():
     assert summary["counts"]["finalizer_new_tasks"] == {
         "total": 3,
         "nonzero_items": 1,
+    }
+    assert summary["counts"]["discovery_admission"] == {
+        "extracted": 5,
+        "admitted": 2,
+        "per_page_cap": 3,
     }
     assert "counts" in summary
 
