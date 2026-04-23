@@ -260,6 +260,253 @@ def _elapsed_ms(started_at: float) -> float:
     return round((time.perf_counter() - started_at) * 1000, 1)
 
 
+class SchedulerTopology:
+    """Resolve intent, surfaces, and physical queue topology."""
+
+    def __init__(self, ledger: "UrlLedger") -> None:
+        self._ledger = ledger
+
+    def normalize_intent(self, intent: str | None) -> str | None:
+        return self._ledger._normalize_intent(intent)
+
+    def normalized_physical_queues(self, physical_queues: list[str] | None) -> list[str]:
+        return self._ledger._normalized_physical_queues(physical_queues)
+
+    def normalized_surface_queues(
+        self,
+        *,
+        runnable_surface: str | None,
+        physical_queues: list[str] | None,
+    ) -> list[str]:
+        return self._ledger._normalized_surface_queues(
+            runnable_surface=runnable_surface,
+            physical_queues=physical_queues,
+        )
+
+    def single_physical_queue_for_surface(self, runnable_surface: str) -> str:
+        return self._ledger._single_physical_queue_for_surface(runnable_surface)
+
+    def resolve_admission_physical_queue(
+        self,
+        *,
+        physical_queue: str | None,
+        runnable_surface: str | None,
+        intent: str | None,
+    ) -> str:
+        return self._ledger._resolve_admission_physical_queue(
+            physical_queue=physical_queue,
+            runnable_surface=runnable_surface,
+            intent=intent,
+        )
+
+
+class UrlLedgerStore:
+    """Own durable URL-ledger fact mutations behind the compatibility facade."""
+
+    def __init__(self, ledger: "UrlLedger") -> None:
+        self._ledger = ledger
+
+    def discover(self, task: CrawlTask) -> bool:
+        _prepared, changed = self._ledger._upsert_ledger_tasks([task])
+        return changed > 0
+
+    def discover_many(self, tasks: list[CrawlTask]) -> int:
+        _prepared, changed = self._ledger._upsert_ledger_tasks(tasks)
+        return changed
+
+    def preview_tasks(self, tasks: list[CrawlTask]) -> list[CrawlTask]:
+        return self._ledger._prepare_tasks(tasks)
+
+    def place(self, task: CrawlTask) -> bool:
+        return self.place_many([task]) > 0
+
+    def place_many(self, tasks: list[CrawlTask]) -> int:
+        prepared_tasks, changed = self._ledger._upsert_ledger_tasks(tasks)
+        if not prepared_tasks:
+            return changed
+        admitted = self._ledger._kernel.admit_discovered_tasks(prepared_tasks)
+        if admitted == 0 and changed > 0:
+            return 0
+        return changed
+
+    def mark_done(self, url: str, lease_token: str | None = None) -> bool:
+        return self._ledger._mark_done_impl(url, lease_token=lease_token)
+
+    def mark_done_many(self, tasks: list[CrawlTask]) -> int:
+        return self._ledger._mark_done_many_impl(tasks)
+
+    def mark_failed(
+        self,
+        url: str,
+        retryable: bool = False,
+        error: str | None = None,
+        backoff_seconds: float | None = None,
+        lease_token: str | None = None,
+    ) -> bool:
+        return self._ledger._mark_failed_impl(
+            url,
+            retryable=retryable,
+            error=error,
+            backoff_seconds=backoff_seconds,
+            lease_token=lease_token,
+        )
+
+
+class SchedulerKernel:
+    """Own live scheduler behavior behind the compatibility facade."""
+
+    def __init__(self, ledger: "UrlLedger") -> None:
+        self._ledger = ledger
+
+    def admit_queue_membership(self, tasks: list[CrawlTask]) -> int:
+        return self._ledger._admission_service().admit_queue_membership(tasks)
+
+    def admit_discovered_tasks(self, tasks: list[CrawlTask]) -> int:
+        return self._ledger._admission_service().admit_discovered_tasks(tasks)
+
+    def admit_urls(
+        self,
+        urls: list[str],
+        *,
+        runnable_surface: str | None = None,
+        intent: str | None = None,
+    ) -> int:
+        return self._ledger._admission_service().admit_urls(
+            urls,
+            runnable_surface=runnable_surface,
+            intent=intent,
+        )
+
+    def admit_discovered_urls(
+        self,
+        limit: int,
+        *,
+        runnable_surface: str | None = None,
+        intent: str | None = None,
+    ) -> int:
+        return self._ledger._admission_service().admit_discovered_urls(
+            limit,
+            runnable_surface=runnable_surface,
+            intent=intent,
+        )
+
+    def lease_next(
+        self,
+        *,
+        host: str | None = None,
+        lease_seconds: float | None = None,
+        lease_strategy: str | None = None,
+        exclude_hosts: list[str] | None = None,
+        runnable_surface: str | None = None,
+        execution_tiers: list[int] | None = None,
+    ) -> CrawlTask | None:
+        return self._ledger._lease_selector().lease_next(
+            host=host,
+            lease_seconds=lease_seconds,
+            lease_strategy=lease_strategy,
+            exclude_hosts=exclude_hosts,
+            runnable_surface=runnable_surface,
+            execution_tiers=execution_tiers,
+        )
+
+    def lease_batch(
+        self,
+        count: int = 10,
+        host: str | None = None,
+        lease_seconds: float | None = None,
+        lease_strategy: str | None = None,
+        exclude_hosts: list[str] | None = None,
+        runnable_surface: str | None = None,
+    ) -> list[CrawlTask]:
+        return self._ledger._lease_selector().lease_batch(
+            count=count,
+            host=host,
+            lease_seconds=lease_seconds,
+            lease_strategy=lease_strategy,
+            exclude_hosts=exclude_hosts,
+            runnable_surface=runnable_surface,
+        )
+
+    def requeue_failed(self) -> int:
+        return self._ledger._requeue_service().requeue_failed()
+
+    def recover_leased(self, expired_only: bool = True) -> int:
+        return self._ledger._requeue_service().recover_leased(expired_only=expired_only)
+
+    def upsert_seeds(self, urls: list[str], discovery_value: float = 2.0) -> int:
+        return self._ledger._requeue_service().upsert_seeds(
+            urls,
+            discovery_value=discovery_value,
+        )
+
+    def stats(self) -> dict:
+        return self._ledger._observability.status_counts()
+
+    def effective_state_counts(self, now: float | None = None) -> dict[str, int]:
+        return self._ledger._observability.effective_state_counts(now=now)
+
+    def scheduler_state_snapshot(
+        self,
+        now: float | None = None,
+        *,
+        runnable_surface: str | None = None,
+    ) -> dict[str, dict[str, int]]:
+        return self._ledger._observability.scheduler_state_snapshot(
+            now=now,
+            runnable_surface=runnable_surface,
+        )
+
+    def blocked_reason_counts(
+        self,
+        now: float | None = None,
+        *,
+        runnable_surface: str | None = None,
+    ) -> dict[str, int]:
+        return self._ledger._observability.blocked_reason_counts(
+            now=now,
+            runnable_surface=runnable_surface,
+        )
+
+    def readiness_state_counts(
+        self,
+        now: float | None = None,
+        *,
+        runnable_surface: str | None = None,
+    ) -> dict[str, int]:
+        return self._ledger._observability.readiness_state_counts(
+            now=now,
+            runnable_surface=runnable_surface,
+        )
+
+    def pending_count(self, *, runnable_surface: str | None = None) -> int:
+        return self._ledger._observability.pending_count(runnable_surface=runnable_surface)
+
+    def pending_host_count(self, *, runnable_surface: str | None = None) -> int:
+        return self._ledger._observability.pending_host_count(runnable_surface=runnable_surface)
+
+    def runnable_host_count(
+        self,
+        now: float | None = None,
+        *,
+        runnable_surface: str | None = None,
+    ) -> int:
+        return self._ledger._observability.runnable_host_count(
+            now=now,
+            runnable_surface=runnable_surface,
+        )
+
+    def blocked_host_backoff_count(self) -> int:
+        return self._ledger._observability.blocked_count()
+
+    def readiness(
+        self,
+        now: float | None = None,
+        *,
+        runnable_surface: str | None = None,
+    ) -> SchedulerReadiness:
+        return self._ledger._observability.readiness(now=now, runnable_surface=runnable_surface)
+
+
 class UrlLedger:
     """Durable URL ledger with PostgreSQL persistence. Dedup via ON CONFLICT."""
 
@@ -361,6 +608,9 @@ class UrlLedger:
             insert_pending_rows=self._insert_pending_queue_rows,
         )
         self._last_admission_diagnostics = self._empty_admission_diagnostics()
+        self._topology = SchedulerTopology(self)
+        self._store = UrlLedgerStore(self)
+        self._kernel = SchedulerKernel(self)
         self._assert_current_schema()
 
     def reset_host_first_fallback_stats(self) -> None:
@@ -1208,21 +1458,19 @@ class UrlLedger:
 
     def discover(self, task: CrawlTask) -> bool:
         """Insert one discovered URL into the ledger without scheduler membership."""
-        _prepared, changed = self._upsert_ledger_tasks([task])
-        return changed > 0
+        return self._store.discover(task)
 
     def discover_many(self, tasks: list[CrawlTask]) -> int:
         """Insert discovered URLs into the ledger without placing them into queue tables."""
-        _prepared, changed = self._upsert_ledger_tasks(tasks)
-        return changed
+        return self._store.discover_many(tasks)
 
     def _admit_queue_membership(self, tasks: list[CrawlTask]) -> int:
         """Assign scheduler membership for known ledger URLs."""
-        return self._admission_service().admit_queue_membership(tasks)
+        return self._kernel.admit_queue_membership(tasks)
 
     def admit_discovered_tasks(self, tasks: list[CrawlTask]) -> int:
         """Assign scheduler membership to discovered URLs using task admission metadata."""
-        return self._admission_service().admit_discovered_tasks(tasks)
+        return self._kernel.admit_discovered_tasks(tasks)
 
     def admit_urls(
         self,
@@ -1232,11 +1480,7 @@ class UrlLedger:
         intent: str | None = None,
     ) -> int:
         """Assign scheduler membership to known ledger URLs using surface and intent."""
-        return self._admission_service().admit_urls(
-            urls,
-            runnable_surface=runnable_surface,
-            intent=intent,
-        )
+        return self._kernel.admit_urls(urls, runnable_surface=runnable_surface, intent=intent)
 
     def _select_admission_candidate_rows(
         self,
@@ -1255,7 +1499,7 @@ class UrlLedger:
         intent: str | None = None,
     ) -> int:
         """Assign scheduler membership to discovered ledger rows without task metadata."""
-        return self._admission_service().admit_discovered_urls(
+        return self._kernel.admit_discovered_urls(
             limit,
             runnable_surface=runnable_surface,
             intent=intent,
@@ -1263,21 +1507,15 @@ class UrlLedger:
 
     def preview_tasks(self, tasks: list[CrawlTask]) -> list[CrawlTask]:
         """Return normalized tasks with physical queues implied without writing them."""
-        return self._prepare_tasks(tasks)
+        return self._store.preview_tasks(tasks)
 
     def place(self, task: CrawlTask) -> bool:
         """Place one discovered URL candidate into scheduler storage."""
-        return self.place_many([task]) > 0
+        return self._store.place(task)
 
     def place_many(self, tasks: list[CrawlTask]) -> int:
         """Place multiple discovered URL candidates into scheduler storage."""
-        prepared_tasks, changed = self._upsert_ledger_tasks(tasks)
-        if not prepared_tasks:
-            return changed
-        admitted = self.admit_discovered_tasks(prepared_tasks)
-        if admitted == 0 and changed > 0:
-            return 0
-        return changed
+        return self._store.place_many(tasks)
 
     def lease_next(
         self,
@@ -1289,7 +1527,7 @@ class UrlLedger:
         execution_tiers: list[int] | None = None,
     ) -> CrawlTask | None:
         """Lease the next runnable URL, optionally filtered by host."""
-        return self._lease_selector().lease_next(
+        return self._kernel.lease_next(
             host=host,
             lease_seconds=lease_seconds,
             lease_strategy=lease_strategy,
@@ -1420,7 +1658,7 @@ class UrlLedger:
         runnable_surface: str | None = None,
     ) -> list[CrawlTask]:
         """Lease a batch of runnable URLs."""
-        return self._lease_selector().lease_batch(
+        return self._kernel.lease_batch(
             count=count,
             host=host,
             lease_seconds=lease_seconds,
@@ -1430,6 +1668,10 @@ class UrlLedger:
         )
 
     def mark_done(self, url: str, lease_token: str | None = None) -> bool:
+        """Mark a URL as successfully crawled."""
+        return self._store.mark_done(url, lease_token=lease_token)
+
+    def _mark_done_impl(self, url: str, lease_token: str | None = None) -> bool:
         """Mark a URL as successfully crawled."""
         normalized = normalize_url(url)
         now = time.time()
@@ -1459,6 +1701,10 @@ class UrlLedger:
         return updated
 
     def mark_done_many(self, tasks: list[CrawlTask]) -> int:
+        """Mark multiple leased URLs as successfully crawled in one transaction."""
+        return self._store.mark_done_many(tasks)
+
+    def _mark_done_many_impl(self, tasks: list[CrawlTask]) -> int:
         """Mark multiple leased URLs as successfully crawled in one transaction."""
         rows_by_url: dict[str, tuple[str, str | None]] = {}
         for task in tasks:
@@ -1514,6 +1760,23 @@ class UrlLedger:
         return len(updated_rows)
 
     def mark_failed(
+        self,
+        url: str,
+        retryable: bool = False,
+        error: str | None = None,
+        backoff_seconds: float | None = None,
+        lease_token: str | None = None,
+    ) -> bool:
+        """Mark a URL as failed, optionally scheduling a retry."""
+        return self._store.mark_failed(
+            url,
+            retryable=retryable,
+            error=error,
+            backoff_seconds=backoff_seconds,
+            lease_token=lease_token,
+        )
+
+    def _mark_failed_impl(
         self,
         url: str,
         retryable: bool = False,
@@ -1609,7 +1872,7 @@ class UrlLedger:
 
     def requeue_failed(self) -> int:
         """Requeue failed URLs for retry."""
-        return self._requeue_service().requeue_failed()
+        return self._kernel.requeue_failed()
 
     def rebalance_blocked_host_backoff(self, now: float | None = None) -> tuple[int, int]:
         """Move backoff-blocked URLs out of the normal scheduler queues."""
@@ -1659,7 +1922,7 @@ class UrlLedger:
 
     def recover_leased(self, expired_only: bool = True) -> int:
         """Reset leased URLs back to pending."""
-        return self._requeue_service().recover_leased(expired_only=expired_only)
+        return self._kernel.recover_leased(expired_only=expired_only)
 
     def delay_overcrowded_scheduled_surface(
         self,
@@ -1791,15 +2054,15 @@ class UrlLedger:
 
     def upsert_seeds(self, urls: list[str], discovery_value: float = 2.0) -> int:
         """Insert or requeue seed URLs."""
-        return self._requeue_service().upsert_seeds(urls, discovery_value=discovery_value)
+        return self._kernel.upsert_seeds(urls, discovery_value=discovery_value)
 
     def stats(self) -> dict:
         """Get queue statistics."""
-        return self._observability.status_counts()
+        return self._kernel.stats()
 
     def effective_state_counts(self, now: float | None = None) -> dict[str, int]:
         """Return the current runtime-facing scheduler-state breakdown."""
-        return self._observability.effective_state_counts(now=now)
+        return self._kernel.effective_state_counts(now=now)
 
     def scheduler_state_snapshot(
         self,
@@ -1808,7 +2071,7 @@ class UrlLedger:
         runnable_surface: str | None = None,
     ) -> dict[str, dict[str, int]]:
         """Return the bundled runtime-facing scheduler state snapshot."""
-        return self._observability.scheduler_state_snapshot(
+        return self._kernel.scheduler_state_snapshot(
             now=now,
             runnable_surface=runnable_surface,
         )
@@ -1820,7 +2083,7 @@ class UrlLedger:
         runnable_surface: str | None = None,
     ) -> dict[str, int]:
         """Return the current blocked breakdown by scheduler reason."""
-        return self._observability.blocked_reason_counts(
+        return self._kernel.blocked_reason_counts(
             now=now,
             runnable_surface=runnable_surface,
         )
@@ -1832,7 +2095,7 @@ class UrlLedger:
         runnable_surface: str | None = None,
     ) -> dict[str, int]:
         """Return the current readiness-derived scheduler state breakdown."""
-        return self._observability.readiness_state_counts(
+        return self._kernel.readiness_state_counts(
             now=now,
             runnable_surface=runnable_surface,
         )
@@ -1843,7 +2106,7 @@ class UrlLedger:
         runnable_surface: str | None = None,
     ) -> int:
         """Get count of pending URLs, optionally filtered by runnable surface."""
-        return self._observability.pending_count(runnable_surface=runnable_surface)
+        return self._kernel.pending_count(runnable_surface=runnable_surface)
 
     def pending_host_count(
         self,
@@ -1851,7 +2114,7 @@ class UrlLedger:
         runnable_surface: str | None = None,
     ) -> int:
         """Get count of distinct pending hosts, optionally filtered by runnable surface."""
-        return self._observability.pending_host_count(runnable_surface=runnable_surface)
+        return self._kernel.pending_host_count(runnable_surface=runnable_surface)
 
     def runnable_host_count(
         self,
@@ -1860,14 +2123,14 @@ class UrlLedger:
         runnable_surface: str | None = None,
     ) -> int:
         """Get count of distinct hosts that are runnable right now."""
-        return self._observability.runnable_host_count(
+        return self._kernel.runnable_host_count(
             now=now,
             runnable_surface=runnable_surface,
         )
 
     def blocked_host_backoff_count(self) -> int:
         """Return count of URLs isolated due to host backoff."""
-        return self._observability.blocked_count()
+        return self._kernel.blocked_host_backoff_count()
 
     def readiness(
         self,
@@ -1876,7 +2139,7 @@ class UrlLedger:
         runnable_surface: str | None = None,
     ) -> SchedulerReadiness:
         """Return a single snapshot of pending and leaseable queue state."""
-        return self._observability.readiness(now=now, runnable_surface=runnable_surface)
+        return self._kernel.readiness(now=now, runnable_surface=runnable_surface)
 
     def runnable_count(
         self,
