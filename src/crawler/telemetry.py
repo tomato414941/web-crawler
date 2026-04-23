@@ -137,6 +137,7 @@ class FinalizerTelemetry:
     mark_done_ms: float = 0.0
     mark_failed_ms: float = 0.0
     total_ms: float = 0.0
+    batch_size: int = 1
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -193,6 +194,7 @@ class TelemetryAccumulator:
         self._finalizer_kinds: Counter[str] = Counter()
         self._finalizer_new_tasks_total = 0
         self._finalizer_new_tasks_nonzero_items = 0
+        self._finalizer_batch_sizes: list[float] = []
         self._discovery_admission: Counter[str] = Counter()
 
     def record_discovery_admission(self, counts: Mapping[str, int]) -> None:
@@ -237,6 +239,7 @@ class TelemetryAccumulator:
             self._finalizer_new_tasks_total += new_tasks_count
             if new_tasks_count > 0:
                 self._finalizer_new_tasks_nonzero_items += 1
+            self._finalizer_batch_sizes.append(float(getattr(finalizer, "batch_size", 1)))
             for field in FINALIZER_TIMING_FIELDS:
                 self._finalizer_stages[field].append(float(getattr(finalizer, field)))
 
@@ -274,6 +277,7 @@ class TelemetryAccumulator:
                     "total": self._finalizer_new_tasks_total,
                     "nonzero_items": self._finalizer_new_tasks_nonzero_items,
                 },
+                "finalizer_batch_size": _summarize_values(self._finalizer_batch_sizes),
                 "discovery_admission": dict(self._discovery_admission),
             },
             "finalizer": finalizer,

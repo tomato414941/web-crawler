@@ -436,6 +436,59 @@ async def test_finalize_stage_success_enqueues_publish_item_and_records_liveness
 
 
 @pytest.mark.asyncio
+async def test_finalize_stage_batches_success_items():
+    queues = PipelineQueues(maxsize=8)
+    liveness = StageLiveness(include_kind=True)
+    batches = []
+
+    async def finalize_batch(parsed_pages):
+        batches.append([parsed.task.url for parsed in parsed_pages])
+        return [parsed.result for parsed in parsed_pages]
+
+    stage = FinalizeStage(
+        finalize_queue=queues.finalize,
+        publish_queue=queues.publish,
+        finalize_stats=queues.finalize_stats,
+        publish_stats=queues.publish_stats,
+        liveness=liveness,
+        finalize_parsed_page=lambda parsed: parsed.result,
+        finalize_parsed_pages=finalize_batch,
+        finalize_skipped_task=_no_finalize_skipped,
+        finalize_failed_task=_no_finalize_failed,
+        publish_result=_no_publish,
+        record_timing=_record([]),
+        progress=_progress,
+        format_timings=_format_timings,
+        success_batch_size=3,
+    )
+    worker = asyncio.create_task(stage.run())
+
+    results = [_crawl_result(f"https://example.com/{index}") for index in range(3)]
+    for result in results:
+        await queues.finalize.put(
+            FinalizeItem(
+                parsed=ParsedPage(
+                    task=CrawlTask(url=result.url, lease_token="lease-1"),
+                    result=result,
+                    new_tasks=[],
+                    process_started=time.perf_counter(),
+                ),
+                enqueued_at=time.perf_counter(),
+                queue_depth=queues.finalize.qsize(),
+            )
+        )
+
+    await asyncio.wait_for(queues.finalize.join(), timeout=2)
+    await queues.finalize.put(FINALIZER_SENTINEL)
+    await asyncio.wait_for(worker, timeout=2)
+
+    assert batches == [[result.url for result in results]]
+    assert [queues.publish.get_nowait().result for _ in results] == results
+    assert liveness.snapshot()["started"] == 3
+    assert liveness.snapshot()["completed"] == 3
+
+
+@pytest.mark.asyncio
 async def test_finalize_stage_survives_item_error_and_drains_next_item():
     queues = PipelineQueues(maxsize=4)
     liveness = StageLiveness(include_kind=True)

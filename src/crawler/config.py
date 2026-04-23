@@ -48,6 +48,8 @@ class CrawlerSettings(BaseSettings):
     max_discovered_urls_per_target_host_per_page: int = 8
     min_discovery_value: float = 0.5
     low_value_archetype_min_discovery_value: float = 1.0
+    finalizer_batch_size: int = 16
+    finalizer_batch_wait_ms: float = 25.0
 
     model_config = {"env_prefix": "CRAWLER_"}
 

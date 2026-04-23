@@ -1568,6 +1568,41 @@ class TestUrlLedger:
 
         assert ledger.mark_done(result.url, lease_token=result.lease_token) is False
 
+    def test_mark_done_many_uses_active_lease_tokens(self, ledger):
+        ledger.place(CrawlTask(url="http://example.com/first"))
+        ledger.place(CrawlTask(url="http://example.com/second"))
+        first = ledger.lease_next()
+        second = ledger.lease_next()
+
+        with ledger._conn.cursor() as cur:
+            cur.execute(
+                f"UPDATE {LEASE_TABLE} SET lease_token = %s WHERE url = %s",
+                ("tampered", second.url),
+            )
+        ledger._conn.commit()
+
+        updated = ledger.mark_done_many(
+            [
+                CrawlTask(url=first.url, lease_token=first.lease_token),
+                CrawlTask(url=second.url, lease_token=second.lease_token),
+            ]
+        )
+
+        with ledger._conn.cursor() as cur:
+            cur.execute(
+                f"SELECT url, last_success_at FROM {URL_LEDGER_TABLE} ORDER BY url"
+            )
+            rows = cur.fetchall()
+            cur.execute(f"SELECT url FROM {LEASE_TABLE} ORDER BY url")
+            lease_rows = [url for (url,) in cur.fetchall()]
+
+        assert updated == 1
+        assert rows[0][0] == first.url
+        assert rows[0][1] is not None
+        assert rows[1][0] == second.url
+        assert rows[1][1] is None
+        assert lease_rows == [second.url]
+
     def test_recover_leased_uses_active_lease_table(self, ledger):
         ledger.place(CrawlTask(url="http://example.com"))
         result = ledger.lease_next()

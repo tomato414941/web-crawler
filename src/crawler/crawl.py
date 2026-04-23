@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import concurrent.futures
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import logging
 import re
 import time
@@ -477,6 +477,69 @@ class CrawlerEngine:
 
         mark_started = time.perf_counter()
         scheduler.mark_done(task.url, lease_token=task.lease_token)
+        telemetry.mark_done_ms = _elapsed_ms(mark_started)
+        telemetry.total_ms = _elapsed_ms(total_started)
+        return telemetry
+
+    def _finalize_batch_sync(self, parsed_pages: list[_ParsedPage]) -> FinalizerTelemetry:
+        """Apply success scheduler mutations for multiple parsed pages in one batch."""
+        scheduler = self._finalizer_scheduler or self.scheduler
+        all_new_tasks = [
+            new_task
+            for parsed in parsed_pages
+            for new_task in parsed.new_tasks
+        ]
+        telemetry = FinalizerTelemetry(
+            kind="success",
+            new_tasks_count=len(all_new_tasks),
+            batch_size=len(parsed_pages),
+        )
+        total_started = time.perf_counter()
+        if all_new_tasks:
+            if hasattr(scheduler, "discover_many") and hasattr(scheduler, "admit_discovered_tasks"):
+                discover_started = time.perf_counter()
+                scheduler.discover_many(all_new_tasks)
+                telemetry.discover_ms = _elapsed_ms(discover_started)
+                admit_started = time.perf_counter()
+                scheduler.admit_discovered_tasks(all_new_tasks)
+                telemetry.admit_ms = _elapsed_ms(admit_started)
+                diagnostics_fn = getattr(scheduler, "last_admission_diagnostics", None)
+                if callable(diagnostics_fn):
+                    diagnostics = diagnostics_fn()
+                    for field in FINALIZER_TIMING_FIELDS:
+                        if field.startswith("admit_") and field in diagnostics:
+                            setattr(telemetry, field, float(diagnostics[field]))
+            else:
+                admit_started = time.perf_counter()
+                scheduler.place_many(all_new_tasks)
+                telemetry.admit_ms = _elapsed_ms(admit_started)
+
+        host_store = self._finalizer_host_store or self._host_store_for_success_tracking()
+        if host_store is not None:
+            host_started = time.perf_counter()
+            success_records = [
+                (
+                    self._host_key_for_url(parsed.task.url),
+                    parsed.result.timings.fetch_request_ms or parsed.result.timings.fetch_ms,
+                )
+                for parsed in parsed_pages
+            ]
+            if hasattr(host_store, "record_success_many"):
+                host_store.record_success_many(success_records)
+            else:
+                for host_key, request_latency_ms in success_records:
+                    host_store.record_success(
+                        host_key,
+                        request_latency_ms=request_latency_ms,
+                    )
+            telemetry.host_success_ms = _elapsed_ms(host_started)
+
+        mark_started = time.perf_counter()
+        if hasattr(scheduler, "mark_done_many"):
+            scheduler.mark_done_many([parsed.task for parsed in parsed_pages])
+        else:
+            for parsed in parsed_pages:
+                scheduler.mark_done(parsed.task.url, lease_token=parsed.task.lease_token)
         telemetry.mark_done_ms = _elapsed_ms(mark_started)
         telemetry.total_ms = _elapsed_ms(total_started)
         return telemetry
@@ -1072,33 +1135,42 @@ class CrawlerEngine:
 
     async def _finalize_parsed_page(self, parsed: _ParsedPage) -> CrawlResult:
         """Apply scheduler mutations after parse and before persistence."""
-        result = parsed.result
+        return (await self._finalize_parsed_pages([parsed]))[0]
+
+    async def _finalize_parsed_pages(self, parsed_pages: list[_ParsedPage]) -> list[CrawlResult]:
+        """Apply scheduler mutations after parse and before persistence."""
+        if not parsed_pages:
+            return []
         scheduler_started = time.perf_counter()
         if self._finalizer_executor is not None:
             loop = asyncio.get_running_loop()
             telemetry = await loop.run_in_executor(
                 self._finalizer_executor,
-                self._finalize_sync,
-                parsed.task,
-                parsed.new_tasks,
-                parsed.result.timings.fetch_request_ms or parsed.result.timings.fetch_ms,
+                self._finalize_batch_sync,
+                parsed_pages,
             )
-            if hasattr(self.host_manager, "record_success_runtime"):
+        else:
+            telemetry = self._finalize_batch_sync(parsed_pages)
+        scheduler_ms = _elapsed_ms(scheduler_started)
+        results: list[CrawlResult] = []
+        for parsed in parsed_pages:
+            if self._finalizer_executor is not None and hasattr(
+                self.host_manager,
+                "record_success_runtime",
+            ):
                 self.host_manager.record_success_runtime(parsed.task.url)
             else:
                 self.host_manager.record_success(parsed.task.url)
-        else:
-            telemetry = self._finalize_sync(
-                parsed.task,
-                parsed.new_tasks,
-                parsed.result.timings.fetch_request_ms or parsed.result.timings.fetch_ms,
+            result = parsed.result
+            result.timings.scheduler_ms += scheduler_ms
+            result.timings.finalizer = replace(
+                telemetry,
+                new_tasks_count=len(parsed.new_tasks),
             )
-            self.host_manager.record_success(parsed.task.url)
-        result.timings.scheduler_ms += _elapsed_ms(scheduler_started)
-        result.timings.finalizer = telemetry
-        result.timings.process_ms = _elapsed_ms(parsed.process_started)
+            result.timings.process_ms = _elapsed_ms(parsed.process_started)
+            results.append(result)
 
-        return result
+        return results
 
     async def _publish_result(self, result: CrawlResult):
         """Persist crawl output outside fetch, parse, and finalize workers."""
@@ -1142,12 +1214,15 @@ class CrawlerEngine:
             ),
             liveness=self._finalizer_liveness,
             finalize_parsed_page=self._finalize_parsed_page,
+            finalize_parsed_pages=self._finalize_parsed_pages,
             finalize_skipped_task=self._finalize_skipped_task,
             finalize_failed_task=self._finalize_failed_task,
             publish_result=self._publish_result,
             record_timing=self._record_timing,
             progress=self._progress,
             format_timings=_format_timings,
+            success_batch_size=settings.finalizer_batch_size,
+            success_batch_wait_ms=settings.finalizer_batch_wait_ms,
         )
         await stage.run()
 

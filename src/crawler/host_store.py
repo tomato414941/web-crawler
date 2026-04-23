@@ -5,6 +5,8 @@ from __future__ import annotations
 import logging
 import time
 
+import psycopg2.extras
+
 from .host_state import PersistedHostState
 from .schema import assert_public_table_columns
 
@@ -224,6 +226,80 @@ class HostStore:
             row = cur.fetchone()
         self._conn.commit()
         return self._row_to_state(row)
+
+    def record_success_many(
+        self,
+        records: list[tuple[str, float | None]],
+        *,
+        now: float | None = None,
+    ) -> int:
+        """Reset failure-related state for multiple hosts in one transaction."""
+        timestamp = time.time() if now is None else now
+        grouped: dict[str, tuple[float | None, int]] = {}
+        for host_key, request_latency_ms in records:
+            if not host_key:
+                continue
+            _latency, count = grouped.get(host_key, (None, 0))
+            grouped[host_key] = (request_latency_ms, count + 1)
+        if not grouped:
+            return 0
+
+        host_rows = [
+            (host_key, self._default_delay, timestamp)
+            for host_key in sorted(grouped)
+        ]
+        update_rows = [
+            (host_key, request_latency_ms, sample_count, timestamp, timestamp)
+            for host_key, (request_latency_ms, sample_count) in sorted(grouped.items())
+        ]
+        with self._conn.cursor() as cur:
+            psycopg2.extras.execute_values(
+                cur,
+                """INSERT INTO host_state (host_key, crawl_delay_seconds, updated_at)
+                   VALUES %s
+                   ON CONFLICT (host_key) DO NOTHING""",
+                host_rows,
+                page_size=200,
+            )
+            psycopg2.extras.execute_values(
+                cur,
+                f"""UPDATE host_state AS state
+                    SET consecutive_failures = 0,
+                        backoff_until = 0,
+                        latency_ewma_ms = CASE
+                            WHEN incoming.request_latency_ms IS NULL THEN state.latency_ewma_ms
+                            WHEN state.latency_ewma_ms <= 0 THEN incoming.request_latency_ms
+                            ELSE state.latency_ewma_ms
+                                + ((incoming.request_latency_ms - state.latency_ewma_ms)
+                                   * {_LATENCY_EWMA_ALPHA})
+                        END,
+                        latency_last_ms = CASE
+                            WHEN incoming.request_latency_ms IS NULL THEN state.latency_last_ms
+                            ELSE incoming.request_latency_ms
+                        END,
+                        latency_observed_at = CASE
+                            WHEN incoming.request_latency_ms IS NULL THEN state.latency_observed_at
+                            ELSE incoming.observed_at
+                        END,
+                        latency_sample_count = CASE
+                            WHEN incoming.request_latency_ms IS NULL THEN state.latency_sample_count
+                            ELSE state.latency_sample_count + incoming.sample_count
+                        END,
+                        updated_at = incoming.updated_at
+                    FROM (VALUES %s) AS incoming(
+                        host_key,
+                        request_latency_ms,
+                        sample_count,
+                        observed_at,
+                        updated_at
+                    )
+                    WHERE state.host_key = incoming.host_key""",
+                update_rows,
+                template="(%s, %s, %s, %s, %s)",
+                page_size=200,
+            )
+        self._conn.commit()
+        return len(grouped)
 
     def record_failure(
         self,
