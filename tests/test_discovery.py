@@ -4,13 +4,18 @@ from crawler.discovery import (
     ARCHETYPE_DOCUMENT_PAGE,
     ARCHETYPE_REDIRECT_HUB,
     ARCHETYPE_REGISTRY_LISTING,
+    ADMISSION_REASON_CANDIDATE,
+    ADMISSION_REASON_NOFOLLOW_PARENT,
     EXTERNAL_DISCOVERY_VALUE,
+    PARENT_CONTEXT_LOW_SIGNAL,
+    PARENT_CONTEXT_NOFOLLOW,
     PageSignals,
     SAME_HOST_DISCOVERY_VALUE,
     SEED_HOST_DISCOVERY_VALUE,
     SEED_DISCOVERY_VALUE,
     classify_parent_archetype,
     classify_url_archetype,
+    decide_discovered_url_admission,
     rank_discovered_url,
     rank_seed_url,
     seed_hosts_from_urls,
@@ -89,6 +94,8 @@ def test_rank_discovered_url_downgrades_bulk_data_paths():
     )
 
     assert result.discovery_value < 0.75
+    assert result.archetype == ARCHETYPE_REGISTRY_LISTING
+    assert result.parent_context == PARENT_CONTEXT_LOW_SIGNAL
 
 
 def test_rank_discovered_url_downgrades_redirect_hubs():
@@ -126,6 +133,7 @@ def test_rank_discovered_url_uses_parent_page_signals():
 
     assert result.discovery_value < EXTERNAL_DISCOVERY_VALUE
     assert result.discovery_value >= 0.25
+    assert result.parent_context == PARENT_CONTEXT_NOFOLLOW
     assert (
         classify_parent_archetype(
             "https://example.com/archive/",
@@ -138,3 +146,37 @@ def test_rank_discovered_url_uses_parent_page_signals():
         )
         == ARCHETYPE_REGISTRY_LISTING
     )
+
+
+def test_decide_discovered_url_admission_admits_candidate():
+    result = decide_discovered_url_admission(
+        parent_url="https://example.com/",
+        url="https://example.com/doc/rfc9000",
+        seed_hosts={"example.com"},
+        min_discovery_value=0.5,
+        low_value_archetype_min_discovery_value=1.0,
+    )
+
+    assert result.admitted is True
+    assert result.reason == ADMISSION_REASON_CANDIDATE
+    assert result.archetype == ARCHETYPE_DOCUMENT_PAGE
+
+
+def test_decide_discovered_url_admission_rejects_explained_low_value():
+    result = decide_discovered_url_admission(
+        parent_url="https://example.com/archive/",
+        url="https://example.net/archive/index",
+        seed_hosts={"example.com"},
+        parent_signals=PageSignals(
+            content_type="text/html",
+            content_length=900_000,
+            title="Archive Table Index",
+            meta_robots="nofollow",
+        ),
+        min_discovery_value=0.5,
+        low_value_archetype_min_discovery_value=1.0,
+    )
+
+    assert result.admitted is False
+    assert result.reason == ADMISSION_REASON_NOFOLLOW_PARENT
+    assert result.parent_context == PARENT_CONTEXT_NOFOLLOW

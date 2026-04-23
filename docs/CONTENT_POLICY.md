@@ -67,8 +67,10 @@ sample. This keeps the crawler from becoming an unbounded page-body archive.
 Extracting links does not mean admitting every link. Each page applies bounded discovery:
 
 - ignore links below the minimum discovery value
+- reject low-value URL archetypes unless they clear a stronger value threshold
 - cap total admitted links per page
 - cap admitted links per target host per page
+- record admission reasons such as value rejection, page cap, target-host cap, and parent nofollow context
 
 `outlink_count` records the number of extracted links. `stored_outlink_count` and `outlinks` record
 the bounded set kept for scheduler admission and API inspection.

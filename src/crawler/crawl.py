@@ -18,7 +18,13 @@ import typer
 from .config import settings
 from .content_policy import should_extract_links, should_store_text_content
 from .core import HttpFetcher, Response
-from .discovery import PageSignals, rank_discovered_url, rank_seed_url, seed_hosts_from_urls
+from .discovery import (
+    DiscoveryAdmissionDecision,
+    PageSignals,
+    decide_discovered_url_admission,
+    rank_seed_url,
+    seed_hosts_from_urls,
+)
 from .error_stats import categorize_crawl_error
 from .host_manager import HostManager
 from .host_runnable_heads import (
@@ -602,45 +608,73 @@ class CrawlerEngine:
         parent_signals: PageSignals | None = None,
     ) -> list[CrawlTask]:
         """Assign ranking metadata to discovered outlinks before enqueueing."""
-        tasks: list[CrawlTask] = []
+        tasks, _counts = self._build_discovered_tasks_with_admission_counts(
+            parent_url,
+            links,
+            parent_signals=parent_signals,
+        )
+        return tasks
+
+    def _build_discovered_tasks_with_admission_counts(
+        self,
+        parent_url: str,
+        links: list[str],
+        parent_signals: PageSignals | None = None,
+    ) -> tuple[list[CrawlTask], dict[str, int]]:
+        """Build admitted tasks and explain why discovered links were kept or rejected."""
+        admission_counts: Counter[str] = Counter()
+        admission_counts["extracted"] = len(links)
+        candidates: list[tuple[CrawlTask, DiscoveryAdmissionDecision]] = []
         for link in links:
             if not self._is_valid_url(link):
+                admission_counts["scope_filtered"] += 1
                 continue
-            decision = rank_discovered_url(
+            decision = decide_discovered_url_admission(
                 parent_url=parent_url,
                 url=link,
                 seed_hosts=self.seed_hosts,
                 parent_signals=parent_signals,
+                min_discovery_value=settings.min_discovery_value,
+                low_value_archetype_min_discovery_value=(
+                    settings.low_value_archetype_min_discovery_value
+                ),
             )
-            tasks.append(
-                CrawlTask(
-                    url=link,
-                    discovery_value=decision.discovery_value,
-                    runnable_surface=SCHEDULER_SURFACE_SCHEDULED,
-                    intent=INTENT_EXPLORE,
-                    source_url=parent_url,
+            if not decision.admitted:
+                admission_counts[decision.reason] += 1
+                continue
+            candidates.append(
+                (
+                    CrawlTask(
+                        url=link,
+                        discovery_value=decision.discovery_value,
+                        runnable_surface=SCHEDULER_SURFACE_SCHEDULED,
+                        intent=INTENT_EXPLORE,
+                        source_url=parent_url,
+                    ),
+                    decision,
                 )
             )
-        tasks.sort(key=lambda task: (-task.discovery_value, task.url))
+        candidates.sort(key=lambda item: (-item[0].discovery_value, item[0].url))
 
         selected: list[CrawlTask] = []
         target_host_counts: Counter[str] = Counter()
         total_limit = settings.max_discovered_urls_per_page
         per_host_limit = settings.max_discovered_urls_per_target_host_per_page
-        for task in tasks:
-            if task.discovery_value < settings.min_discovery_value:
+        for task, _decision in candidates:
+            if total_limit > 0 and len(selected) >= total_limit:
+                admission_counts["per_page_cap"] += 1
                 continue
             target_host = urlparse(task.url).netloc.lower()
             if per_host_limit > 0 and target_host_counts[target_host] >= per_host_limit:
+                admission_counts["per_target_host_cap"] += 1
                 continue
             selected.append(task)
             target_host_counts[target_host] += 1
-            if total_limit > 0 and len(selected) >= total_limit:
-                break
 
         if hasattr(self.scheduler, "preview_tasks"):
-            return self.scheduler.preview_tasks(selected)
-        return selected
+            selected = self.scheduler.preview_tasks(selected)
+        admission_counts["admitted"] = len(selected)
+        return selected, dict(admission_counts)
 
     def _finalize_skipped_sync(self, skipped: _SkippedTask) -> FinalizerTelemetry:
         """Apply durable scheduler mutation for a skipped crawl."""
@@ -925,10 +959,10 @@ class CrawlerEngine:
         self,
         task: CrawlTask,
         response: Response,
-    ) -> tuple[str, list[str], list[CrawlTask], int]:
+    ) -> tuple[str, list[str], list[CrawlTask], int, dict[str, int]]:
         """Prepare parsed content and discovered tasks away from the event loop."""
         if getattr(response, "metadata_only", False):
-            return "", [], [], 0
+            return "", [], [], 0, {}
 
         content = (
             response.text
@@ -940,6 +974,7 @@ class CrawlerEngine:
         )
         outlinks: list[str] = []
         new_tasks: list[CrawlTask] = []
+        admission_counts: dict[str, int] = {}
 
         if should_extract_links(
             _response_header(response, "content-type"),
@@ -947,7 +982,7 @@ class CrawlerEngine:
         ):
             links = extract_links(response.text, response.url)
             page_signals = self._build_page_signals(response)
-            new_tasks = self._build_discovered_tasks(
+            new_tasks, admission_counts = self._build_discovered_tasks_with_admission_counts(
                 task.url,
                 links,
                 parent_signals=page_signals,
@@ -957,7 +992,7 @@ class CrawlerEngine:
         else:
             outlink_count = 0
 
-        return content, outlinks, new_tasks, outlink_count
+        return content, outlinks, new_tasks, outlink_count, admission_counts
 
     async def _parse_fetched_page(self, fetched: _FetchedPage) -> _ParsedPage:
         """Parse fetched content into a publishable payload outside fetch workers."""
@@ -966,11 +1001,13 @@ class CrawlerEngine:
         timings = fetched.timings
 
         parse_started = time.perf_counter()
-        content, outlinks, new_tasks, outlink_count = await asyncio.to_thread(
+        content, outlinks, new_tasks, outlink_count, admission_counts = await asyncio.to_thread(
             self._prepare_parsed_payload,
             task,
             response,
         )
+        if admission_counts:
+            self._timing_summary.record_discovery_admission(admission_counts)
         timings.parse_ms = _elapsed_ms(parse_started)
 
         return _ParsedPage(
