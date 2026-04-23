@@ -497,6 +497,19 @@ class CrawlDaemon:
             "effective_scheduler_states": effective_scheduler_states,
         }
 
+    def _add_scheduler_runtime_views(
+        self,
+        payload: dict[str, object],
+        url_ledger: UrlLedger,
+    ) -> dict[str, object]:
+        """Attach scheduler readiness views to a runtime payload when available."""
+        try:
+            readiness = _daemon_readiness(url_ledger)
+            payload.update(self._scheduler_runtime_views(url_ledger, readiness=readiness))
+        except Exception:
+            logger.debug("Failed to attach scheduler runtime views", exc_info=True)
+        return payload
+
     def _repair_host_runnable_heads(self, url_ledger: UrlLedger) -> None:
         """Run bounded host-head repair before daemon cycle gating."""
         if self._host_head_repair_limit <= 0:
@@ -538,19 +551,34 @@ class CrawlDaemon:
         workers does not stall runtime visibility.
         """
         storage = PgStorage(self._postgres_dsn)
+        url_ledger = UrlLedger(storage.conn) if hasattr(storage, "conn") else None
         try:
             while not stop_event.is_set():
                 if engine._running:
-                    self._persist_runtime_payload(storage, engine.snapshot_runtime_stats())
+                    payload = engine.snapshot_runtime_stats()
+                    if url_ledger is not None:
+                        payload = self._add_scheduler_runtime_views(payload, url_ledger)
+                    self._persist_runtime_payload(storage, payload)
                 stop_event.wait(1.0)
         finally:
             with contextlib.suppress(Exception):
-                self._persist_runtime_payload(storage, engine.snapshot_runtime_stats())
+                payload = engine.snapshot_runtime_stats()
+                if url_ledger is not None:
+                    payload = self._add_scheduler_runtime_views(payload, url_ledger)
+                self._persist_runtime_payload(storage, payload)
             storage.close()
 
-    def _flush_runtime_stats(self, storage: PgStorage, engine: CrawlerEngine) -> None:
+    def _flush_runtime_stats(
+        self,
+        storage: PgStorage,
+        engine: CrawlerEngine,
+        url_ledger: UrlLedger | None = None,
+    ) -> None:
         """Store one last runtime snapshot on cycle boundaries."""
-        self._persist_runtime_payload(storage, engine.snapshot_runtime_stats())
+        payload = engine.snapshot_runtime_stats()
+        if url_ledger is not None:
+            payload = self._add_scheduler_runtime_views(payload, url_ledger)
+        self._persist_runtime_payload(storage, payload)
 
     async def _connect(self) -> tuple[PgStorage | None, UrlLedger | None]:
         """Connect to Postgres and initialize scheduler state."""
@@ -620,7 +648,7 @@ class CrawlDaemon:
                 seed_urls=self._seeds,
             ) as engine:
                 self._engine = engine
-                self._flush_runtime_stats(runtime_storage, engine)
+                self._flush_runtime_stats(runtime_storage, engine, url_ledger)
                 reporter_stop = threading.Event()
                 reporter = threading.Thread(
                     target=self._report_runtime_stats,
@@ -633,7 +661,7 @@ class CrawlDaemon:
                 finally:
                     reporter_stop.set()
                     reporter.join(timeout=2.0)
-                    self._flush_runtime_stats(runtime_storage, engine)
+                    self._flush_runtime_stats(runtime_storage, engine, url_ledger)
                     self._engine = None
                 return (
                     engine.pages_crawled,
