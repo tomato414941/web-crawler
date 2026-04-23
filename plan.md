@@ -176,20 +176,47 @@ The bounded-storage and bounded-discovery changes removed the old disk-filling f
 is no longer an unbounded text archive, `page_content` is tier-capped, and extracted links are not
 automatically admitted into the scheduler. The remaining production questions are operational:
 
-- whether `finalize_queue_wait_ms` falls after success-finalizer batching is deployed.
-- whether actual `finalizer_batch_size` values are high enough to reduce DB round trips.
 - whether URL frontier growth remains appropriate for the intended broad-WWW crawl scope.
 - whether stored bytes, relation sizes, and disk usage remain bounded during sustained crawling.
-- whether fetch/robots latency, not DB mutation throughput, becomes the dominant speed limit after
-  finalizer backpressure is reduced.
+- whether publisher persistence, fetch/robots latency, or scheduler mutation throughput is the
+  dominant speed limit under sustained load.
+
+Latest production sample after deploying success-finalizer batching in `838c8ab`:
+
+- API health returned `ok`; no recent traceback/exception/critical/panic logs were observed.
+- Previous crawl cycle throughput was about 4.6 pages/second at concurrency 24.
+- Success finalizer batching is active:
+  - average batch size: 7.3.
+  - p95 batch size: 16.
+  - max batch size: 16.
+- Finalizer mutation body is no longer the obvious single bottleneck:
+  - `finalizer.total_ms` p95: about 353 ms.
+  - `finalize_queue_wait_ms` p95 during the observed draining cycle: about 4.2 seconds.
+  - `publish_queue_wait_ms` p95 during the same cycle: about 10.7 seconds.
+- Current DB/disk shape:
+  - pages: about 3.4k.
+  - URL ledger rows: about 49k.
+  - stored content bytes: about 194 MB.
+  - relation sizes: `pages` about 9 MB, `page_content` about 82 MB, `url_ledger` about 19 MB.
+  - root disk usage: about 6.2 GB of 38 GB, 18%.
+
+Interpretation:
+
+- Batching succeeded mechanically: the crawler reaches full 16-page finalizer batches in production.
+- The old one-page-at-a-time finalizer mutation path is no longer the cleanest explanation for
+  slowness.
+- End-to-end backpressure has moved toward the publish/persist path and the interaction between full
+  queues, scheduler mutation, and storage writes.
+- The next speed work should focus on persistence throughput and a repeatable observation command,
+  not another broad conceptual rewrite.
 
 ## Next candidates
 
-- Evaluate the success-finalizer batching deployment with:
-  - API health and recent error logs.
-  - `finalize_queue_wait_ms` p50/p95/max.
-  - `finalizer_batch_size` count/avg/p95/max.
-  - page throughput and active queue depths.
+- Investigate publisher/persistence backpressure:
+  - whether page saves are serialized too strongly.
+  - whether `page_content` writes dominate p95 latency.
+  - whether publisher worker count, queue size, or batching should change.
+  - whether storage telemetry needs a sub-stage breakdown similar to finalizer telemetry.
 - Add a repeatable production observation command for:
   - URL ledger growth over time.
   - stored content growth over time.
