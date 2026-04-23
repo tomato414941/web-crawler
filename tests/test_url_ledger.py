@@ -205,6 +205,7 @@ class TestUrlLedger:
             cur.execute(f"DROP TABLE IF EXISTS {HOST_LEDGER_TABLE}")
             cur.execute("DROP TABLE IF EXISTS host_state")
             cur.execute("DROP TABLE IF EXISTS crawler_runtime_stats")
+            cur.execute("DROP TABLE IF EXISTS page_content")
             cur.execute("DROP TABLE IF EXISTS pages")
         conn.commit()
         conn.close()

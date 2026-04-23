@@ -5,6 +5,7 @@ import asyncio
 import pytest
 
 from crawler.core import Response
+from crawler.config import settings
 from crawler.crawl import CrawlerEngine
 from crawler.url_ledger import (
     CrawlTask,
@@ -187,6 +188,38 @@ class FakeFetcher:
         if self.delay:
             await asyncio.sleep(self.delay)
         return self.responses.pop(0)
+
+
+def test_discovered_tasks_are_capped_by_value_total_and_target_host(monkeypatch):
+    monkeypatch.setattr(settings, "min_discovery_value", 0.5)
+    monkeypatch.setattr(settings, "max_discovered_urls_per_page", 4)
+    monkeypatch.setattr(settings, "max_discovered_urls_per_target_host_per_page", 2)
+    ledger = FakeLedger([])
+    engine = CrawlerEngine(
+        start_url="https://seed.example/",
+        same_host=False,
+        url_ledger=ledger,
+        host_manager=FakeHostManager(),
+    )
+
+    links = [
+        "https://a.example/docs/1",
+        "https://a.example/docs/2",
+        "https://a.example/docs/3",
+        "https://b.example/docs/1",
+        "https://b.example/docs/2",
+        "https://c.example/redirect/1",
+    ]
+
+    tasks = engine._build_discovered_tasks("https://seed.example/", links)
+
+    assert [task.url for task in tasks] == [
+        "https://a.example/docs/1",
+        "https://a.example/docs/2",
+        "https://b.example/docs/1",
+        "https://b.example/docs/2",
+    ]
+    assert all(task.discovery_value >= 0.5 for task in tasks)
 
 
 @pytest.mark.asyncio

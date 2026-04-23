@@ -46,6 +46,7 @@ def _reset_schema(dsn: str) -> None:
             cur.execute(f"DROP TABLE IF EXISTS public.{LEASE_TABLE}")
             cur.execute(f"DROP TABLE IF EXISTS public.{URL_LEDGER_TABLE} CASCADE")
             cur.execute("DROP TABLE IF EXISTS public.crawler_runtime_stats")
+            cur.execute("DROP TABLE IF EXISTS public.page_content")
             cur.execute("DROP TABLE IF EXISTS public.pages")
         conn.commit()
     finally:
@@ -121,14 +122,13 @@ def test_save_drops_nul_content_to_metadata_only(pg_storage):
 
     assert pg_storage.save(result) is True
 
-    with pg_storage._conn.cursor() as cur:
-        cur.execute(
-            "SELECT title, content FROM pages WHERE url = %s", ("https://example.com/file.pdf",)
-        )
-        title, content = cur.fetchone()
+    listed = pg_storage.list_pages()
+    page = pg_storage.get_page(listed[0]["url_hash"])
 
-    assert title is None
-    assert content == ""
+    assert page["title"] is None
+    assert page["content"] == ""
+    assert page["storage_tier"] == "metadata_only"
+    assert page["stored_content_bytes"] == 0
 
 
 def test_get_stats_includes_scheduler_breakdown(pg_storage):

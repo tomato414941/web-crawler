@@ -41,6 +41,7 @@ class TestHostLedgerStore:
             cur.execute("DROP TABLE IF EXISTS schema_migrations")
             cur.execute(f"DROP TABLE IF EXISTS {HOST_LEDGER_TABLE}")
             cur.execute(f"DROP TABLE IF EXISTS {URL_LEDGER_TABLE} CASCADE")
+            cur.execute("DROP TABLE IF EXISTS page_content")
             cur.execute("DROP TABLE IF EXISTS pages")
         conn.commit()
         conn.close()

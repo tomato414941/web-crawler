@@ -58,6 +58,9 @@ class CrawlResult:
     content: str
     outlinks: list[str]
     timings: CrawlStageTimings | None = None
+    content_type: str = ""
+    discovery_value: float = 1.0
+    outlink_count: int | None = None
 
     def to_dict(self, include_content: bool = True) -> dict[str, Any]:
         """Convert result to a plain dict."""

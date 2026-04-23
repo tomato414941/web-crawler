@@ -1,12 +1,11 @@
 # web-crawler plan
 
-## Current milestone: harden crawl pipeline and scheduler boundaries
+## Current milestone: bounded storage and frontier growth
 
-The crawler is now past the migration cleanup, host-first read-model deployment, and first
-pipeline-stage extraction work. Speed is not the immediate focus for this slice. The current focus
-is to prevent another silent pipeline stall or scheduler responsibility creep by making crawl
-pipeline stages, host runnable read-model boundaries, and URL scheduling responsibilities explicit,
-observable, and testable:
+The crawler is now past the migration cleanup, host-first read-model deployment, first
+pipeline-stage extraction, and scheduler service decomposition work. The production DB was reset
+after unbounded page-body storage and URL frontier growth filled the disk. The current focus is to
+make crawl storage and discovery breadth bounded before the crawler is restarted:
 
 - `CrawlerEngine` should orchestrate stages, not own every stage policy.
 - Pipeline queues should be bounded and owned by a dedicated runtime object.
@@ -22,6 +21,9 @@ observable, and testable:
 - `UrlLedger` should remain the public facade for URL state, not the owner of every scheduling
   strategy and mutation body.
 - Lease selection, scheduler admission, and requeue/recovery should be named scheduler services.
+- `pages` should be a lightweight page index, not an unbounded page-body archive.
+- Stored page text should live behind explicit storage tiers.
+- Link extraction should not imply admitting every discovered URL into the frontier.
 
 ## Completed in this slice
 
@@ -79,8 +81,22 @@ observable, and testable:
 - Added `SchedulerRequeueService` and moved requeue/recovery mutations out of `UrlLedger`:
   - lease recovery, failed-URL retry requeue, refresh requeue, blocked-host backoff insertion, and
     seed upsert/requeue now live behind a named service.
-- Kept database schema, public API, runtime telemetry, and deployment behavior unchanged for this
-  refactor slice.
+- Kept database schema, public API, runtime telemetry, and deployment behavior unchanged for the
+  scheduler-decomposition refactor slice.
+- Split stored page text out of `pages` into `page_content`:
+  - `pages` now records page metadata, storage tier, stored byte count, truncation, and outlink
+    counts.
+  - `page_content` stores only the bounded text payload for pages that keep text.
+- Added storage tiering for crawled text:
+  - `metadata_only` stores no text body.
+  - `summary` stores a small sample for low-value or oversized pages.
+  - `standard` stores normal text pages within a bounded budget.
+  - `extended` stores larger samples only for high-discovery-value pages.
+- Added discovery breadth caps:
+  - minimum discovery value before admission.
+  - maximum admitted links per page.
+  - maximum admitted links per target host per page.
+  - `outlink_count` records extracted links while stored `outlinks` records admitted links.
 
 ## Verification
 
@@ -115,12 +131,17 @@ observable, and testable:
   lease recovery, requeue, blocked-backoff insertion, or seed requeue.
 - Scheduler services are constructed lazily for tests that instantiate `UrlLedger` with `__new__`,
   while normal runtime construction wires the services eagerly.
-- No schema migration or caller migration was required for this slice.
 - Existing tests covering scheduler stats, lease diagnostics, retry transitions, and runtime stats pass.
 - No production speed change was required for this slice.
+- Fresh and migrated schemas converge on `pages` plus `page_content`.
+- `/pages/{url_hash}` still returns `content` through a join, preserving API shape.
+- Storage policy and discovery cap behavior have direct unit coverage.
 
 ## Next candidates
 
+- Restart crawler only after production migration and bounded-storage smoke checks pass.
+- Watch `stored_content_bytes`, storage tier distribution, and URL ledger growth during the first
+  production crawl cycle.
 - Remove compatibility private wrappers from `UrlLedger` only after tests and internal callers stop
   patching or calling those private methods directly.
 - Continue reducing `UrlLedger` facade breadth around host-head operations and URL discovery/update
