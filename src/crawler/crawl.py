@@ -621,9 +621,26 @@ class CrawlerEngine:
                     source_url=parent_url,
                 )
             )
+        tasks.sort(key=lambda task: (-task.discovery_value, task.url))
+
+        selected: list[CrawlTask] = []
+        target_host_counts: Counter[str] = Counter()
+        total_limit = settings.max_discovered_urls_per_page
+        per_host_limit = settings.max_discovered_urls_per_target_host_per_page
+        for task in tasks:
+            if task.discovery_value < settings.min_discovery_value:
+                continue
+            target_host = urlparse(task.url).netloc.lower()
+            if per_host_limit > 0 and target_host_counts[target_host] >= per_host_limit:
+                continue
+            selected.append(task)
+            target_host_counts[target_host] += 1
+            if total_limit > 0 and len(selected) >= total_limit:
+                break
+
         if hasattr(self.scheduler, "preview_tasks"):
-            return self.scheduler.preview_tasks(tasks)
-        return tasks
+            return self.scheduler.preview_tasks(selected)
+        return selected
 
     def _finalize_skipped_sync(self, skipped: _SkippedTask) -> FinalizerTelemetry:
         """Apply durable scheduler mutation for a skipped crawl."""
@@ -908,10 +925,10 @@ class CrawlerEngine:
         self,
         task: CrawlTask,
         response: Response,
-    ) -> tuple[str, list[str], list[CrawlTask]]:
+    ) -> tuple[str, list[str], list[CrawlTask], int]:
         """Prepare parsed content and discovered tasks away from the event loop."""
         if getattr(response, "metadata_only", False):
-            return "", [], []
+            return "", [], [], 0
 
         content = (
             response.text
@@ -929,15 +946,18 @@ class CrawlerEngine:
             response.content,
         ):
             links = extract_links(response.text, response.url)
-            outlinks = links
             page_signals = self._build_page_signals(response)
             new_tasks = self._build_discovered_tasks(
                 task.url,
                 links,
                 parent_signals=page_signals,
             )
+            outlinks = [new_task.url for new_task in new_tasks]
+            outlink_count = len(links)
+        else:
+            outlink_count = 0
 
-        return content, outlinks, new_tasks
+        return content, outlinks, new_tasks, outlink_count
 
     async def _parse_fetched_page(self, fetched: _FetchedPage) -> _ParsedPage:
         """Parse fetched content into a publishable payload outside fetch workers."""
@@ -946,7 +966,7 @@ class CrawlerEngine:
         timings = fetched.timings
 
         parse_started = time.perf_counter()
-        content, outlinks, new_tasks = await asyncio.to_thread(
+        content, outlinks, new_tasks, outlink_count = await asyncio.to_thread(
             self._prepare_parsed_payload,
             task,
             response,
@@ -966,6 +986,9 @@ class CrawlerEngine:
                 content=content,
                 outlinks=outlinks,
                 timings=timings,
+                content_type=_response_header(response, "content-type"),
+                discovery_value=task.discovery_value,
+                outlink_count=outlink_count,
             ),
         )
 

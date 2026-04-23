@@ -39,6 +39,14 @@ class CrawlerSettings(BaseSettings):
     daemon_host_head_repair_limit: int = 64
     daemon_host_head_dirty_refresh_limit: int = 2048
     execution_probing_worker_ratio: float = 0.2
+    stored_content_summary_bytes: int = 32_768
+    stored_content_standard_bytes: int = 262_144
+    stored_content_extended_bytes: int = 1_048_576
+    stored_content_standard_min_discovery_value: float = 1.0
+    stored_content_extended_min_discovery_value: float = 1.4
+    max_discovered_urls_per_page: int = 200
+    max_discovered_urls_per_target_host_per_page: int = 8
+    min_discovery_value: float = 0.5
 
     model_config = {"env_prefix": "CRAWLER_"}
 

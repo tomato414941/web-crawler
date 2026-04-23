@@ -46,6 +46,7 @@ def _reset_schema(dsn: str) -> None:
             cur.execute(f"DROP TABLE IF EXISTS public.{LEASE_TABLE}")
             cur.execute(f"DROP TABLE IF EXISTS public.{URL_LEDGER_TABLE} CASCADE")
             cur.execute("DROP TABLE IF EXISTS public.crawler_runtime_stats")
+            cur.execute("DROP TABLE IF EXISTS public.page_content")
             cur.execute("DROP TABLE IF EXISTS public.pages")
         conn.commit()
     finally:
@@ -67,6 +68,7 @@ def test_apply_migrations_creates_expected_tables(migrated_dsn):
         "001_schema.sql",
         "002_host_runnable_head_dirty_hosts.sql",
         "003_host_runnable_head_dirty_hosts_index.sql",
+        "004_page_content_storage.sql",
     ]
 
     conn = psycopg2.connect(migrated_dsn)
@@ -75,6 +77,7 @@ def test_apply_migrations_creates_expected_tables(migrated_dsn):
             cur.execute(
                 f"""
                 SELECT to_regclass('public.pages'),
+                       to_regclass('public.page_content'),
                        to_regclass('public.url_ledger'),
                        to_regclass('public.host_ledger'),
                        to_regclass('public.host_state'),
@@ -97,6 +100,7 @@ def test_apply_migrations_creates_expected_tables(migrated_dsn):
             )
             assert cur.fetchone() == (
                 "pages",
+                "page_content",
                 "url_ledger",
                 "host_ledger",
                 "host_state",
@@ -163,6 +167,31 @@ def test_apply_migrations_creates_current_url_ledger_columns(migrated_dsn):
         conn.close()
 
     assert "depth" not in page_columns
+    assert "content" not in page_columns
+    assert "content_type" in page_columns
+    assert "storage_tier" in page_columns
+    assert "storage_reason" in page_columns
+    assert "stored_content_bytes" in page_columns
+    assert "content_truncated" in page_columns
+    assert "outlink_count" in page_columns
+    assert "stored_outlink_count" in page_columns
+
+    conn = psycopg2.connect(migrated_dsn)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT column_name
+                FROM information_schema.columns
+                WHERE table_schema = 'public' AND table_name = 'page_content'
+                ORDER BY ordinal_position
+                """
+            )
+            page_content_columns = [column_name for (column_name,) in cur.fetchall()]
+    finally:
+        conn.close()
+
+    assert page_content_columns == ["url_hash", "content", "updated_at"]
 
     conn = psycopg2.connect(migrated_dsn)
     try:
