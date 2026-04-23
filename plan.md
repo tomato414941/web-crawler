@@ -132,6 +132,13 @@ The current focus is to keep the crawler honest under production load:
   - `CycleSnapshotBuilder` now owns runtime snapshot shaping instead of `CrawlerEngine`.
   - `PgStorage` now exposes explicit write/query/runtime-stats/diagnostics facades.
   - `UrlLedger` now exposes explicit store/kernel/topology facades behind the compatibility API.
+- Advanced the greenfield-alignment refactor from facade naming to ownership movement:
+  - publish and finalize execution now live in explicit `PublisherService` and `FinalizerService`
+    instead of inside `CrawlerEngine`.
+  - `PgStorage` compatibility methods now delegate back to owner facades, and diagnostics queries now
+    live in `DiagnosticsReader`.
+  - durable URL completion/failure mutation bodies now live in `UrlLedgerStore`, while `UrlLedger`
+    keeps the compatibility API and private wrappers.
 
 ## Verification
 
@@ -157,6 +164,12 @@ The current focus is to keep the crawler honest under production load:
   responsibilities now have explicit owners.
 - `UrlLedger` still exposes the same public API, but durable fact and live scheduler ownership now
   have named facade boundaries.
+- `CrawlerEngine` still exposes the same publish/finalize behavior, but the implementation bodies now
+  live in dedicated services.
+- `PgStorage` compatibility methods are now thin delegators; write/query/runtime/diagnostics owner
+  classes hold the real query and mutation bodies.
+- `UrlLedgerStore` is no longer only a delegating facade; it now owns the durable completion/failure
+  mutation bodies while `UrlLedger` keeps compatibility wrappers.
 - `admit_host_heads_ms` now measures set-based host-head differential refresh for admission.
 - Runtime stats expose `host_head_dirty_refresh` alongside bounded host-head repair.
   `remaining_hosts` shows whether dirty refresh is keeping up.
