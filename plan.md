@@ -120,6 +120,13 @@ The current focus is to keep the crawler honest under production load:
   - host success updates run through `HostStore.record_success_many`.
   - URL completion runs through `UrlLedger.mark_done_many`.
   - `timing_summary["counts"]["finalizer_batch_size"]` exposes actual batch sizes.
+- Added bounded publisher batching:
+  - publisher workers now coalesce nearby successful crawl results before persistence.
+  - `PgStorage.save_many()` applies `pages` upserts, `page_content` upserts/deletes, and commit once
+    per batch.
+  - batch persistence deduplicates repeated `url_hash` values inside one batch so last write wins and
+    `ON CONFLICT` remains valid.
+  - single-item `save()` now delegates to the batch path so storage semantics stay aligned.
 
 ## Verification
 
@@ -137,6 +144,8 @@ The current focus is to keep the crawler honest under production load:
   details in `CrawlerEngine` callbacks.
 - `timing_summary["finalizer"]` now exposes finalizer sub-stage p50/p95/max values.
 - `timing_summary["finalizer"]` now exposes admission sub-stage p50/p95/max values.
+- `timing_summary["publisher"]` now exposes publisher sub-stage p50/p95/max values.
+- `timing_summary["storage"]` now stays valid for both single-item and batched persistence.
 - `admit_host_heads_ms` now measures set-based host-head differential refresh for admission.
 - Runtime stats expose `host_head_dirty_refresh` alongside bounded host-head repair.
   `remaining_hosts` shows whether dirty refresh is keeping up.
@@ -258,6 +267,40 @@ Interpretation:
 - Executor dispatch wait is not the main problem; it stays comparatively small.
 - `publisher.save_run_ms` and `storage.total_ms` are effectively the same, so the wrapper confirms
   that save execution time is dominated by the same storage work already measured.
+
+Latest production sample after deploying batched publisher persistence in `3056c57` and the
+same-batch duplicate-write fix in `55e244e`:
+
+- API health returned `ok`; no recent traceback/exception/critical/panic logs were observed after
+  the duplicate-write fix.
+- Last completed crawl cycle throughput was about 9.6 pages/second at concurrency 24.
+- Publisher backlog no longer dominates the observed cycle:
+  - `publish_queue_wait_ms` p95: about 571 ms.
+  - `publish_queue_size` returned to 0 at cycle completion.
+- Batch save is active and now dominates publisher work directly:
+  - `publisher.save_dispatch_wait_ms` p95: about 5.9 ms.
+  - `publisher.save_run_ms` p95: about 254 ms.
+  - `storage.total_ms` p95: about 254 ms.
+  - `persist_ms` p95: about 563 ms.
+- Storage batch internals in the same cycle:
+  - `storage.page_content_ms` p95: about 163 ms.
+  - `storage.pages_upsert_ms` p95: about 22 ms.
+  - `storage.commit_ms` p95: about 18.8 ms.
+- Remaining queue pressure shifted upstream:
+  - `finalize_queue_wait_ms` p95: about 1241 ms.
+  - `parse_queue_wait_ms` p95: about 178 ms.
+
+Interpretation:
+
+- The old chronic publisher backlog is materially reduced; the queue is no longer stuck at large
+  steady-state depth.
+- Publisher batching improved end-to-end throughput from the earlier single-item persistence regime
+  and cut publish queue wait from multi-second territory into sub-second p95 for the observed cycle.
+- Publisher executor dispatch is still cheap; the dominant publisher cost is now real batched
+  storage work, especially `page_content` writes.
+- The next bottleneck is no longer "one save worker can only handle one page at a time". The next
+  speed work should look at finalizer backpressure, fetch/robots latency, and whether `page_content`
+  write cost should be reduced further.
 - The dominant remaining speed problem is queue-level publisher saturation: one publisher lane cannot
   drain results fast enough under the current crawl rate.
 - The next optimization step should move from instrumentation to throughput changes in the publisher
