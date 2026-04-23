@@ -420,93 +420,6 @@ class PageWriteStore:
         self,
         results: list[CrawlResult | Mapping[str, object]],
     ) -> list[StorageSaveResult]:
-        return self._storage._save_many_impl(results)
-
-    @property
-    def count(self) -> int:
-        return self._storage._count
-
-
-class PageQueryStore:
-    """Own page read queries."""
-
-    def __init__(self, storage: "PgStorage") -> None:
-        self._storage = storage
-
-    def list_pages(
-        self,
-        since: float = 0,
-        limit: int = 100,
-        offset: int = 0,
-        host: str | None = None,
-    ) -> list[dict]:
-        return self._storage._list_pages_impl(since=since, limit=limit, offset=offset, host=host)
-
-    def get_page(self, url_hash: str) -> dict | None:
-        return self._storage._get_page_impl(url_hash)
-
-
-class RuntimeStatsStore:
-    """Own persisted runtime snapshot reads and writes."""
-
-    def __init__(self, storage: "PgStorage") -> None:
-        self._storage = storage
-
-    def upsert(self, component: str, payload: Mapping[str, object]) -> None:
-        self._storage._upsert_runtime_stats_impl(component, payload)
-
-    def get(self, component: str | None = None) -> dict[str, object]:
-        return self._storage._get_runtime_stats_impl(component)
-
-    def summary(self) -> dict:
-        return self._storage._get_runtime_stats_summary_impl()
-
-
-class DiagnosticsReader:
-    """Own operator-facing diagnostics queries."""
-
-    def __init__(self, storage: "PgStorage") -> None:
-        self._storage = storage
-
-    def get_stats(self) -> dict:
-        return self._storage._get_stats_impl()
-
-
-class PgStorage:
-    """Store crawl results in Postgres."""
-
-    def __init__(self, dsn: str):
-        self._dsn = dsn
-        self._conn = psycopg2.connect(dsn)
-        self._conn.autocommit = False
-        assert_public_table_columns(self._conn, "pages", PAGES_REQUIRED_COLUMNS)
-        assert_public_table_columns(self._conn, "page_content", PAGE_CONTENT_REQUIRED_COLUMNS)
-        self._count = 0
-        self.page_writes = PageWriteStore(self)
-        self.page_queries = PageQueryStore(self)
-        self.runtime_stats = RuntimeStatsStore(self)
-        self.diagnostics = DiagnosticsReader(self)
-
-    def _finish_read(self) -> None:
-        """Close read-only transactions so API requests do not hold relation locks."""
-        self._conn.commit()
-
-    def save(self, result: CrawlResult | Mapping[str, object]) -> StorageSaveResult:
-        """Save a single crawl result and return persistence telemetry."""
-        return self.page_writes.save(result)
-
-    def save_many(
-        self,
-        results: list[CrawlResult | Mapping[str, object]],
-    ) -> list[StorageSaveResult]:
-        """Save multiple crawl results in one transaction."""
-        return self.page_writes.save_many(results)
-
-    def _save_many_impl(
-        self,
-        results: list[CrawlResult | Mapping[str, object]],
-    ) -> list[StorageSaveResult]:
-        """Save multiple crawl results in one transaction."""
         total_started = time.perf_counter()
         prepared_results = [_prepare_page_save(result) for result in results]
         prepared_pages = [
@@ -564,7 +477,7 @@ class PgStorage:
         ]
 
         try:
-            with self._conn.cursor() as cur:
+            with self._storage._conn.cursor() as cur:
                 pages_started = time.perf_counter()
                 psycopg2.extras.execute_values(
                     cur,
@@ -612,10 +525,10 @@ class PgStorage:
                     )
                 page_content_ms = _elapsed_ms(content_started)
             commit_started = time.perf_counter()
-            self._conn.commit()
+            self._storage._conn.commit()
             commit_ms = _elapsed_ms(commit_started)
             total_ms = _elapsed_ms(total_started)
-            self._count += len(prepared_pages)
+            self._storage._count += len(prepared_pages)
             save_results: list[StorageSaveResult] = []
             prepared_iter = iter(prepared_pages)
             for prepared in prepared_results:
@@ -630,18 +543,20 @@ class PgStorage:
                 save_results.append(StorageSaveResult(saved=True, telemetry=page.telemetry))
             return save_results
         except Exception:
-            self._conn.rollback()
+            self._storage._conn.rollback()
             logger.exception("Failed to save batch of %d pages", len(prepared_pages))
             raise
 
     @property
     def count(self) -> int:
-        return self._count
+        return self._storage._count
 
-    @property
-    def conn(self):
-        """Expose connection for the URL ledger (which shares the same Postgres)."""
-        return self._conn
+
+class PageQueryStore:
+    """Own page read queries."""
+
+    def __init__(self, storage: "PgStorage") -> None:
+        self._storage = storage
 
     def list_pages(
         self,
@@ -650,17 +565,6 @@ class PgStorage:
         offset: int = 0,
         host: str | None = None,
     ) -> list[dict]:
-        """List crawled pages with optional filters."""
-        return self.page_queries.list_pages(since=since, limit=limit, offset=offset, host=host)
-
-    def _list_pages_impl(
-        self,
-        since: float = 0,
-        limit: int = 100,
-        offset: int = 0,
-        host: str | None = None,
-    ) -> list[dict]:
-        """List crawled pages with optional filters."""
         conditions = ["crawled_at > %s"]
         params: list = [since]
 
@@ -672,7 +576,9 @@ class PgStorage:
         params.extend([limit, offset])
 
         try:
-            with self._conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            with self._storage._conn.cursor(
+                cursor_factory=psycopg2.extras.RealDictCursor
+            ) as cur:
                 cur.execute(
                     f"""SELECT url_hash, url, host, title, status, content_length,
                                content_type, outlinks, storage_tier, storage_reason,
@@ -684,83 +590,17 @@ class PgStorage:
                     params,
                 )
                 pages = [dict(row) for row in cur.fetchall()]
-            self._finish_read()
+            self._storage._finish_read()
             return pages
         except Exception:
-            self._conn.rollback()
-            raise
-
-    def upsert_runtime_stats(self, component: str, payload: Mapping[str, object]) -> None:
-        """Store runtime crawler stats for API consumption."""
-        self.runtime_stats.upsert(component, payload)
-
-    def _upsert_runtime_stats_impl(self, component: str, payload: Mapping[str, object]) -> None:
-        """Store runtime crawler stats for API consumption."""
-        try:
-            with self._conn.cursor() as cur:
-                cur.execute(
-                    """INSERT INTO crawler_runtime_stats (component, payload, updated_at)
-                       VALUES (%s, %s::jsonb, %s)
-                       ON CONFLICT (component) DO UPDATE SET
-                           payload = EXCLUDED.payload,
-                           updated_at = EXCLUDED.updated_at""",
-                    (component, json.dumps(dict(payload)), time.time()),
-                )
-            self._conn.commit()
-        except Exception:
-            self._conn.rollback()
-            logger.exception("Failed to update runtime stats for %s", component)
-
-    def get_runtime_stats(self, component: str | None = None) -> dict[str, object]:
-        """Fetch runtime crawler stats snapshots."""
-        return self.runtime_stats.get(component)
-
-    def _get_runtime_stats_impl(self, component: str | None = None) -> dict[str, object]:
-        """Fetch runtime crawler stats snapshots."""
-        try:
-            with self._conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                cur.execute("SELECT to_regclass('public.crawler_runtime_stats') AS table_name")
-                exists = cur.fetchone()["table_name"] is not None
-                if not exists:
-                    self._finish_read()
-                    return {}
-
-                if component is None:
-                    cur.execute("SELECT component, payload, updated_at FROM crawler_runtime_stats")
-                    rows = cur.fetchall()
-                    self._finish_read()
-                    return {
-                        row["component"]: {
-                            "payload": row["payload"],
-                            "updated_at": row["updated_at"],
-                        }
-                        for row in rows
-                    }
-
-                cur.execute(
-                    "SELECT payload, updated_at FROM crawler_runtime_stats WHERE component = %s",
-                    (component,),
-                )
-                row = cur.fetchone()
-            self._finish_read()
-            if not row:
-                return {}
-            return {
-                "payload": row["payload"],
-                "updated_at": row["updated_at"],
-            }
-        except Exception:
-            self._conn.rollback()
+            self._storage._conn.rollback()
             raise
 
     def get_page(self, url_hash: str) -> dict | None:
-        """Get a single page with full content."""
-        return self.page_queries.get_page(url_hash)
-
-    def _get_page_impl(self, url_hash: str) -> dict | None:
-        """Get a single page with full content."""
         try:
-            with self._conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            with self._storage._conn.cursor(
+                cursor_factory=psycopg2.extras.RealDictCursor
+            ) as cur:
                 cur.execute(
                     """SELECT pages.url_hash, pages.url, pages.host, pages.title,
                               COALESCE(page_content.content, '') AS content,
@@ -775,20 +615,77 @@ class PgStorage:
                     (url_hash,),
                 )
                 row = cur.fetchone()
-            self._finish_read()
+            self._storage._finish_read()
             return dict(row) if row else None
         except Exception:
-            self._conn.rollback()
+            self._storage._conn.rollback()
             raise
 
-    def get_runtime_stats_summary(self) -> dict:
-        """Get fast operator stats from the persisted runtime snapshot."""
-        return self.runtime_stats.summary()
 
-    def _get_runtime_stats_summary_impl(self) -> dict:
-        """Get fast operator stats from the persisted runtime snapshot."""
+class RuntimeStatsStore:
+    """Own persisted runtime snapshot reads and writes."""
+
+    def __init__(self, storage: "PgStorage") -> None:
+        self._storage = storage
+
+    def upsert(self, component: str, payload: Mapping[str, object]) -> None:
         try:
-            with self._conn.cursor() as cur:
+            with self._storage._conn.cursor() as cur:
+                cur.execute(
+                    """INSERT INTO crawler_runtime_stats (component, payload, updated_at)
+                       VALUES (%s, %s::jsonb, %s)
+                       ON CONFLICT (component) DO UPDATE SET
+                           payload = EXCLUDED.payload,
+                           updated_at = EXCLUDED.updated_at""",
+                    (component, json.dumps(dict(payload)), time.time()),
+                )
+            self._storage._conn.commit()
+        except Exception:
+            self._storage._conn.rollback()
+            logger.exception("Failed to update runtime stats for %s", component)
+
+    def get(self, component: str | None = None) -> dict[str, object]:
+        try:
+            with self._storage._conn.cursor(
+                cursor_factory=psycopg2.extras.RealDictCursor
+            ) as cur:
+                cur.execute("SELECT to_regclass('public.crawler_runtime_stats') AS table_name")
+                exists = cur.fetchone()["table_name"] is not None
+                if not exists:
+                    self._storage._finish_read()
+                    return {}
+
+                if component is None:
+                    cur.execute("SELECT component, payload, updated_at FROM crawler_runtime_stats")
+                    rows = cur.fetchall()
+                    self._storage._finish_read()
+                    return {
+                        row["component"]: {
+                            "payload": row["payload"],
+                            "updated_at": row["updated_at"],
+                        }
+                        for row in rows
+                    }
+
+                cur.execute(
+                    "SELECT payload, updated_at FROM crawler_runtime_stats WHERE component = %s",
+                    (component,),
+                )
+                row = cur.fetchone()
+            self._storage._finish_read()
+            if not row:
+                return {}
+            return {
+                "payload": row["payload"],
+                "updated_at": row["updated_at"],
+            }
+        except Exception:
+            self._storage._conn.rollback()
+            raise
+
+    def summary(self) -> dict:
+        try:
+            with self._storage._conn.cursor() as cur:
                 cur.execute(
                     """SELECT
                          count(*) as total_pages,
@@ -800,11 +697,11 @@ class PgStorage:
                        FROM pages"""
                 )
                 page_stats_row = cur.fetchone()
-            self._finish_read()
+            self._storage._finish_read()
 
-            runtime = self._get_runtime_stats_impl("crawler")
+            runtime = self.get("crawler")
         except Exception:
-            self._conn.rollback()
+            self._storage._conn.rollback()
             raise
 
         runtime_payload = _runtime_payload_dict(runtime)
@@ -861,14 +758,16 @@ class PgStorage:
             "operator_summary": operator_summary,
         }
 
-    def get_stats(self) -> dict:
-        """Get crawl statistics."""
-        return self.diagnostics.get_stats()
 
-    def _get_stats_impl(self) -> dict:
-        """Get crawl statistics."""
+class DiagnosticsReader:
+    """Own operator-facing diagnostics queries."""
+
+    def __init__(self, storage: "PgStorage") -> None:
+        self._storage = storage
+
+    def get_stats(self) -> dict:
         try:
-            with self._conn.cursor() as cur:
+            with self._storage._conn.cursor() as cur:
                 cur.execute(
                     "SET LOCAL statement_timeout = %s",
                     (DIAGNOSTIC_STATS_STATEMENT_TIMEOUT_MS,),
@@ -899,7 +798,6 @@ class PgStorage:
                 active_error_breakdown: dict[str, int] = {}
                 top_error_hosts: list[dict[str, object]] = []
                 runtime: dict[str, object] = {}
-                operator_summary: dict[str, object] = {}
                 effective_state_counts: dict[str, int] = {}
                 host_budget_summary: dict[str, object] = {}
                 pending_queue_sql = _pending_queue_sql()
@@ -913,22 +811,22 @@ class PgStorage:
                     )
                     runtime_row = cur.fetchone()
                     if runtime_row:
-                            runtime = {
-                                "payload": runtime_row[0],
-                                "updated_at": runtime_row[1],
-                            }
+                        runtime = {
+                            "payload": runtime_row[0],
+                            "updated_at": runtime_row[1],
+                        }
 
                 if url_ledger_exists:
                     cur.execute("SAVEPOINT scheduler_diagnostics")
                     try:
                         assert_public_table_columns(
-                            self._conn,
+                            self._storage._conn,
                             URL_LEDGER_TABLE,
                             URL_LEDGER_STATS_REQUIRED_COLUMNS,
                         )
 
                         observability = SchedulerObservability(
-                            self._conn,
+                            self._storage._conn,
                             physical_queue_tables=PHYSICAL_QUEUE_TABLES,
                             physical_queue_order=PHYSICAL_QUEUE_ORDER,
                             physical_queue_default_runnable_surface=PHYSICAL_QUEUE_DEFAULT_SCHEDULER_SURFACE,
@@ -1221,9 +1119,9 @@ class PgStorage:
                        LIMIT 10"""
                 )
                 top_page_hosts = [{"host": host, "count": count} for host, count in cur.fetchall()]
-            self._finish_read()
+            self._storage._finish_read()
         except Exception:
-            self._conn.rollback()
+            self._storage._conn.rollback()
             raise
 
         operator_summary = _build_operator_summary(
@@ -1267,6 +1165,106 @@ class PgStorage:
             "runtime": runtime,
             "operator_summary": operator_summary,
         }
+
+
+class PgStorage:
+    """Store crawl results in Postgres."""
+
+    def __init__(self, dsn: str):
+        self._dsn = dsn
+        self._conn = psycopg2.connect(dsn)
+        self._conn.autocommit = False
+        assert_public_table_columns(self._conn, "pages", PAGES_REQUIRED_COLUMNS)
+        assert_public_table_columns(self._conn, "page_content", PAGE_CONTENT_REQUIRED_COLUMNS)
+        self._count = 0
+        self.page_writes = PageWriteStore(self)
+        self.page_queries = PageQueryStore(self)
+        self.runtime_stats = RuntimeStatsStore(self)
+        self.diagnostics = DiagnosticsReader(self)
+
+    def _finish_read(self) -> None:
+        """Close read-only transactions so API requests do not hold relation locks."""
+        self._conn.commit()
+
+    def save(self, result: CrawlResult | Mapping[str, object]) -> StorageSaveResult:
+        """Save a single crawl result and return persistence telemetry."""
+        return self.page_writes.save(result)
+
+    def save_many(
+        self,
+        results: list[CrawlResult | Mapping[str, object]],
+    ) -> list[StorageSaveResult]:
+        """Save multiple crawl results in one transaction."""
+        return self.page_writes.save_many(results)
+
+    def _save_many_impl(
+        self,
+        results: list[CrawlResult | Mapping[str, object]],
+    ) -> list[StorageSaveResult]:
+        return self.page_writes.save_many(results)
+
+    @property
+    def count(self) -> int:
+        return self._count
+
+    @property
+    def conn(self):
+        """Expose connection for the URL ledger (which shares the same Postgres)."""
+        return self._conn
+
+    def list_pages(
+        self,
+        since: float = 0,
+        limit: int = 100,
+        offset: int = 0,
+        host: str | None = None,
+    ) -> list[dict]:
+        """List crawled pages with optional filters."""
+        return self.page_queries.list_pages(since=since, limit=limit, offset=offset, host=host)
+
+    def _list_pages_impl(
+        self,
+        since: float = 0,
+        limit: int = 100,
+        offset: int = 0,
+        host: str | None = None,
+    ) -> list[dict]:
+        return self.page_queries.list_pages(since=since, limit=limit, offset=offset, host=host)
+
+    def upsert_runtime_stats(self, component: str, payload: Mapping[str, object]) -> None:
+        """Store runtime crawler stats for API consumption."""
+        self.runtime_stats.upsert(component, payload)
+
+    def _upsert_runtime_stats_impl(self, component: str, payload: Mapping[str, object]) -> None:
+        self.runtime_stats.upsert(component, payload)
+
+    def get_runtime_stats(self, component: str | None = None) -> dict[str, object]:
+        """Fetch runtime crawler stats snapshots."""
+        return self.runtime_stats.get(component)
+
+    def _get_runtime_stats_impl(self, component: str | None = None) -> dict[str, object]:
+        return self.runtime_stats.get(component)
+
+    def get_page(self, url_hash: str) -> dict | None:
+        """Get a single page with full content."""
+        return self.page_queries.get_page(url_hash)
+
+    def _get_page_impl(self, url_hash: str) -> dict | None:
+        return self.page_queries.get_page(url_hash)
+
+    def get_runtime_stats_summary(self) -> dict:
+        """Get fast operator stats from the persisted runtime snapshot."""
+        return self.runtime_stats.summary()
+
+    def _get_runtime_stats_summary_impl(self) -> dict:
+        return self.runtime_stats.summary()
+
+    def get_stats(self) -> dict:
+        """Get crawl statistics."""
+        return self.diagnostics.get_stats()
+
+    def _get_stats_impl(self) -> dict:
+        return self.diagnostics.get_stats()
 
     def close(self):
         self._conn.close()

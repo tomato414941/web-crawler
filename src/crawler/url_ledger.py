@@ -330,10 +330,86 @@ class UrlLedgerStore:
         return changed
 
     def mark_done(self, url: str, lease_token: str | None = None) -> bool:
-        return self._ledger._mark_done_impl(url, lease_token=lease_token)
+        normalized = normalize_url(url)
+        now = time.time()
+        lease_sql, lease_params = self._ledger._leases.match_sql("ledger", lease_token)
+
+        with self._ledger._conn.cursor() as cur:
+            cur.execute(
+                f"""UPDATE {URL_LEDGER_TABLE} AS ledger
+                    SET next_fetch_at = %s,
+                        current_intent = NULL,
+                        last_success_at = %s,
+                        fail_streak = 0,
+                        last_error = NULL,
+                        terminal_reason = NULL,
+                        terminalized_at = NULL
+                    WHERE url = %s{lease_sql}
+                    RETURNING url, host""",
+                (now, now, normalized, *lease_params),
+            )
+            rows = cur.fetchall()
+            self._ledger._delete_queue_entries(cur, [row[0] for row in rows])
+            self._ledger._leases.delete(cur, [row[0] for row in rows])
+            for _url, host in rows:
+                self._ledger._host_ledger.record_success_in_tx(cur, host, at=now)
+            updated = bool(rows)
+        self._ledger._conn.commit()
+        return updated
 
     def mark_done_many(self, tasks: list[CrawlTask]) -> int:
-        return self._ledger._mark_done_many_impl(tasks)
+        rows_by_url: dict[str, tuple[str, str | None]] = {}
+        for task in tasks:
+            if task.url:
+                normalized = normalize_url(task.url)
+                rows_by_url[normalized] = (normalized, task.lease_token)
+        now = time.time()
+        rows = [
+            (normalized, lease_token, now, now)
+            for normalized, lease_token in rows_by_url.values()
+        ]
+        if not rows:
+            return 0
+
+        with self._ledger._conn.cursor() as cur:
+            psycopg2.extras.execute_values(
+                cur,
+                f"""WITH incoming(url, lease_token, next_fetch_at, last_success_at) AS (VALUES %s),
+                    updated AS (
+                        UPDATE {URL_LEDGER_TABLE} AS ledger
+                        SET next_fetch_at = incoming.next_fetch_at,
+                            current_intent = NULL,
+                            last_success_at = incoming.last_success_at,
+                            fail_streak = 0,
+                            last_error = NULL,
+                            terminal_reason = NULL,
+                            terminalized_at = NULL
+                        FROM incoming
+                        WHERE ledger.url = incoming.url
+                          AND (
+                              incoming.lease_token IS NULL
+                              OR EXISTS (
+                                  SELECT 1
+                                  FROM {LEASE_TABLE} AS active
+                                  WHERE active.url = ledger.url
+                                    AND active.lease_token = incoming.lease_token
+                              )
+                          )
+                        RETURNING ledger.url, ledger.host
+                    )
+                    SELECT url, host FROM updated""",
+                rows,
+                template="(%s, %s, %s, %s)",
+                page_size=200,
+            )
+            updated_rows = list(cur.fetchall())
+            updated_urls = [row[0] for row in updated_rows]
+            self._ledger._delete_queue_entries(cur, updated_urls)
+            self._ledger._leases.delete(cur, updated_urls)
+            for _url, host in updated_rows:
+                self._ledger._host_ledger.record_success_in_tx(cur, host, at=now)
+        self._ledger._conn.commit()
+        return len(updated_rows)
 
     def mark_failed(
         self,
@@ -343,13 +419,90 @@ class UrlLedgerStore:
         backoff_seconds: float | None = None,
         lease_token: str | None = None,
     ) -> bool:
-        return self._ledger._mark_failed_impl(
-            url,
-            retryable=retryable,
-            error=error,
-            backoff_seconds=backoff_seconds,
-            lease_token=lease_token,
-        )
+        normalized = normalize_url(url)
+        now = time.time()
+        lease_sql, lease_params = self._ledger._leases.match_sql("ledger", lease_token)
+
+        with self._ledger._conn.cursor() as cur:
+            cur.execute(
+                f"SELECT fail_streak, discovery_value, host FROM {URL_LEDGER_TABLE} AS ledger WHERE url = %s{lease_sql} FOR UPDATE",
+                (normalized, *lease_params),
+            )
+            row = cur.fetchone()
+            if row is None:
+                self._ledger._conn.rollback()
+                return False
+
+            transition = self._ledger._scheduler_retry_policy().failure_transition(
+                fail_streak=row[0],
+                discovery_value=row[1],
+                retryable=retryable,
+                error=error,
+                backoff_seconds=backoff_seconds,
+                now=now,
+            )
+
+            if transition.retryable:
+                cur.execute(
+                    f"""UPDATE {URL_LEDGER_TABLE} AS ledger
+                        SET next_fetch_at = %s,
+                            current_intent = %s,
+                            fail_streak = %s,
+                            last_error = %s,
+                            terminal_reason = NULL,
+                            terminalized_at = NULL
+                        WHERE url = %s{lease_sql}
+                        RETURNING url, host, %s::real AS scheduler_score, next_fetch_at, added_at""",
+                    (
+                        transition.next_fetch_at,
+                        transition.current_intent,
+                        transition.next_fail_streak,
+                        transition.last_error,
+                        normalized,
+                        *lease_params,
+                        transition.next_scheduler_score,
+                    ),
+                )
+                rows = cur.fetchall()
+                for _url, host, *_rest in rows:
+                    self._ledger._host_ledger.record_failure_in_tx(cur, host, at=now)
+                pending_rows = self._ledger._pending_rows_for_physical_queue(
+                    rows,
+                    self._ledger._single_physical_queue_for_surface(SCHEDULER_SURFACE_SCHEDULED),
+                )
+                self._ledger._membership.replace_pending_rows(cur, pending_rows)
+                self._ledger._leases.delete(cur, self._ledger._membership.row_urls(pending_rows))
+                updated = bool(rows)
+            else:
+                cur.execute(
+                    f"""UPDATE {URL_LEDGER_TABLE} AS ledger
+                        SET next_fetch_at = %s,
+                            current_intent = NULL,
+                            fail_streak = %s,
+                            last_error = %s,
+                            terminal_reason = %s,
+                            terminalized_at = %s
+                        WHERE url = %s{lease_sql}
+                        RETURNING url, host""",
+                    (
+                        transition.next_fetch_at,
+                        transition.next_fail_streak,
+                        transition.last_error,
+                        transition.terminal_reason,
+                        transition.terminalized_at,
+                        normalized,
+                        *lease_params,
+                    ),
+                )
+                rows = cur.fetchall()
+                urls = [row[0] for row in rows]
+                self._ledger._delete_queue_entries(cur, urls)
+                self._ledger._leases.delete(cur, urls)
+                for _url, host in rows:
+                    self._ledger._host_ledger.record_failure_in_tx(cur, host, at=now)
+                updated = bool(rows)
+        self._ledger._conn.commit()
+        return updated
 
 
 class SchedulerKernel:
@@ -1673,32 +1826,7 @@ class UrlLedger:
 
     def _mark_done_impl(self, url: str, lease_token: str | None = None) -> bool:
         """Mark a URL as successfully crawled."""
-        normalized = normalize_url(url)
-        now = time.time()
-        lease_sql, lease_params = self._leases.match_sql("ledger", lease_token)
-
-        with self._conn.cursor() as cur:
-            cur.execute(
-                f"""UPDATE {URL_LEDGER_TABLE} AS ledger
-                    SET next_fetch_at = %s,
-                        current_intent = NULL,
-                        last_success_at = %s,
-                        fail_streak = 0,
-                        last_error = NULL,
-                        terminal_reason = NULL,
-                        terminalized_at = NULL
-                    WHERE url = %s{lease_sql}
-                    RETURNING url, host""",
-                (now, now, normalized, *lease_params),
-            )
-            rows = cur.fetchall()
-            self._delete_queue_entries(cur, [row[0] for row in rows])
-            self._leases.delete(cur, [row[0] for row in rows])
-            for _url, host in rows:
-                self._host_ledger.record_success_in_tx(cur, host, at=now)
-            updated = bool(rows)
-        self._conn.commit()
-        return updated
+        return self._store.mark_done(url, lease_token=lease_token)
 
     def mark_done_many(self, tasks: list[CrawlTask]) -> int:
         """Mark multiple leased URLs as successfully crawled in one transaction."""
@@ -1706,58 +1834,7 @@ class UrlLedger:
 
     def _mark_done_many_impl(self, tasks: list[CrawlTask]) -> int:
         """Mark multiple leased URLs as successfully crawled in one transaction."""
-        rows_by_url: dict[str, tuple[str, str | None]] = {}
-        for task in tasks:
-            if task.url:
-                normalized = normalize_url(task.url)
-                rows_by_url[normalized] = (normalized, task.lease_token)
-        now = time.time()
-        rows = [
-            (normalized, lease_token, now, now)
-            for normalized, lease_token in rows_by_url.values()
-        ]
-        if not rows:
-            return 0
-
-        with self._conn.cursor() as cur:
-            psycopg2.extras.execute_values(
-                cur,
-                f"""WITH incoming(url, lease_token, next_fetch_at, last_success_at) AS (VALUES %s),
-                    updated AS (
-                        UPDATE {URL_LEDGER_TABLE} AS ledger
-                        SET next_fetch_at = incoming.next_fetch_at,
-                            current_intent = NULL,
-                            last_success_at = incoming.last_success_at,
-                            fail_streak = 0,
-                            last_error = NULL,
-                            terminal_reason = NULL,
-                            terminalized_at = NULL
-                        FROM incoming
-                        WHERE ledger.url = incoming.url
-                          AND (
-                              incoming.lease_token IS NULL
-                              OR EXISTS (
-                                  SELECT 1
-                                  FROM {LEASE_TABLE} AS active
-                                  WHERE active.url = ledger.url
-                                    AND active.lease_token = incoming.lease_token
-                              )
-                          )
-                        RETURNING ledger.url, ledger.host
-                    )
-                    SELECT url, host FROM updated""",
-                rows,
-                template="(%s, %s, %s, %s)",
-                page_size=200,
-            )
-            updated_rows = list(cur.fetchall())
-            updated_urls = [row[0] for row in updated_rows]
-            self._delete_queue_entries(cur, updated_urls)
-            self._leases.delete(cur, updated_urls)
-            for _url, host in updated_rows:
-                self._host_ledger.record_success_in_tx(cur, host, at=now)
-        self._conn.commit()
-        return len(updated_rows)
+        return self._store.mark_done_many(tasks)
 
     def mark_failed(
         self,
@@ -1785,90 +1862,13 @@ class UrlLedger:
         lease_token: str | None = None,
     ) -> bool:
         """Mark a URL as failed, optionally scheduling a retry."""
-        normalized = normalize_url(url)
-        now = time.time()
-        lease_sql, lease_params = self._leases.match_sql("ledger", lease_token)
-
-        with self._conn.cursor() as cur:
-            cur.execute(
-                f"SELECT fail_streak, discovery_value, host FROM {URL_LEDGER_TABLE} AS ledger WHERE url = %s{lease_sql} FOR UPDATE",
-                (normalized, *lease_params),
-            )
-            row = cur.fetchone()
-            if row is None:
-                self._conn.rollback()
-                return False
-
-            transition = self._scheduler_retry_policy().failure_transition(
-                fail_streak=row[0],
-                discovery_value=row[1],
-                retryable=retryable,
-                error=error,
-                backoff_seconds=backoff_seconds,
-                now=now,
-            )
-
-            if transition.retryable:
-                cur.execute(
-                    f"""UPDATE {URL_LEDGER_TABLE} AS ledger
-                        SET next_fetch_at = %s,
-                            current_intent = %s,
-                            fail_streak = %s,
-                            last_error = %s,
-                            terminal_reason = NULL,
-                            terminalized_at = NULL
-                        WHERE url = %s{lease_sql}
-                        RETURNING url, host, %s::real AS scheduler_score, next_fetch_at, added_at""",
-                    (
-                        transition.next_fetch_at,
-                        transition.current_intent,
-                        transition.next_fail_streak,
-                        transition.last_error,
-                        normalized,
-                        *lease_params,
-                        transition.next_scheduler_score,
-                    ),
-                )
-                rows = cur.fetchall()
-                for _url, host, *_rest in rows:
-                    self._host_ledger.record_failure_in_tx(cur, host, at=now)
-                pending_rows = self._pending_rows_for_physical_queue(
-                    rows,
-                    self._single_physical_queue_for_surface(SCHEDULER_SURFACE_SCHEDULED),
-                )
-                self._membership.replace_pending_rows(cur, pending_rows)
-                self._leases.delete(cur, self._membership.row_urls(pending_rows))
-                updated = bool(rows)
-            else:
-                cur.execute(
-                    f"""UPDATE {URL_LEDGER_TABLE} AS ledger
-                        SET next_fetch_at = %s,
-                            current_intent = NULL,
-                            fail_streak = %s,
-                            last_error = %s,
-                            terminal_reason = %s,
-                            terminalized_at = %s
-                        WHERE url = %s{lease_sql}
-                        RETURNING url, host""",
-                    (
-                        transition.next_fetch_at,
-                        transition.next_fail_streak,
-                        transition.last_error,
-                        transition.terminal_reason,
-                        transition.terminalized_at,
-                        normalized,
-                        *lease_params,
-                    ),
-                )
-                rows = cur.fetchall()
-                urls = [row[0] for row in rows]
-                self._delete_queue_entries(cur, urls)
-                self._leases.delete(cur, urls)
-                for _url, host in rows:
-                    self._host_ledger.record_failure_in_tx(cur, host, at=now)
-                updated = bool(rows)
-        self._conn.commit()
-        return updated
+        return self._store.mark_failed(
+            url,
+            retryable=retryable,
+            error=error,
+            backoff_seconds=backoff_seconds,
+            lease_token=lease_token,
+        )
 
     def requeue_failed(self) -> int:
         """Requeue failed URLs for retry."""
