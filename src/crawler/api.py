@@ -1,8 +1,9 @@
 """REST API for serving crawl results."""
 
+import hmac
 import os
 
-from fastapi import FastAPI, Query
+from fastapi import Depends, FastAPI, Header, HTTPException, Query
 from fastapi.responses import JSONResponse
 
 from .storage import PgStorage
@@ -26,6 +27,24 @@ def close_storage(storage: PgStorage) -> None:
         storage.close()
 
 
+def require_api_token(
+    authorization: str | None = Header(None),
+    x_api_token: str | None = Header(None),
+) -> None:
+    token = os.environ.get("CRAWLER_API_TOKEN", "").strip()
+    if not token:
+        return
+
+    supplied = x_api_token or ""
+    if authorization:
+        scheme, _, value = authorization.partition(" ")
+        if scheme.lower() == "bearer":
+            supplied = value
+
+    if not hmac.compare_digest(supplied, token):
+        raise HTTPException(status_code=401, detail="unauthorized")
+
+
 @app.get("/health")
 def health():
     return {"status": "ok"}
@@ -37,6 +56,7 @@ def list_pages(
     limit: int = Query(100, ge=1, le=1000),
     offset: int = Query(0, ge=0),
     host: str | None = Query(None),
+    _auth: None = Depends(require_api_token),
 ):
     """List crawled pages."""
     storage = get_storage()
@@ -51,7 +71,7 @@ def list_pages(
 
 
 @app.get("/pages/{url_hash}")
-def get_page(url_hash: str):
+def get_page(url_hash: str, _auth: None = Depends(require_api_token)):
     """Get a single page with full content."""
     storage = get_storage()
     try:
@@ -66,7 +86,7 @@ def get_page(url_hash: str):
 
 
 @app.get("/stats")
-def stats():
+def stats(_auth: None = Depends(require_api_token)):
     """Fast runtime crawl statistics."""
     storage = get_storage()
     try:
@@ -76,7 +96,7 @@ def stats():
 
 
 @app.get("/stats/diagnostics")
-def diagnostic_stats():
+def diagnostic_stats(_auth: None = Depends(require_api_token)):
     """Runtime-only diagnostics; live full-queue diagnostics are disabled in production."""
     storage = get_storage()
     try:
