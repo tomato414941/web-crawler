@@ -314,6 +314,39 @@ Current deployment shape:
 - Runtime: Docker Compose
 - Exposed API: port `8080`
 
+### Production deploy
+
+Production deploys from GitHub `main`. The production `origin` remote should be:
+
+```bash
+https://github.com/tomato414941/web-crawler.git
+```
+
+Run the deploy from the production server:
+
+```bash
+ssh dev@100.92.121.94
+cd /home/dev/projects/web-crawler
+
+git status --short --branch
+git pull --ff-only origin main
+
+docker compose build migrate api crawler
+docker compose run --rm migrate
+docker compose up -d api crawler
+
+docker compose ps
+curl -sS http://127.0.0.1:8080/health
+docker compose run --rm api crawler observe
+```
+
+Rules:
+
+- Stop if `git pull --ff-only` fails; do not deploy from a divergent tree.
+- Do not use `git reset` or bundle transfer for normal deploys.
+- Run `migrate` every deploy as an idempotent schema check.
+- Do not touch the PostgreSQL volume during a normal deploy.
+
 Recommended production `.env`:
 
 ```bash
