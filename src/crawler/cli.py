@@ -34,13 +34,11 @@ async def _fetch(url: str, use_browser: bool = False, auto: bool = False) -> Fet
             browser_timeout=30.0,
             user_agent=settings.user_agent,
         )
-        response, used_browser = await fetcher.fetch(url)
     elif use_browser:
         from .core import get_browser_fetcher
 
         BrowserFetcher = get_browser_fetcher()
         fetcher = BrowserFetcher(timeout=30.0, user_agent=settings.user_agent)
-        response = await fetcher.fetch(url)
         used_browser = True
     else:
         fetcher = HttpFetcher(
@@ -50,7 +48,10 @@ async def _fetch(url: str, use_browser: bool = False, auto: bool = False) -> Fet
             max_keepalive_connections=settings.max_keepalive_connections,
         )
     try:
-        response = await fetcher.fetch(url)
+        if auto:
+            response, used_browser = await fetcher.fetch(url)
+        else:
+            response = await fetcher.fetch(url)
         return FetchResult(
             url=response.url,
             status=response.status,
