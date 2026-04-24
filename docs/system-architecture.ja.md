@@ -2,12 +2,12 @@
 
 この文書は、理想化された crawler model と、最終的な runtime 実装の間に置く中間文書である。
 
-これは [crawler-concepts.ja.md](/home/dev/projects/web-crawler/docs/crawler-concepts.ja.md) より広く、
-[scheduler-state-model.ja.md](/home/dev/projects/web-crawler/docs/scheduler-state-model.ja.md) よりも project 全体の
+これは [crawler-concepts.ja.md](crawler-concepts.ja.md) より広く、
+[scheduler-state-model.ja.md](scheduler-state-model.ja.md) よりも project 全体の
 責務分解を扱う。
 
 scheduler runtime execution と lease hot-path 制約は
-[scheduler-execution.ja.md](/home/dev/projects/web-crawler/docs/scheduler-execution.ja.md) で扱う。
+[scheduler-execution.ja.md](scheduler-execution.ja.md) で扱う。
 
 役割は、`web-crawler` という project 全体を system として見たときに、最終的にどの subsystem
 へ分解されるべきか、その責務を説明することである。
