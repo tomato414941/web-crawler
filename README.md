@@ -159,12 +159,14 @@ Options:
   --limit N           Stop after N observations; omit for continuous operation
   --max-bytes BYTES   Rotate output at this size, default 10485760; 0 disables rotation
   --max-files N       Number of rotated files to keep, default 7
+  --max-failures N    Exit after N consecutive failures, default 5; 0 disables failure exit
 ```
 
 Each line is one timestamped record. Successful records contain `ok=true` and the observation
 payload; failed reads contain `ok=false`, the exception type, and a sanitized error message.
 In Docker Compose production, the `observer` service writes these records to the
-`observer_logs` volume at `/observations/observations.jsonl`.
+`observer_logs` volume at `/observations/observations.jsonl`. Treat each JSONL file as
+single-writer output; do not run multiple `observe-watch` processes against the same path.
 
 ## REST API
 
@@ -381,6 +383,7 @@ CRAWL_DELAY=0.5
 CRAWLER_OBSERVE_INTERVAL=300
 CRAWLER_OBSERVE_MAX_BYTES=10485760
 CRAWLER_OBSERVE_MAX_FILES=7
+CRAWLER_OBSERVE_MAX_FAILURES=5
 ```
 
 These defaults avoid `www.icann.org`, which is currently hostile to the crawler, and reduce
