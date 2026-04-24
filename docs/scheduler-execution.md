@@ -5,9 +5,9 @@ It sits below the abstract crawler concepts and next to the scheduler state mode
 
 Related documents:
 
-- [crawler-concepts.md](/home/dev/projects/web-crawler/docs/crawler-concepts.md) defines the abstract model.
-- [scheduler-state-model.md](/home/dev/projects/web-crawler/docs/scheduler-state-model.md) defines scheduler source-of-truth boundaries.
-- [system-architecture.md](/home/dev/projects/web-crawler/docs/system-architecture.md) defines the project-wide subsystem split.
+- [crawler-concepts.md](crawler-concepts.md) defines the abstract model.
+- [scheduler-state-model.md](scheduler-state-model.md) defines scheduler source-of-truth boundaries.
+- [system-architecture.md](system-architecture.md) defines the project-wide subsystem split.
 
 ## Purpose
 
@@ -65,9 +65,9 @@ The scheduler should move toward a cheap host-first executable view:
 It is acceptable for read models to be derived. It is not acceptable for every lease to rebuild an
 expensive derived model from scratch when the crawler runs at high concurrency.
 
-## Observed Bottleneck
+## Observed Lease Bottleneck
 
-The current production bottleneck is in host-first lease selection.
+An earlier production bottleneck was in host-first lease selection.
 
 Observed during the April 2026 production investigation:
 
@@ -77,8 +77,8 @@ Observed during the April 2026 production investigation:
 - Replacing repeated correlated `host_state` lookups with a single join reduced one measured shape to about 309 ms, and about 266 ms with larger `work_mem`.
 - With one crawler worker, publish/finalize pressure disappeared, but lease selection still often took hundreds of milliseconds.
 
-These numbers are observations, not permanent SLOs. They identify the next likely implementation
-area.
+These numbers were observations, not permanent SLOs. They explain why the host runnable-head read
+model exists and why lease selection remains a hot-path concern.
 
 ## Design Constraints
 

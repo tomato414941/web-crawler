@@ -2,13 +2,13 @@
 
 This document sits between the idealized crawler model and the eventual runtime implementation.
 
-It is broader than [crawler-concepts.md](/home/dev/projects/web-crawler/docs/crawler-concepts.md),
+It is broader than [crawler-concepts.md](crawler-concepts.md),
 which defines the ideal principles, and broader than
-[scheduler-state-model.md](/home/dev/projects/web-crawler/docs/scheduler-state-model.md), which focuses on scheduler
+[scheduler-state-model.md](scheduler-state-model.md), which focuses on scheduler
 source-of-truth boundaries.
 
 Scheduler runtime execution and lease hot-path constraints are covered in
-[scheduler-execution.md](/home/dev/projects/web-crawler/docs/scheduler-execution.md).
+[scheduler-execution.md](scheduler-execution.md).
 
 Its job is to explain how the whole `web-crawler` project should be decomposed as a system.
 

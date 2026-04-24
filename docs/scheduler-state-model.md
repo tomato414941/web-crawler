@@ -2,9 +2,9 @@
 
 This document defines a practical state model for future refactors. It does not describe the current implementation directly, but it is also not the top-level idealized model. Its job is to describe which states the system should treat as source-of-truth in order to make correct scheduling decisions.
 
-The higher-level concepts live in [crawler-concepts.md](/home/dev/projects/web-crawler/docs/crawler-concepts.md).
+The higher-level concepts live in [crawler-concepts.md](crawler-concepts.md).
 Runtime lease strategy and hot-path constraints live in
-[scheduler-execution.md](/home/dev/projects/web-crawler/docs/scheduler-execution.md).
+[scheduler-execution.md](scheduler-execution.md).
 
 This document should be read as a transition/convergence model that helps move the current crawler toward that ideal.
 

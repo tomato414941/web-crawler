@@ -4,7 +4,7 @@
 
 ## Core Separation
 
-理想的な crawler では、少なくとも次の 6 要素を分けて考えるべきである。
+理想的な crawler では、少なくとも次の要素を分けて考えるべきである。
 
 - `ledger`: 発見済み URL の durable identity と履歴
 - `host ledger`: host の durable identity と履歴
@@ -12,6 +12,7 @@
 - `execution`: active lease と worker ownership
 - `host state`: host/site 単位の politeness と backoff
 - `policy intent`: なぜその URL を次に取りたいのか
+- `fetch admission`: 選ばれた URL の response body を読む価値があるか
 
 重要なのは、`state` と `intent` を混ぜないことだ。
 
@@ -40,17 +41,17 @@
 
 この分離がないと、queue 名が「いまどこにいるか」と「なぜ取りたいのか」の両方を背負ってしまう。
 
-## Why `runnable surface` Feels Off
+## Why State Names Matter
 
-`runnable surface` は state 名としては少し不自然である。
+scheduler surface 名は、その work が今どこにいるかを表すべきであり、crawler がなぜそれを取りたいかを表すべきではない。
 
 理由:
 
-- `runnable surface` は行為や目的に近い語である
-- live scheduler surface 名としては、現在位置より意図を強く表す
-- `scheduled` との対概念として見ると、「探索する/しない」より「前面/後面」の差に見える
+- action や purpose に近い語は intent に属する
+- live scheduler surface は現在の扱いを強調するべきである
+- 対比は purpose の違いではなく、実行可能か、まだ実行可能ではないかであるべきである
 
-したがって理想形では、`explore` は intent として残し、surface 名は `scheduled` や `runnable` のような state 語に寄せる方が自然である。
+理想形では、`explore` は intent として残し、surface 名は `scheduled` や `runnable` のような state 語を使う。
 
 ## Runnable Capability Principle
 
@@ -74,7 +75,21 @@ runtime 実装には、物理 queue projection、worker lane、operator-facing v
 raw URL queue ではなく、host/site の runnable capability を見て動くべきである。
 
 runtime execution の設計は
-[scheduler-execution.ja.md](/home/dev/projects/web-crawler/docs/scheduler-execution.ja.md) に置く。
+[scheduler-execution.ja.md](scheduler-execution.ja.md) に置く。
+
+## Fetch Admission Principle
+
+scheduler が URL を選んだとしても、crawler が response body 全体を読むべきとは限らない。
+fetch admission は、「この URL を 1 回試す」と「この payload に body read、parse、storage のコストを払う」の境界である。
+
+抽象ルールは次の通りである。
+
+- HTML と安全な text は parse 可能な page content になりうる
+- binary、media、archive、font、image、stream resource はデフォルトで metadata-only にする
+- 1 つの URL が worker や cycle を無期限に占有してはいけない
+- metadata-only completion は valid outcome であり、crawl failure ではない
+
+これにより、crawler は unbounded downloader ではなく WWW discovery に集中できる。
 
 ## Naming Guidance
 
@@ -85,4 +100,4 @@ runtime execution の設計は
 - `scheduled` / `runnable` / `leased` / `blocked` 系の名前は live state に使う
 - `explore` / `refresh` / `retry` は policy intent に使う
 
-つまり、`runnable surface` は最終的な理想名というより、intent と state がまだ分離されていない過渡的な名前として扱うのが妥当である。
+purpose に近い語は scheduler surface 名ではなく intent field に置く。
