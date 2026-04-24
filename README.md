@@ -144,6 +144,24 @@ Options:
 `observe` is read-only. It summarizes crawl totals, scheduler readiness, throughput,
 backpressure, storage tiers, outlink admission ratio, URL ledger size, and relation sizes.
 
+For periodic production observation, append JSON Lines records with `observe-watch`:
+
+```bash
+crawler observe-watch \
+  --postgres postgresql://user:pass@host/db \
+  --interval 300 \
+  --output /var/log/web-crawler/observations.jsonl
+
+Options:
+  --postgres DSN      Required: PostgreSQL DSN, also read from CRAWLER_POSTGRES_DSN
+  --interval SECONDS  Seconds between observations, default 300
+  --output PATH       Required: JSONL output file
+  --limit N           Stop after N observations; omit for continuous operation
+```
+
+Each line is one timestamped record. Successful records contain `ok=true` and the observation
+payload; failed reads contain `ok=false`, the exception type, and a sanitized error message.
+
 ## REST API
 
 ```bash

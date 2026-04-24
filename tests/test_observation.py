@@ -1,4 +1,13 @@
-from crawler.observation import build_operator_observation, format_operator_observation
+import json
+
+from crawler.observation import (
+    append_observation_record,
+    build_observation_error_record,
+    build_observation_record,
+    build_operator_observation,
+    format_operator_observation,
+    serialize_operator_observation,
+)
 
 
 def test_build_operator_observation_compacts_runtime_and_storage_shape():
@@ -109,3 +118,41 @@ def test_format_operator_observation_is_stable_and_readable():
     assert "pending=50 runnable=30 scheduled=10 retry=2 leased=1" in text
     assert "stored_ratio=25.0%" in text
     assert "pages: 4.0 KiB" in text
+
+
+def test_serialize_operator_observation_outputs_structured_json():
+    text = serialize_operator_observation({"crawl": {"total_pages": 10}})
+
+    assert json.loads(text) == {"crawl": {"total_pages": 10}}
+
+
+def test_build_observation_record_wraps_snapshot():
+    record = build_observation_record(
+        {"crawl": {"total_pages": 10}},
+        observed_at=1710000000.0,
+    )
+
+    assert record == {
+        "ok": True,
+        "observed_at": 1710000000.0,
+        "observation": {"crawl": {"total_pages": 10}},
+    }
+
+
+def test_build_observation_error_record_avoids_secret_details():
+    error = RuntimeError("could not connect to postgresql://user:secret@example/db")
+
+    record = build_observation_error_record(error, observed_at=1710000000.0)
+
+    assert record["ok"] is False
+    assert record["error_type"] == "RuntimeError"
+    assert "secret" not in str(record["error"])
+    assert "postgresql://" not in str(record["error"])
+
+
+def test_append_observation_record_writes_jsonl(tmp_path):
+    output = tmp_path / "nested" / "observations.jsonl"
+
+    append_observation_record(output, {"ok": True, "observed_at": 1710000000.0})
+
+    assert output.read_text(encoding="utf-8") == '{"observed_at": 1710000000.0, "ok": true}\n'
