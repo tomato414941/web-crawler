@@ -16,9 +16,10 @@ class FakeStorage:
 
 
 @pytest.fixture(autouse=True)
-def reset_storage():
+def reset_storage(monkeypatch):
     old_storage = api._storage
     api._storage = FakeStorage()
+    monkeypatch.delenv("CRAWLER_API_TOKEN", raising=False)
     yield
     api._storage = old_storage
 
@@ -44,3 +45,32 @@ def test_stats_diagnostics_uses_runtime_snapshot_only():
         "diagnostics_error": "live_scheduler_diagnostics_disabled",
         "diagnostics_mode": "runtime_snapshot_only",
     }
+
+
+def test_stats_requires_token_when_configured(monkeypatch):
+    monkeypatch.setenv("CRAWLER_API_TOKEN", "secret-token")
+    client = TestClient(api.app)
+
+    response = client.get("/stats")
+
+    assert response.status_code == 401
+
+
+def test_stats_accepts_bearer_token_when_configured(monkeypatch):
+    monkeypatch.setenv("CRAWLER_API_TOKEN", "secret-token")
+    client = TestClient(api.app)
+
+    response = client.get("/stats", headers={"Authorization": "Bearer secret-token"})
+
+    assert response.status_code == 200
+    assert response.json() == {"stats_source": "runtime_snapshot"}
+
+
+def test_health_remains_public_when_token_configured(monkeypatch):
+    monkeypatch.setenv("CRAWLER_API_TOKEN", "secret-token")
+    client = TestClient(api.app)
+
+    response = client.get("/health")
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok"}
