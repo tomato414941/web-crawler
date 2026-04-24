@@ -5,8 +5,12 @@ from crawler.discovery import (
     ARCHETYPE_REDIRECT_HUB,
     ARCHETYPE_REGISTRY_LISTING,
     ADMISSION_REASON_CANDIDATE,
+    ADMISSION_REASON_EXTERNAL_PRESSURE,
+    ADMISSION_REASON_HOST_POLICY_PENALTY,
     ADMISSION_REASON_NOFOLLOW_PARENT,
     EXTERNAL_DISCOVERY_VALUE,
+    FrontierPressure,
+    HostAdmissionContext,
     PARENT_CONTEXT_LOW_SIGNAL,
     PARENT_CONTEXT_NOFOLLOW,
     PageSignals,
@@ -180,3 +184,58 @@ def test_decide_discovered_url_admission_rejects_explained_low_value():
     assert result.admitted is False
     assert result.reason == ADMISSION_REASON_NOFOLLOW_PARENT
     assert result.parent_context == PARENT_CONTEXT_NOFOLLOW
+
+
+def test_decide_discovered_url_admission_rejects_external_generic_under_pressure():
+    result = decide_discovered_url_admission(
+        parent_url="https://example.com/",
+        url="https://external.example.net/project",
+        seed_hosts={"example.com"},
+        min_discovery_value=0.5,
+        low_value_archetype_min_discovery_value=1.0,
+        frontier_pressure=FrontierPressure(
+            pending=100_000,
+            pending_threshold=100_000,
+            external_min_value=1.0,
+        ),
+    )
+
+    assert result.admitted is False
+    assert result.reason == ADMISSION_REASON_EXTERNAL_PRESSURE
+
+
+def test_decide_discovered_url_admission_keeps_document_external_under_pressure():
+    result = decide_discovered_url_admission(
+        parent_url="https://example.com/",
+        url="https://external.example.net/doc/rfc9000",
+        seed_hosts={"example.com"},
+        min_discovery_value=0.5,
+        low_value_archetype_min_discovery_value=1.0,
+        frontier_pressure=FrontierPressure(
+            pending=100_000,
+            pending_threshold=100_000,
+            external_min_value=1.0,
+        ),
+    )
+
+    assert result.admitted is True
+    assert result.reason == ADMISSION_REASON_CANDIDATE
+
+
+def test_decide_discovered_url_admission_rejects_known_bad_host_after_penalty():
+    result = decide_discovered_url_admission(
+        parent_url="https://example.com/",
+        url="https://bad.example.net/project",
+        seed_hosts={"example.com"},
+        min_discovery_value=0.5,
+        low_value_archetype_min_discovery_value=1.0,
+        host_context=HostAdmissionContext(
+            known=True,
+            failure_count=4,
+            success_count=0,
+            penalty=0.35,
+        ),
+    )
+
+    assert result.admitted is False
+    assert result.reason == ADMISSION_REASON_HOST_POLICY_PENALTY

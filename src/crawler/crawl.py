@@ -19,9 +19,14 @@ from .config import settings
 from .content_policy import should_extract_links, should_store_text_content
 from .core import HttpFetcher, Response
 from .discovery import (
+    ARCHETYPE_GENERIC_PAGE,
     DiscoveryAdmissionDecision,
+    FrontierPressure,
+    HostAdmissionContext,
     PageSignals,
+    classify_url_archetype,
     decide_discovered_url_admission,
+    host_key,
     rank_seed_url,
     seed_hosts_from_urls,
 )
@@ -289,6 +294,7 @@ class CrawlerEngine:
         self.failure_breakdown: dict[str, int] = {}
         self._page_lock = asyncio.Lock()
         self._lease_lock = asyncio.Lock()
+        self._frontier_pending_cache: tuple[float, int] = (0.0, 0)
         self._pipeline_queue_maxsize = max(16, concurrency * 4)
         self._runtime = CrawlerRuntime(queue_maxsize=self._pipeline_queue_maxsize)
         self._snapshot_builder = CycleSnapshotBuilder(
@@ -596,11 +602,14 @@ class CrawlerEngine:
         """Build admitted tasks and explain why discovered links were kept or rejected."""
         admission_counts: Counter[str] = Counter()
         admission_counts["extracted"] = len(links)
+        frontier_pressure = self._frontier_pressure()
+        host_contexts = self._host_admission_contexts(links)
         candidates: list[tuple[CrawlTask, DiscoveryAdmissionDecision]] = []
         for link in links:
             if not self._is_valid_url(link):
                 admission_counts["scope_filtered"] += 1
                 continue
+            target_host = host_key(link)
             decision = decide_discovered_url_admission(
                 parent_url=parent_url,
                 url=link,
@@ -610,6 +619,8 @@ class CrawlerEngine:
                 low_value_archetype_min_discovery_value=(
                     settings.low_value_archetype_min_discovery_value
                 ),
+                frontier_pressure=frontier_pressure,
+                host_context=host_contexts.get(target_host),
             )
             if not decision.admitted:
                 admission_counts[decision.reason] += 1
@@ -630,6 +641,7 @@ class CrawlerEngine:
 
         selected: list[CrawlTask] = []
         target_host_counts: Counter[str] = Counter()
+        pressure_new_hosts: set[str] = set()
         total_limit = settings.max_discovered_urls_per_page
         per_host_limit = settings.max_discovered_urls_per_target_host_per_page
         for task, _decision in candidates:
@@ -637,16 +649,116 @@ class CrawlerEngine:
                 admission_counts["per_page_cap"] += 1
                 continue
             target_host = urlparse(task.url).netloc.lower()
+            if self._is_pressure_limited_new_host(
+                parent_url=parent_url,
+                target_host=target_host,
+                frontier_pressure=frontier_pressure,
+                host_context=host_contexts.get(target_host),
+                selected_new_hosts=pressure_new_hosts,
+            ):
+                admission_counts["new_host_pressure"] += 1
+                continue
             if per_host_limit > 0 and target_host_counts[target_host] >= per_host_limit:
                 admission_counts["per_target_host_cap"] += 1
                 continue
             selected.append(task)
             target_host_counts[target_host] += 1
+            if self._is_external_generic(parent_url, task.url):
+                admission_counts["external_generic"] += 1
+            if (
+                frontier_pressure.active
+                and self._is_external_host(parent_url, target_host)
+                and not host_contexts.get(target_host, HostAdmissionContext()).known
+            ):
+                pressure_new_hosts.add(target_host)
 
         if hasattr(self.scheduler, "preview_tasks"):
             selected = self.scheduler.preview_tasks(selected)
         admission_counts["admitted"] = len(selected)
         return selected, dict(admission_counts)
+
+    def _frontier_pressure(self) -> FrontierPressure:
+        threshold = settings.admission_frontier_pressure_pending_threshold
+        pending = self._cached_pending_count()
+        return FrontierPressure(
+            pending=pending,
+            pending_threshold=threshold,
+            external_min_value=settings.admission_external_min_value_under_pressure,
+        )
+
+    def _cached_pending_count(self) -> int:
+        now = time.monotonic()
+        cached_at, pending = self._frontier_pending_cache
+        if now - cached_at < 30.0:
+            return pending
+        pending_count = getattr(self.scheduler, "pending_count", None)
+        if not callable(pending_count):
+            self._frontier_pending_cache = (now, 0)
+            return 0
+        try:
+            pending = int(pending_count() or 0)
+        except Exception:
+            logger.debug("Failed to read pending count for admission pressure", exc_info=True)
+            pending = 0
+        self._frontier_pending_cache = (now, pending)
+        return pending
+
+    def _host_admission_contexts(self, links: list[str]) -> dict[str, HostAdmissionContext]:
+        hosts = sorted({host_key(link) for link in links if self._is_valid_url(link)})
+        if not hosts or self.host_ledger_store is None:
+            return {}
+        get_many = getattr(self.host_ledger_store, "get_many", None)
+        if not callable(get_many):
+            return {}
+        try:
+            records = get_many(hosts)
+        except Exception:
+            logger.debug("Failed to read host admission context", exc_info=True)
+            return {}
+        penalty = settings.admission_known_bad_host_penalty
+        return {
+            host: HostAdmissionContext(
+                known=True,
+                robots_status=record.robots_status,
+                failure_count=record.failure_count,
+                success_count=record.success_count,
+                penalty=penalty,
+            )
+            for host, record in records.items()
+        }
+
+    def _is_external_generic(self, parent_url: str, url: str) -> bool:
+        target_host = host_key(url)
+        if not self._is_external_host(parent_url, target_host):
+            return False
+        return classify_url_archetype(url) == ARCHETYPE_GENERIC_PAGE
+
+    def _is_external_host(self, parent_url: str, target_host: str) -> bool:
+        return bool(
+            target_host
+            and target_host != host_key(parent_url)
+            and target_host not in self.seed_hosts
+        )
+
+    def _is_pressure_limited_new_host(
+        self,
+        *,
+        parent_url: str,
+        target_host: str,
+        frontier_pressure: FrontierPressure,
+        host_context: HostAdmissionContext | None,
+        selected_new_hosts: set[str],
+    ) -> bool:
+        if not frontier_pressure.active:
+            return False
+        limit = settings.admission_new_host_per_page_limit_under_pressure
+        if limit <= 0 or len(selected_new_hosts) < limit:
+            return False
+        if host_context is not None and host_context.known:
+            return False
+        if target_host == host_key(parent_url) or target_host in self.seed_hosts:
+            return False
+        return target_host not in selected_new_hosts
 
     async def _finalize_skipped_task(self, skipped: _SkippedTask) -> _SkippedTask:
         """Apply scheduler mutations for a skipped crawl outside fetch workers."""

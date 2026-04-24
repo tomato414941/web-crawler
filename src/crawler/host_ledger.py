@@ -119,6 +119,34 @@ class HostLedgerStore:
             return None
         return self._row_to_record(row)
 
+    def get_many(self, hosts: list[str]) -> dict[str, HostLedgerRecord]:
+        """Return host ledger rows for known hosts."""
+        normalized_hosts = sorted({host for host in hosts if host})
+        if not normalized_hosts:
+            return {}
+        with self._conn.cursor() as cur:
+            cur.execute(
+                f"""SELECT host,
+                           registrable_domain,
+                           first_seen_at,
+                           last_seen_at,
+                           last_success_at,
+                           last_failure_at,
+                           known_url_count,
+                           success_count,
+                           failure_count,
+                           robots_last_checked_at,
+                           robots_status,
+                           created_at,
+                           updated_at
+                    FROM {HOST_LEDGER_TABLE}
+                    WHERE host = ANY(%s)""",
+                (normalized_hosts,),
+            )
+            rows = cur.fetchall()
+        self._conn.commit()
+        return {row[0]: self._row_to_record(row) for row in rows}
+
     def record_discovered_urls(
         self,
         host_counts: Mapping[str, int],

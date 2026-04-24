@@ -19,6 +19,8 @@ ADMISSION_REASON_CANDIDATE = "candidate"
 ADMISSION_REASON_BELOW_MIN_VALUE = "below_min_value"
 ADMISSION_REASON_LOW_VALUE_ARCHETYPE = "low_value_archetype"
 ADMISSION_REASON_NOFOLLOW_PARENT = "nofollow_parent"
+ADMISSION_REASON_EXTERNAL_PRESSURE = "external_pressure"
+ADMISSION_REASON_HOST_POLICY_PENALTY = "host_policy_penalty"
 
 SEED_DISCOVERY_VALUE = 2.0
 SAME_HOST_DISCOVERY_VALUE = 1.25
@@ -95,6 +97,39 @@ class DiscoveryAdmissionDecision:
     parent_context: str
     admitted: bool
     reason: str
+
+
+@dataclass(frozen=True)
+class FrontierPressure:
+    """Current frontier pressure used to keep discovery growth bounded."""
+
+    pending: int = 0
+    pending_threshold: int = 0
+    external_min_value: float = 1.0
+
+    @property
+    def active(self) -> bool:
+        return self.pending_threshold > 0 and self.pending >= self.pending_threshold
+
+
+@dataclass(frozen=True)
+class HostAdmissionContext:
+    """Known host quality signals for admission scoring."""
+
+    known: bool = False
+    robots_status: str | None = None
+    failure_count: int = 0
+    success_count: int = 0
+    consecutive_failures: int = 0
+    penalty: float = 0.0
+
+    @property
+    def is_low_value(self) -> bool:
+        if self.consecutive_failures >= 4:
+            return True
+        if self.robots_status in {"denied", "disallowed"}:
+            return True
+        return self.failure_count >= 3 and self.success_count == 0
 
 
 def host_key(url: str) -> str:
@@ -235,6 +270,25 @@ def _adjust_discovery_value(
     return max(_MIN_DISCOVERY_VALUE, round(discovery_value, 2)), archetype
 
 
+def _is_external_url(parent_url: str, url: str, seed_hosts: set[str] | None = None) -> bool:
+    child_host = host_key(url)
+    if not child_host:
+        return False
+    if child_host == host_key(parent_url):
+        return False
+    return child_host not in (seed_hosts or set())
+
+
+def _apply_host_policy(
+    discovery_value: float,
+    host_context: HostAdmissionContext | None,
+) -> tuple[float, bool]:
+    if host_context is None or not host_context.is_low_value:
+        return discovery_value, False
+    penalty = max(0.0, host_context.penalty)
+    return max(_MIN_DISCOVERY_VALUE, round(discovery_value - penalty, 2)), True
+
+
 def rank_seed_url(url: str) -> EnqueueDecision:
     """Assign the highest discovery value to explicit seed URLs."""
     return EnqueueDecision(discovery_value=SEED_DISCOVERY_VALUE)
@@ -314,6 +368,8 @@ def decide_discovered_url_admission(
     parent_signals: PageSignals | None = None,
     min_discovery_value: float,
     low_value_archetype_min_discovery_value: float,
+    frontier_pressure: FrontierPressure | None = None,
+    host_context: HostAdmissionContext | None = None,
 ) -> DiscoveryAdmissionDecision:
     """Decide whether a discovered URL is valuable enough for scheduler admission."""
     decision = rank_discovered_url(
@@ -322,6 +378,16 @@ def decide_discovered_url_admission(
         seed_hosts=seed_hosts,
         parent_signals=parent_signals,
     )
+    discovery_value, host_penalized = _apply_host_policy(
+        decision.discovery_value,
+        host_context,
+    )
+    decision = EnqueueDecision(
+        discovery_value=discovery_value,
+        archetype=decision.archetype,
+        parent_archetype=decision.parent_archetype,
+        parent_context=decision.parent_context,
+    )
     admitted = True
     reason = ADMISSION_REASON_CANDIDATE
     if (
@@ -329,7 +395,23 @@ def decide_discovered_url_admission(
         and decision.discovery_value < low_value_archetype_min_discovery_value
     ) or decision.discovery_value < min_discovery_value:
         admitted = False
-        reason = _rejection_reason(decision)
+        reason = (
+            ADMISSION_REASON_HOST_POLICY_PENALTY
+            if host_penalized
+            else _rejection_reason(decision)
+        )
+    elif host_penalized and decision.discovery_value < low_value_archetype_min_discovery_value:
+        admitted = False
+        reason = ADMISSION_REASON_HOST_POLICY_PENALTY
+    elif (
+        frontier_pressure is not None
+        and frontier_pressure.active
+        and _is_external_url(parent_url, url, seed_hosts)
+        and decision.archetype == ARCHETYPE_GENERIC_PAGE
+        and decision.discovery_value < frontier_pressure.external_min_value
+    ):
+        admitted = False
+        reason = ADMISSION_REASON_EXTERNAL_PRESSURE
     return DiscoveryAdmissionDecision(
         url=url,
         discovery_value=decision.discovery_value,
