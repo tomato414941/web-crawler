@@ -16,7 +16,7 @@ def _elapsed_ms(started_at: float) -> float:
 
 
 class SchedulerAdmissionService:
-    """Owns admission from durable URL rows into scheduler membership."""
+    """Synchronize admitted durable URL rows into scheduler membership."""
 
     def __init__(
         self,
