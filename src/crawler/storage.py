@@ -684,8 +684,13 @@ class RuntimeStatsStore:
             raise
 
     def summary(self) -> dict:
+        """Return runtime snapshot plus lightweight page totals for operators."""
         try:
             with self._storage._conn.cursor() as cur:
+                cur.execute(
+                    "SET LOCAL statement_timeout = %s",
+                    (DIAGNOSTIC_STATS_STATEMENT_TIMEOUT_MS,),
+                )
                 cur.execute(
                     """SELECT
                          count(*) as total_pages,

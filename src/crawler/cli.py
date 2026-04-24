@@ -5,7 +5,6 @@ import json
 import logging
 import os
 import sys
-import time
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -334,8 +333,14 @@ def observe_watch(
         help="Rotate output when it reaches this size; 0 disables rotation",
     ),
     max_files: int = typer.Option(7, "--max-files", help="Number of rotated files to keep"),
+    max_failures: int = typer.Option(
+        5,
+        "--max-failures",
+        help="Exit after N consecutive observation failures; 0 disables failure exit",
+    ),
 ):
     """Append read-only production observations to a JSON Lines file."""
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     if not postgres:
         typer.echo("Error: --postgres or CRAWLER_POSTGRES_DSN is required", err=True)
         raise typer.Exit(1)
@@ -351,31 +356,32 @@ def observe_watch(
     if max_files <= 0:
         typer.echo("Error: --max-files must be greater than 0", err=True)
         raise typer.Exit(1)
+    if max_failures < 0:
+        typer.echo("Error: --max-failures must be 0 or greater", err=True)
+        raise typer.Exit(1)
 
     from .observation import (
-        append_observation_record,
-        build_observation_error_record,
-        build_observation_record,
-        read_operator_observation,
+        ObservationWatchConfig,
+        ObservationWatchFailed,
+        ObservationWatcher,
     )
     from .storage import PgStorage
 
-    count = 0
-    while limit is None or count < limit:
-        observed_at = time.time()
-        try:
-            with PgStorage(postgres) as storage:
-                observation = read_operator_observation(storage)
-            record = build_observation_record(observation, observed_at=observed_at)
-        except Exception as exc:  # noqa: BLE001
-            record = build_observation_error_record(exc, observed_at=observed_at)
-
-        append_observation_record(output, record, max_bytes=max_bytes, max_files=max_files)
-        count += 1
-
-        if limit is not None and count >= limit:
-            break
-        time.sleep(interval)
+    watcher = ObservationWatcher(
+        storage_factory=lambda: PgStorage(postgres),
+        config=ObservationWatchConfig(
+            output=output,
+            interval=interval,
+            limit=limit,
+            max_bytes=max_bytes,
+            max_files=max_files,
+            max_failures=max_failures,
+        ),
+    )
+    try:
+        watcher.run()
+    except ObservationWatchFailed:
+        raise typer.Exit(1) from None
 
 
 @app.command()
