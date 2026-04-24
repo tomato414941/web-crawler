@@ -20,8 +20,14 @@ from crawler.url_ledger import (
 
 
 class FakeLedger:
-    def __init__(self, tasks: list[CrawlTask], known_counts: dict[str, int] | None = None):
+    def __init__(
+        self,
+        tasks: list[CrawlTask],
+        known_counts: dict[str, int] | None = None,
+        pending_count: int = 0,
+    ):
         self.tasks = list(tasks)
+        self.pending_count_value = pending_count
         self.done: list[str] = []
         self.failed: list[str] = []
         self.failures: list[dict] = []
@@ -112,6 +118,9 @@ class FakeLedger:
     def admit_discovered_tasks(self, tasks: list[CrawlTask]):
         return self.place_many(tasks)
 
+    def pending_count(self):
+        return self.pending_count_value
+
     def mark_done(self, url: str, lease_token: str | None = None):
         self.done.append(url)
 
@@ -134,12 +143,24 @@ class FakeLedger:
             }
         )
 
-    def pending_count(self):
-        return len(self.tasks)
-
     def rebuild_host_runnable_heads(self, **kwargs: object):
         self.rebuild_calls.append(kwargs)
         return len(self.tasks)
+
+
+class FakeHostLedgerRecord:
+    def __init__(self, *, failure_count=0, success_count=0, robots_status=None):
+        self.failure_count = failure_count
+        self.success_count = success_count
+        self.robots_status = robots_status
+
+
+class FakeHostLedgerStore:
+    def __init__(self, records):
+        self.records = records
+
+    def get_many(self, hosts):
+        return {host: self.records[host] for host in hosts if host in self.records}
 
 
 class FakeHostManager:
@@ -260,6 +281,97 @@ def test_discovered_tasks_explain_low_value_rejections(monkeypatch):
     assert admission_counts["extracted"] == 2
     assert admission_counts["admitted"] == 1
     assert admission_counts["nofollow_parent"] == 1
+
+
+def test_discovered_tasks_limit_external_generic_links_under_frontier_pressure(monkeypatch):
+    monkeypatch.setattr(settings, "max_discovered_urls_per_page", 10)
+    monkeypatch.setattr(settings, "max_discovered_urls_per_target_host_per_page", 10)
+    monkeypatch.setattr(settings, "admission_frontier_pressure_pending_threshold", 100)
+    monkeypatch.setattr(settings, "admission_external_min_value_under_pressure", 1.0)
+    engine = CrawlerEngine(
+        start_url="https://seed.example/",
+        same_host=False,
+        url_ledger=FakeLedger([], pending_count=100),
+        host_manager=FakeHostManager(),
+    )
+
+    tasks, admission_counts = engine._build_discovered_tasks_with_admission_counts(
+        "https://seed.example/",
+        [
+            "https://external.example.net/project",
+            "https://external.example.net/doc/rfc9000",
+            "https://seed.example/about",
+        ],
+    )
+
+    assert [task.url for task in tasks] == [
+        "https://seed.example/about",
+        "https://external.example.net/doc/rfc9000",
+    ]
+    assert admission_counts["external_pressure"] == 1
+    assert admission_counts["admitted"] == 2
+
+
+def test_discovered_tasks_limit_new_external_hosts_under_frontier_pressure(monkeypatch):
+    monkeypatch.setattr(settings, "max_discovered_urls_per_page", 10)
+    monkeypatch.setattr(settings, "max_discovered_urls_per_target_host_per_page", 10)
+    monkeypatch.setattr(settings, "admission_frontier_pressure_pending_threshold", 100)
+    monkeypatch.setattr(settings, "admission_external_min_value_under_pressure", 0.5)
+    monkeypatch.setattr(settings, "admission_new_host_per_page_limit_under_pressure", 2)
+    engine = CrawlerEngine(
+        start_url="https://seed.example/",
+        same_host=False,
+        url_ledger=FakeLedger([], pending_count=100),
+        host_manager=FakeHostManager(),
+    )
+
+    tasks, admission_counts = engine._build_discovered_tasks_with_admission_counts(
+        "https://seed.example/",
+        [
+            "https://a.example/doc/rfc1",
+            "https://b.example/doc/rfc2",
+            "https://c.example/doc/rfc3",
+            "https://seed.example/local",
+        ],
+    )
+
+    assert [task.url for task in tasks] == [
+        "https://seed.example/local",
+        "https://a.example/doc/rfc1",
+        "https://b.example/doc/rfc2",
+    ]
+    assert admission_counts["new_host_pressure"] == 1
+    assert admission_counts["admitted"] == 3
+
+
+def test_discovered_tasks_penalize_known_bad_hosts(monkeypatch):
+    monkeypatch.setattr(settings, "max_discovered_urls_per_page", 10)
+    monkeypatch.setattr(settings, "max_discovered_urls_per_target_host_per_page", 10)
+    monkeypatch.setattr(settings, "admission_known_bad_host_penalty", 0.35)
+    ledger = FakeLedger([])
+    engine = CrawlerEngine(
+        start_url="https://seed.example/",
+        same_host=False,
+        url_ledger=ledger,
+        host_manager=FakeHostManager(),
+    )
+    engine.host_ledger_store = FakeHostLedgerStore(
+        {
+            "bad.example": FakeHostLedgerRecord(failure_count=4, success_count=0),
+        }
+    )
+
+    tasks, admission_counts = engine._build_discovered_tasks_with_admission_counts(
+        "https://seed.example/",
+        [
+            "https://bad.example/project",
+            "https://good.example/doc/rfc9000",
+        ],
+    )
+
+    assert [task.url for task in tasks] == ["https://good.example/doc/rfc9000"]
+    assert admission_counts["host_policy_penalty"] == 1
+    assert admission_counts["admitted"] == 1
 
 
 @pytest.mark.asyncio
