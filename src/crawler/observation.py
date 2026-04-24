@@ -232,13 +232,37 @@ def build_observation_error_record(
     }
 
 
-def append_observation_record(path: str | Path, record: Mapping[str, object]) -> None:
+def append_observation_record(
+    path: str | Path,
+    record: Mapping[str, object],
+    *,
+    max_bytes: int = 0,
+    max_files: int = 7,
+) -> None:
     """Append one JSON object as a JSON Lines record."""
     output_path = Path(path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    if max_bytes > 0:
+        _rotate_jsonl(output_path, max_bytes=max_bytes, max_files=max_files)
     with output_path.open("a", encoding="utf-8") as file:
         file.write(json.dumps(dict(record), ensure_ascii=False, sort_keys=True))
         file.write("\n")
+
+
+def _rotate_jsonl(path: Path, *, max_bytes: int, max_files: int) -> None:
+    if max_files <= 0 or not path.exists() or path.stat().st_size < max_bytes:
+        return
+
+    oldest = path.with_name(f"{path.name}.{max_files}")
+    if oldest.exists():
+        oldest.unlink()
+
+    for index in range(max_files - 1, 0, -1):
+        source = path.with_name(f"{path.name}.{index}")
+        if source.exists():
+            source.replace(path.with_name(f"{path.name}.{index + 1}"))
+
+    path.replace(path.with_name(f"{path.name}.1"))
 
 
 def _read_storage_shape(conn: Any) -> dict[str, object]:

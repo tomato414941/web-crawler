@@ -53,5 +53,25 @@ services:
     restart: unless-stopped
     stop_grace_period: 30s
 
+  observer:
+    build: .
+    command: >
+      crawler observe-watch
+        --interval ${CRAWLER_OBSERVE_INTERVAL:-300}
+        --output /observations/observations.jsonl
+        --max-bytes ${CRAWLER_OBSERVE_MAX_BYTES:-10485760}
+        --max-files ${CRAWLER_OBSERVE_MAX_FILES:-7}
+    environment:
+      CRAWLER_POSTGRES_DSN: postgresql://crawler:crawler@postgres/crawldb
+    volumes:
+      - observer_logs:/observations
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
 volumes:
   pgdata:
+  observer_logs:
