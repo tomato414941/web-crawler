@@ -157,10 +157,14 @@ Options:
   --interval SECONDS  Seconds between observations, default 300
   --output PATH       Required: JSONL output file
   --limit N           Stop after N observations; omit for continuous operation
+  --max-bytes BYTES   Rotate output at this size, default 10485760; 0 disables rotation
+  --max-files N       Number of rotated files to keep, default 7
 ```
 
 Each line is one timestamped record. Successful records contain `ok=true` and the observation
 payload; failed reads contain `ok=false`, the exception type, and a sanitized error message.
+In Docker Compose production, the `observer` service writes these records to the
+`observer_logs` volume at `/observations/observations.jsonl`.
 
 ## REST API
 
@@ -349,13 +353,14 @@ cd /home/dev/projects/web-crawler
 git status --short --branch
 git pull --ff-only origin main
 
-docker compose build migrate api crawler
+docker compose build migrate api crawler observer
 docker compose run --rm migrate
-docker compose up -d api crawler
+docker compose up -d api crawler observer
 
 docker compose ps
 curl -sS http://127.0.0.1:8080/health
 docker compose run --rm api crawler observe
+docker compose logs --tail 20 observer
 ```
 
 Rules:
@@ -373,6 +378,9 @@ CRAWL_CYCLE_PAGES=300
 CRAWL_RECRAWL_TTL=2592000
 CRAWL_CONCURRENCY=6
 CRAWL_DELAY=0.5
+CRAWLER_OBSERVE_INTERVAL=300
+CRAWLER_OBSERVE_MAX_BYTES=10485760
+CRAWLER_OBSERVE_MAX_FILES=7
 ```
 
 These defaults avoid `www.icann.org`, which is currently hostile to the crawler, and reduce

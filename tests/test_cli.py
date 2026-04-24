@@ -155,6 +155,10 @@ def test_observe_watch_writes_one_jsonl_record(monkeypatch, tmp_path):
             "1",
             "--limit",
             "1",
+            "--max-bytes",
+            "10485760",
+            "--max-files",
+            "7",
         ],
     )
 
@@ -210,3 +214,52 @@ def test_observe_watch_requires_postgres(tmp_path):
 
     assert result.exit_code == 1
     assert "CRAWLER_POSTGRES_DSN is required" in result.stderr
+
+
+def test_observe_watch_accepts_disabled_rotation(monkeypatch, tmp_path):
+    runner = CliRunner()
+    output = tmp_path / "observations.jsonl"
+
+    monkeypatch.setattr("crawler.storage.PgStorage", FakeStorage)
+    monkeypatch.setattr(
+        "crawler.observation.read_operator_observation",
+        lambda storage: {"crawl": {"total_pages": 1}},
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "observe-watch",
+            "--postgres",
+            "postgresql://example",
+            "--output",
+            str(output),
+            "--limit",
+            "1",
+            "--max-bytes",
+            "0",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert json.loads(output.read_text(encoding="utf-8"))["ok"] is True
+
+
+def test_observe_watch_rejects_invalid_rotation_options(tmp_path):
+    runner = CliRunner()
+
+    result = runner.invoke(
+        app,
+        [
+            "observe-watch",
+            "--postgres",
+            "postgresql://example",
+            "--output",
+            str(tmp_path / "out.jsonl"),
+            "--max-files",
+            "0",
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert "--max-files must be greater than 0" in result.stderr
