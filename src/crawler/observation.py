@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import json
+import time
 from collections.abc import Mapping
+from pathlib import Path
 from typing import Any
 
 from .url_ledger import (
@@ -195,6 +198,47 @@ def format_operator_observation(observation: Mapping[str, object]) -> str:
     else:
         lines.append("  none")
     return "\n".join(lines)
+
+
+def serialize_operator_observation(observation: Mapping[str, object]) -> str:
+    """Serialize an observation for machine-readable CLI output."""
+    return json.dumps(observation, indent=2, ensure_ascii=False)
+
+
+def build_observation_record(
+    observation: Mapping[str, object],
+    *,
+    observed_at: float | None = None,
+) -> dict[str, object]:
+    """Build one JSONL-safe observation record."""
+    return {
+        "ok": True,
+        "observed_at": time.time() if observed_at is None else observed_at,
+        "observation": dict(observation),
+    }
+
+
+def build_observation_error_record(
+    error: BaseException,
+    *,
+    observed_at: float | None = None,
+) -> dict[str, object]:
+    """Build one JSONL-safe error record without leaking connection details."""
+    return {
+        "ok": False,
+        "observed_at": time.time() if observed_at is None else observed_at,
+        "error_type": type(error).__name__,
+        "error": "Observation failed; check service logs for details.",
+    }
+
+
+def append_observation_record(path: str | Path, record: Mapping[str, object]) -> None:
+    """Append one JSON object as a JSON Lines record."""
+    output_path = Path(path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with output_path.open("a", encoding="utf-8") as file:
+        file.write(json.dumps(dict(record), ensure_ascii=False, sort_keys=True))
+        file.write("\n")
 
 
 def _read_storage_shape(conn: Any) -> dict[str, object]:

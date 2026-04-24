@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import sys
+import time
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -303,16 +304,66 @@ def observe(
         typer.echo("Error: --postgres or CRAWLER_POSTGRES_DSN is required", err=True)
         raise typer.Exit(1)
 
-    from .observation import format_operator_observation, read_operator_observation
+    from .observation import (
+        format_operator_observation,
+        read_operator_observation,
+        serialize_operator_observation,
+    )
     from .storage import PgStorage
 
     with PgStorage(postgres) as storage:
         observation = read_operator_observation(storage)
 
     if json_output:
-        typer.echo(json.dumps(observation, indent=2, ensure_ascii=False))
+        typer.echo(serialize_operator_observation(observation))
     else:
         typer.echo(format_operator_observation(observation))
+
+
+@app.command("observe-watch")
+def observe_watch(
+    postgres: str = typer.Option(
+        None, "--postgres", envvar="CRAWLER_POSTGRES_DSN", help="Postgres DSN"
+    ),
+    output: Path = typer.Option(..., "--output", "-o", help="JSONL output file"),
+    interval: float = typer.Option(300.0, "--interval", help="Seconds between observations"),
+    limit: int | None = typer.Option(None, "--limit", help="Stop after N observations"),
+):
+    """Append read-only production observations to a JSON Lines file."""
+    if not postgres:
+        typer.echo("Error: --postgres or CRAWLER_POSTGRES_DSN is required", err=True)
+        raise typer.Exit(1)
+    if interval <= 0:
+        typer.echo("Error: --interval must be greater than 0", err=True)
+        raise typer.Exit(1)
+    if limit is not None and limit <= 0:
+        typer.echo("Error: --limit must be greater than 0", err=True)
+        raise typer.Exit(1)
+
+    from .observation import (
+        append_observation_record,
+        build_observation_error_record,
+        build_observation_record,
+        read_operator_observation,
+    )
+    from .storage import PgStorage
+
+    count = 0
+    while limit is None or count < limit:
+        observed_at = time.time()
+        try:
+            with PgStorage(postgres) as storage:
+                observation = read_operator_observation(storage)
+            record = build_observation_record(observation, observed_at=observed_at)
+        except Exception as exc:  # noqa: BLE001
+            record = build_observation_error_record(exc, observed_at=observed_at)
+
+        append_observation_record(output, record)
+        count += 1
+
+        if limit is not None and count >= limit:
+            break
+        time.sleep(interval)
 
 
 @app.command()

@@ -1,3 +1,5 @@
+import json
+
 from crawler.cli import _fetch
 from crawler.cli import app
 from crawler.core import Response
@@ -107,10 +109,104 @@ def test_observe_command_prints_formatted_observation(monkeypatch):
     assert FakeStorage.dsn == "postgresql://example"
 
 
+def test_observe_command_prints_json_observation(monkeypatch):
+    runner = CliRunner()
+
+    monkeypatch.setattr("crawler.storage.PgStorage", FakeStorage)
+    monkeypatch.setattr(
+        "crawler.observation.read_operator_observation",
+        lambda storage: {"crawl": {"total_pages": 1}},
+    )
+
+    result = runner.invoke(app, ["observe", "--postgres", "postgresql://example", "--json"])
+
+    assert result.exit_code == 0
+    assert json.loads(result.stdout) == {"crawl": {"total_pages": 1}}
+
+
 def test_observe_command_requires_postgres():
     runner = CliRunner()
 
     result = runner.invoke(app, ["observe"])
+
+    assert result.exit_code == 1
+    assert "CRAWLER_POSTGRES_DSN is required" in result.stderr
+
+
+def test_observe_watch_writes_one_jsonl_record(monkeypatch, tmp_path):
+    runner = CliRunner()
+    output = tmp_path / "observations.jsonl"
+
+    monkeypatch.setattr("crawler.storage.PgStorage", FakeStorage)
+    monkeypatch.setattr(
+        "crawler.observation.read_operator_observation",
+        lambda storage: {"crawl": {"total_pages": 1}},
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "observe-watch",
+            "--postgres",
+            "postgresql://example",
+            "--output",
+            str(output),
+            "--interval",
+            "1",
+            "--limit",
+            "1",
+        ],
+    )
+
+    assert result.exit_code == 0
+    records = [json.loads(line) for line in output.read_text(encoding="utf-8").splitlines()]
+    assert records == [
+        {
+            "ok": True,
+            "observed_at": records[0]["observed_at"],
+            "observation": {"crawl": {"total_pages": 1}},
+        }
+    ]
+
+
+def test_observe_watch_writes_error_record_without_secret(monkeypatch, tmp_path):
+    runner = CliRunner()
+    output = tmp_path / "observations.jsonl"
+
+    monkeypatch.setattr("crawler.storage.PgStorage", FakeStorage)
+
+    def fail(_storage):
+        raise RuntimeError("could not connect to postgresql://user:secret@example/db")
+
+    monkeypatch.setattr("crawler.observation.read_operator_observation", fail)
+
+    result = runner.invoke(
+        app,
+        [
+            "observe-watch",
+            "--postgres",
+            "postgresql://example",
+            "--output",
+            str(output),
+            "--interval",
+            "1",
+            "--limit",
+            "1",
+        ],
+    )
+
+    assert result.exit_code == 0
+    record = json.loads(output.read_text(encoding="utf-8"))
+    assert record["ok"] is False
+    assert record["error_type"] == "RuntimeError"
+    assert "secret" not in record["error"]
+    assert "postgresql://" not in record["error"]
+
+
+def test_observe_watch_requires_postgres(tmp_path):
+    runner = CliRunner()
+
+    result = runner.invoke(app, ["observe-watch", "--output", str(tmp_path / "out.jsonl")])
 
     assert result.exit_code == 1
     assert "CRAWLER_POSTGRES_DSN is required" in result.stderr
