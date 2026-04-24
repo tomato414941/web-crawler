@@ -70,3 +70,8 @@ class AdaptiveFetcher:
             return True
 
         return False
+
+    async def close(self):
+        """Close underlying fetchers."""
+        await self.http_fetcher.close()
+        await self.browser_fetcher.close()
