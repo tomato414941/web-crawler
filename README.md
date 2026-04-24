@@ -182,6 +182,9 @@ crawler serve --port 8080 --postgres postgresql://user:pass@localhost/db
 | `GET /stats` | Fast runtime crawl statistics from the persisted daemon snapshot |
 | `GET /stats/diagnostics` | Runtime-only diagnostics surface; live full-queue diagnostics are disabled in production |
 
+Set `CRAWLER_API_TOKEN` to require either `Authorization: Bearer <token>` or
+`X-API-Token: <token>` for every endpoint except `/health`.
+
 Daemon logs also emit a per-cycle `errors=...` summary using the same categories as `/stats`.
 
 ## Docker
@@ -384,6 +387,7 @@ CRAWLER_OBSERVE_INTERVAL=300
 CRAWLER_OBSERVE_MAX_BYTES=10485760
 CRAWLER_OBSERVE_MAX_FILES=7
 CRAWLER_OBSERVE_MAX_FAILURES=5
+CRAWLER_API_TOKEN=<random-long-token>
 ```
 
 These defaults avoid `www.icann.org`, which is currently hostile to the crawler, and reduce
