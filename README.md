@@ -16,6 +16,7 @@ entry points for discovery, not an allowlist and not a statement of the crawler'
 - **Physical Scheduler Queues** — Runnable / scheduled / refresh queues plus retry quarantine
 - **Host Scheduling State** — Durable per-host crawl delay and cooldown tracking in PostgreSQL
 - **REST API** — Serve crawled pages via `/pages`, `/stats` endpoints
+- **Operator Observation** — Read-only runtime/storage snapshots via `crawler observe`
 - **JSONL Export** — Optional streaming output alongside Postgres storage
 - **robots.txt** — Per-host rate limiting and access control
 - **Link Checker** — Detect broken links on any page
@@ -69,6 +70,9 @@ crawler crawl https://example.com -o results.jsonl \
 # Serve crawled pages over REST API
 crawler serve --port 8080 \
   --postgres postgresql://crawler:crawler@localhost:5433/crawldb
+
+# Inspect runtime/storage state without mutating the database
+crawler observe --postgres postgresql://crawler:crawler@localhost:5433/crawldb
 ```
 
 ## CLI Commands
@@ -82,6 +86,7 @@ crawler serve --port 8080 \
 | `agent` | AI-powered autonomous browsing |
 | `serve` | Start REST API server |
 | `migrate` | Apply pending database migrations |
+| `observe` | Print a read-only operator snapshot from PostgreSQL |
 | `daemon` | Run the continuous crawler loop |
 
 ### crawl
@@ -126,6 +131,19 @@ Options:
   --js                Use browser rendering
 ```
 
+### observe
+
+```bash
+crawler observe --postgres postgresql://user:pass@host/db
+
+Options:
+  --postgres DSN      Required: PostgreSQL DSN, also read from CRAWLER_POSTGRES_DSN
+  --json              Emit the observation as structured JSON
+```
+
+`observe` is read-only. It summarizes crawl totals, scheduler readiness, throughput,
+backpressure, storage tiers, outlink admission ratio, URL ledger size, and relation sizes.
+
 ## REST API
 
 ```bash
@@ -137,7 +155,8 @@ crawler serve --port 8080 --postgres postgresql://user:pass@localhost/db
 | `GET /health` | Health check |
 | `GET /pages` | List pages (`?since=`, `?limit=`, `?host=`) |
 | `GET /pages/{url_hash}` | Get page details with content |
-| `GET /stats` | Crawl statistics, including scheduler error breakdown and top error hosts |
+| `GET /stats` | Fast runtime crawl statistics from the persisted daemon snapshot |
+| `GET /stats/diagnostics` | Runtime-only diagnostics surface; live full-queue diagnostics are disabled in production |
 
 Daemon logs also emit a per-cycle `errors=...` summary using the same categories as `/stats`.
 
@@ -152,6 +171,9 @@ docker compose ps -a
 
 # Run a one-shot crawl manually
 docker compose run --rm crawler crawler crawl https://example.com -n 100
+
+# Print an operator snapshot using the compose-provided DSN
+docker compose run --rm api crawler observe
 ```
 
 Default compose services:
@@ -177,6 +199,7 @@ crawler/
 ├── host_state.py     # Runtime / persisted host state models
 ├── storage.py          # PostgreSQL storage
 ├── output.py           # JSONL streaming output
+├── observation.py      # Read-only operator snapshots
 ├── result.py           # Typed crawl success/failure results
 ├── extract.py          # CSS/XPath extraction
 ├── links.py            # Link checker
@@ -278,7 +301,7 @@ special cases.
 
 ### Content Scope
 
-Content handling policy is documented in [docs/CONTENT_POLICY.md](/home/dev/projects/web-crawler/docs/CONTENT_POLICY.md).
+Content handling policy is documented in [docs/CONTENT_POLICY.md](docs/CONTENT_POLICY.md).
 Use that document as the source of truth for what is stored as page content, what is treated as
 metadata-only, and which content extractors are out of scope for now.
 
@@ -310,6 +333,16 @@ These production seeds are only bootstrap points. They do not define the full cr
 The committed seed catalog lives in `config/seeds.json`. Treat it as the operator-facing source
 of truth for which URLs are seeds and why they exist. Runtime `.env` files should only contain
 the rendered `CRAWL_SEED_URLS` string for the currently enabled subset.
+
+Use the read-only observation command after deploys and during production checks:
+
+```bash
+docker compose run --rm api crawler observe
+docker compose run --rm api crawler observe --json
+```
+
+The command reads the existing `CRAWLER_POSTGRES_DSN` from the compose `api` service and does not
+start a server, restart workers, or mutate crawler state.
 
 Render the current catalog into an env assignment with:
 

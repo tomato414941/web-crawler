@@ -2,8 +2,8 @@
 
 この文書は、理想化された crawler model と最終的な runtime 実装の間で、`discovered` をどう表現するべきかを定義する。
 
-これは [crawler-concepts.ja.md](/home/dev/projects/web-crawler/docs/crawler-concepts.ja.md) より具体的で、
-[scheduler-state-model.ja.md](/home/dev/projects/web-crawler/docs/scheduler-state-model.ja.md) よりは概念寄りの文書である。
+これは [crawler-concepts.ja.md](crawler-concepts.ja.md) より具体的で、
+[scheduler-state-model.ja.md](scheduler-state-model.ja.md) よりは概念寄りの文書である。
 
 ## Purpose
 

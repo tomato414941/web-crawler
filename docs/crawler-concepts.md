@@ -4,7 +4,7 @@ This document captures an abstract model for an idealized WWW crawler. It is not
 
 ## Core Separation
 
-An ideal crawler should separate at least these six concerns:
+An ideal crawler should separate at least these concerns:
 
 - `ledger`: durable URL identity and history
 - `host ledger`: durable host identity and history
@@ -78,7 +78,7 @@ views. Those are execution details below this concept. The abstract rule is that
 should be driven by host/site runnable capability rather than by a raw URL queue.
 
 For the runtime execution design, see
-[scheduler-execution.md](/home/dev/projects/web-crawler/docs/scheduler-execution.md).
+[scheduler-execution.md](scheduler-execution.md).
 
 ## Fetch Admission Principle
 

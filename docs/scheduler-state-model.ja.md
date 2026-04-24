@@ -2,9 +2,9 @@
 
 この文書は、将来のリファクタリングの指針となる practical な状態モデルを定義する。現在の実装をそのまま説明するものではないが、理想化された上位モデルをそのまま再掲するものでもない。クローラーが正しく scheduling 判断するために、どの状態を system 上の正本として持つべきかを示す。
 
-上位の概念整理は [crawler-concepts.ja.md](/home/dev/projects/web-crawler/docs/crawler-concepts.ja.md) に置く。
+上位の概念整理は [crawler-concepts.ja.md](crawler-concepts.ja.md) に置く。
 runtime の lease strategy と hot-path 制約は
-[scheduler-execution.ja.md](/home/dev/projects/web-crawler/docs/scheduler-execution.ja.md) に置く。
+[scheduler-execution.ja.md](scheduler-execution.ja.md) に置く。
 
 この文書は、その原則へ近づくための transition/convergence model として読むべきである。
 

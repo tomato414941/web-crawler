@@ -5,9 +5,9 @@
 
 関連文書:
 
-- [crawler-concepts.ja.md](/home/dev/projects/web-crawler/docs/crawler-concepts.ja.md): 抽象モデル
-- [scheduler-state-model.ja.md](/home/dev/projects/web-crawler/docs/scheduler-state-model.ja.md): scheduler の正本境界
-- [system-architecture.ja.md](/home/dev/projects/web-crawler/docs/system-architecture.ja.md): project 全体の subsystem 分解
+- [crawler-concepts.ja.md](crawler-concepts.ja.md): 抽象モデル
+- [scheduler-state-model.ja.md](scheduler-state-model.ja.md): scheduler の正本境界
+- [system-architecture.ja.md](system-architecture.ja.md): project 全体の subsystem 分解
 
 ## Purpose
 
@@ -64,9 +64,9 @@ scheduler は、安い host-first executable view へ寄せる。
 read model が派生値であること自体は問題ない。ただし、高並列 crawler の lease ごとに
 高コストな派生 model を最初から作り直す形は避ける。
 
-## Observed Bottleneck
+## Observed Lease Bottleneck
 
-現在の production bottleneck は host-first lease selection にある。
+過去に観測された production bottleneck は host-first lease selection にあった。
 
 2026 年 4 月の production 調査で観測したこと:
 
@@ -77,7 +77,8 @@ read model が派生値であること自体は問題ない。ただし、高並
   `work_mem` を大きくすると約 266 ms になった
 - crawler 1 worker では publish/finalize scheduled は消えたが、lease selection はなお数百 ms になることがあった
 
-これらの数値は恒久的な SLO ではない。次に見るべき実装箇所を示す観測値である。
+これらの数値は恒久的な SLO ではない。host runnable-head read model が必要になった理由と、
+lease selection が hot path concern であり続ける理由を示す観測値である。
 
 ## Design Constraints
 
