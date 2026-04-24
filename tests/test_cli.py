@@ -1,5 +1,4 @@
 import json
-
 from crawler.cli import _fetch
 from crawler.cli import app
 from crawler.core import Response
@@ -196,6 +195,8 @@ def test_observe_watch_writes_error_record_without_secret(monkeypatch, tmp_path)
             "1",
             "--limit",
             "1",
+            "--max-failures",
+            "0",
         ],
     )
 
@@ -263,3 +264,101 @@ def test_observe_watch_rejects_invalid_rotation_options(tmp_path):
 
     assert result.exit_code == 1
     assert "--max-files must be greater than 0" in result.stderr
+
+
+def test_observe_watch_exits_after_max_failures(monkeypatch, tmp_path):
+    runner = CliRunner()
+    output = tmp_path / "observations.jsonl"
+
+    monkeypatch.setattr("crawler.storage.PgStorage", FakeStorage)
+    monkeypatch.setattr(
+        "crawler.observation.read_operator_observation",
+        lambda storage: (_ for _ in ()).throw(RuntimeError("statement timeout")),
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "observe-watch",
+            "--postgres",
+            "postgresql://example",
+            "--output",
+            str(output),
+            "--interval",
+            "1",
+            "--max-failures",
+            "1",
+        ],
+    )
+
+    assert result.exit_code == 1
+    record = json.loads(output.read_text(encoding="utf-8"))
+    assert record["ok"] is False
+    assert record["error"] == "statement timeout"
+
+
+def test_observe_watch_rejects_invalid_max_failures(tmp_path):
+    runner = CliRunner()
+
+    result = runner.invoke(
+        app,
+        [
+            "observe-watch",
+            "--postgres",
+            "postgresql://example",
+            "--output",
+            str(tmp_path / "out.jsonl"),
+            "--max-failures",
+            "-1",
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert "--max-failures must be 0 or greater" in result.stderr
+
+
+def test_observe_watch_passes_options_to_watcher(monkeypatch, tmp_path):
+    runner = CliRunner()
+    captured = {}
+
+    class FakeWatcher:
+        def __init__(self, *, storage_factory, config):
+            captured["storage_factory"] = storage_factory
+            captured["config"] = config
+
+        def run(self):
+            storage = captured["storage_factory"]()
+            captured["storage_dsn"] = storage.dsn
+            return 1
+
+    monkeypatch.setattr("crawler.storage.PgStorage", FakeStorage)
+    monkeypatch.setattr("crawler.observation.ObservationWatcher", FakeWatcher)
+
+    result = runner.invoke(
+        app,
+        [
+            "observe-watch",
+            "--postgres",
+            "postgresql://example",
+            "--output",
+            str(tmp_path / "observations.jsonl"),
+            "--interval",
+            "12",
+            "--limit",
+            "3",
+            "--max-bytes",
+            "100",
+            "--max-files",
+            "4",
+            "--max-failures",
+            "2",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert captured["storage_dsn"] == "postgresql://example"
+    assert captured["config"].interval == 12
+    assert captured["config"].limit == 3
+    assert captured["config"].max_bytes == 100
+    assert captured["config"].max_files == 4
+    assert captured["config"].max_failures == 2
