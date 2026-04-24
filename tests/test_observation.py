@@ -156,3 +156,36 @@ def test_append_observation_record_writes_jsonl(tmp_path):
     append_observation_record(output, {"ok": True, "observed_at": 1710000000.0})
 
     assert output.read_text(encoding="utf-8") == '{"observed_at": 1710000000.0, "ok": true}\n'
+
+
+def test_append_observation_record_rotates_when_max_bytes_is_reached(tmp_path):
+    output = tmp_path / "observations.jsonl"
+    output.write_text("old\n", encoding="utf-8")
+
+    append_observation_record(output, {"ok": True}, max_bytes=1, max_files=2)
+
+    assert output.with_name("observations.jsonl.1").read_text(encoding="utf-8") == "old\n"
+    assert output.read_text(encoding="utf-8") == '{"ok": true}\n'
+
+
+def test_append_observation_record_limits_rotated_files(tmp_path):
+    output = tmp_path / "observations.jsonl"
+    output.write_text("current\n", encoding="utf-8")
+    output.with_name("observations.jsonl.1").write_text("one\n", encoding="utf-8")
+    output.with_name("observations.jsonl.2").write_text("two\n", encoding="utf-8")
+
+    append_observation_record(output, {"ok": True}, max_bytes=1, max_files=2)
+
+    assert output.with_name("observations.jsonl.1").read_text(encoding="utf-8") == "current\n"
+    assert output.with_name("observations.jsonl.2").read_text(encoding="utf-8") == "one\n"
+    assert not output.with_name("observations.jsonl.3").exists()
+
+
+def test_append_observation_record_skips_rotation_when_disabled(tmp_path):
+    output = tmp_path / "observations.jsonl"
+    output.write_text("old\n", encoding="utf-8")
+
+    append_observation_record(output, {"ok": True}, max_bytes=0, max_files=2)
+
+    assert not output.with_name("observations.jsonl.1").exists()
+    assert output.read_text(encoding="utf-8") == 'old\n{"ok": true}\n'
