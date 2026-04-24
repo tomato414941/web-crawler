@@ -292,6 +292,30 @@ def migrate(
 
 
 @app.command()
+def observe(
+    postgres: str = typer.Option(
+        None, "--postgres", envvar="CRAWLER_POSTGRES_DSN", help="Postgres DSN"
+    ),
+    json_output: bool = typer.Option(False, "--json", help="Output raw observation JSON"),
+):
+    """Print a read-only production observation snapshot."""
+    if not postgres:
+        typer.echo("Error: --postgres or CRAWLER_POSTGRES_DSN is required", err=True)
+        raise typer.Exit(1)
+
+    from .observation import format_operator_observation, read_operator_observation
+    from .storage import PgStorage
+
+    with PgStorage(postgres) as storage:
+        observation = read_operator_observation(storage)
+
+    if json_output:
+        typer.echo(json.dumps(observation, indent=2, ensure_ascii=False))
+    else:
+        typer.echo(format_operator_observation(observation))
+
+
+@app.command()
 def daemon(
     seeds: list[str] = typer.Argument(..., help="Seed URLs to crawl"),
     cycle_pages: int = typer.Option(500, "--cycle-pages", help="Pages per cycle"),
