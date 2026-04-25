@@ -605,6 +605,7 @@ def test_get_stats_includes_runtime_snapshot(pg_storage):
             "finalize_queue_wait_max_ms": 8.0,
             "publish_queue_wait_max_ms": 4.5,
         },
+        "admission_control": {},
         "adaptive_budget": {
             "observed_hosts": 0,
             "eligible_hosts": 0,

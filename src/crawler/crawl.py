@@ -20,10 +20,11 @@ from .content_policy import should_extract_links, should_store_text_content
 from .core import HttpFetcher, Response
 from .discovery import (
     ARCHETYPE_GENERIC_PAGE,
+    AdmissionControl,
     DiscoveryAdmissionDecision,
-    FrontierPressure,
     HostAdmissionContext,
     PageSignals,
+    build_admission_control,
     classify_url_archetype,
     decide_discovered_url_admission,
     host_key,
@@ -602,7 +603,8 @@ class CrawlerEngine:
         """Build admitted tasks and explain why discovered links were kept or rejected."""
         admission_counts: Counter[str] = Counter()
         admission_counts["extracted"] = len(links)
-        frontier_pressure = self._frontier_pressure()
+        admission_control = self._admission_control()
+        self._runtime.admission_control = admission_control.snapshot()
         host_contexts = self._host_admission_contexts(links)
         candidates: list[tuple[CrawlTask, DiscoveryAdmissionDecision]] = []
         for link in links:
@@ -615,11 +617,7 @@ class CrawlerEngine:
                 url=link,
                 seed_hosts=self.seed_hosts,
                 parent_signals=parent_signals,
-                min_discovery_value=settings.min_discovery_value,
-                low_value_archetype_min_discovery_value=(
-                    settings.low_value_archetype_min_discovery_value
-                ),
-                frontier_pressure=frontier_pressure,
+                admission_control=admission_control,
                 host_context=host_contexts.get(target_host),
             )
             if not decision.admitted:
@@ -642,8 +640,8 @@ class CrawlerEngine:
         selected: list[CrawlTask] = []
         target_host_counts: Counter[str] = Counter()
         pressure_new_hosts: set[str] = set()
-        total_limit = settings.max_discovered_urls_per_page
-        per_host_limit = settings.max_discovered_urls_per_target_host_per_page
+        total_limit = admission_control.per_page_cap
+        per_host_limit = admission_control.per_target_host_cap
         for task, _decision in candidates:
             if total_limit > 0 and len(selected) >= total_limit:
                 admission_counts["per_page_cap"] += 1
@@ -652,7 +650,7 @@ class CrawlerEngine:
             if self._is_pressure_limited_new_host(
                 parent_url=parent_url,
                 target_host=target_host,
-                frontier_pressure=frontier_pressure,
+                admission_control=admission_control,
                 host_context=host_contexts.get(target_host),
                 selected_new_hosts=pressure_new_hosts,
             ):
@@ -666,7 +664,7 @@ class CrawlerEngine:
             if self._is_external_generic(parent_url, task.url):
                 admission_counts["external_generic"] += 1
             if (
-                frontier_pressure.active
+                admission_control.active
                 and self._is_external_host(parent_url, target_host)
                 and not host_contexts.get(target_host, HostAdmissionContext()).known
             ):
@@ -677,13 +675,11 @@ class CrawlerEngine:
         admission_counts["admitted"] = len(selected)
         return selected, dict(admission_counts)
 
-    def _frontier_pressure(self) -> FrontierPressure:
-        threshold = settings.admission_frontier_pressure_pending_threshold
+    def _admission_control(self) -> AdmissionControl:
         pending = self._cached_pending_count()
-        return FrontierPressure(
+        return build_admission_control(
             pending=pending,
-            pending_threshold=threshold,
-            external_min_value=settings.admission_external_min_value_under_pressure,
+            target_pending=settings.admission_target_pending,
         )
 
     def _cached_pending_count(self) -> int:
@@ -715,14 +711,12 @@ class CrawlerEngine:
         except Exception:
             logger.debug("Failed to read host admission context", exc_info=True)
             return {}
-        penalty = settings.admission_known_bad_host_penalty
         return {
             host: HostAdmissionContext(
                 known=True,
                 robots_status=record.robots_status,
                 failure_count=record.failure_count,
                 success_count=record.success_count,
-                penalty=penalty,
             )
             for host, record in records.items()
         }
@@ -745,13 +739,13 @@ class CrawlerEngine:
         *,
         parent_url: str,
         target_host: str,
-        frontier_pressure: FrontierPressure,
+        admission_control: AdmissionControl,
         host_context: HostAdmissionContext | None,
         selected_new_hosts: set[str],
     ) -> bool:
-        if not frontier_pressure.active:
+        if not admission_control.active:
             return False
-        limit = settings.admission_new_host_per_page_limit_under_pressure
+        limit = admission_control.new_external_host_cap
         if limit <= 0 or len(selected_new_hosts) < limit:
             return False
         if host_context is not None and host_context.known:

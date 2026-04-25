@@ -38,6 +38,8 @@ services:
 
   crawler:
     build: .
+    environment:
+      CRAWLER_ADMISSION_TARGET_PENDING: ${CRAWLER_ADMISSION_TARGET_PENDING:-500000}
     command: >
       crawler daemon
         ${CRAWL_SEED_URLS:-https://example.com}

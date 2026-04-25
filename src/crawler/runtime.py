@@ -34,6 +34,7 @@ class CrawlerRuntime:
         self.finalizer_liveness = StageLiveness(include_kind=True)
         self.publisher_liveness = StageLiveness()
         self.timing_summary = TelemetryAccumulator()
+        self.admission_control: dict[str, object] = {}
 
     def queue_payload(self) -> dict[str, object]:
         """Return queue-depth and wait snapshots for the current runtime state."""
@@ -111,6 +112,7 @@ class CycleSnapshotBuilder:
             "publisher_liveness": runtime.publisher_liveness.snapshot(),
             "failure_breakdown": dict(runtime.failure_counts),
             "timing_summary": runtime.timing_summary.snapshot(),
+            "admission_control": dict(runtime.admission_control),
             "host_first_fallback": self.host_first_fallback_stats(),
         }
 

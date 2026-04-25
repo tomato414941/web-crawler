@@ -56,6 +56,7 @@ def build_operator_observation(
     scheduler = _mapping(operator_summary.get("scheduler_readiness_states"))
     throughput = _mapping(operator_summary.get("throughput"))
     backpressure = _mapping(operator_summary.get("backpressure"))
+    admission_control = _mapping(operator_summary.get("admission_control"))
     runtime = _mapping(stats.get("runtime"))
     storage_totals = _mapping(storage_shape.get("totals"))
 
@@ -93,6 +94,17 @@ def build_operator_observation(
             ),
             "publish_queue_wait_max_ms": _float(backpressure.get("publish_queue_wait_max_ms")),
         },
+        "admission_control": {
+            "mode": admission_control.get("mode"),
+            "target_pending": _int(admission_control.get("target_pending")),
+            "pending": _int(admission_control.get("pending")),
+            "min_score": _float(admission_control.get("min_score")),
+            "per_page_cap": _int(admission_control.get("per_page_cap")),
+            "per_target_host_cap": _int(admission_control.get("per_target_host_cap")),
+            "new_external_host_cap": _int(
+                admission_control.get("new_external_host_cap")
+            ),
+        },
         "storage": {
             "tiers": list(storage_shape.get("tiers", [])),
             "relations": list(storage_shape.get("relations", [])),
@@ -120,6 +132,7 @@ def format_operator_observation(observation: Mapping[str, object]) -> str:
     scheduler = _mapping(observation.get("scheduler"))
     throughput = _mapping(observation.get("throughput"))
     backpressure = _mapping(observation.get("backpressure"))
+    admission_control = _mapping(observation.get("admission_control"))
     storage = _mapping(observation.get("storage"))
     runtime = _mapping(observation.get("runtime"))
 
@@ -149,6 +162,21 @@ def format_operator_observation(observation: Mapping[str, object]) -> str:
             f"active_hosts={_format_int(throughput.get('active_hosts'))}"
         ),
         f"  errors={dict(_mapping(throughput.get('errors')))}",
+        "",
+        "Admission Control",
+        (
+            "  "
+            f"mode={admission_control.get('mode') or 'unknown'} "
+            f"target_pending={_format_int(admission_control.get('target_pending'))} "
+            f"pending={_format_int(admission_control.get('pending'))} "
+            f"min_score={_format_float(admission_control.get('min_score'))}"
+        ),
+        (
+            "  "
+            f"caps page={_format_int(admission_control.get('per_page_cap'))} "
+            f"target_host={_format_int(admission_control.get('per_target_host_cap'))} "
+            f"new_external_host={_format_int(admission_control.get('new_external_host_cap'))}"
+        ),
         "",
         "Backpressure",
         (

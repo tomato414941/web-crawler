@@ -54,6 +54,15 @@ def test_build_operator_observation_compacts_runtime_and_storage_shape():
                     "finalize_queue_wait_max_ms": 20.0,
                     "publish_queue_wait_max_ms": 30.0,
                 },
+                "admission_control": {
+                    "mode": "reduce",
+                    "target_pending": 500_000,
+                    "pending": 700_000,
+                    "min_score": 1.0,
+                    "per_page_cap": 80,
+                    "per_target_host_cap": 4,
+                    "new_external_host_cap": 2,
+                },
             },
             "runtime": {"updated_at": 1710000000.0},
         },
@@ -76,6 +85,8 @@ def test_build_operator_observation_compacts_runtime_and_storage_shape():
     assert observation["scheduler"]["runnable"] == 30
     assert observation["throughput"]["errors"] == {"timeout": 1}
     assert observation["backpressure"]["publish_queue_size"] == 3
+    assert observation["admission_control"]["mode"] == "reduce"
+    assert observation["admission_control"]["per_target_host_cap"] == 4
     assert observation["storage"]["outlinks"]["stored_ratio"] == 0.25
     assert observation["runtime"]["diagnostics_endpoint"] == "/stats/diagnostics"
 

@@ -446,10 +446,14 @@ CRAWLER_DAEMON_BLOCKED_RETRY_PER_HOST=1
 CRAWLER_DAEMON_BLOCKED_RETRY_MAX_CONSECUTIVE_FAILURES=8
 CRAWLER_DAEMON_QUARANTINE_RETIRE_MIN_CONSECUTIVE_FAILURES=64
 CRAWLER_DAEMON_QUARANTINE_RETIRE_AFTER_SECONDS=86400
+CRAWLER_ADMISSION_TARGET_PENDING=500000
 ```
 
 Use `CRAWLER_*` only when you need to tune scheduler behavior without changing the daemon CLI
 arguments wired through Compose.
+`CRAWLER_ADMISSION_TARGET_PENDING` is the primary discovery admission knob: the crawler derives
+its admission mode, score threshold, and per-page/per-host caps from the current pending count
+relative to that target.
 
 Before pushing:
 - Run `pytest -q`
