@@ -4,12 +4,12 @@ from crawler.discovery import (
     ARCHETYPE_DOCUMENT_PAGE,
     ARCHETYPE_REDIRECT_HUB,
     ARCHETYPE_REGISTRY_LISTING,
+    AdmissionControl,
     ADMISSION_REASON_CANDIDATE,
-    ADMISSION_REASON_EXTERNAL_PRESSURE,
     ADMISSION_REASON_HOST_POLICY_PENALTY,
     ADMISSION_REASON_NOFOLLOW_PARENT,
+    ADMISSION_REASON_SCORE_BELOW_THRESHOLD,
     EXTERNAL_DISCOVERY_VALUE,
-    FrontierPressure,
     HostAdmissionContext,
     PARENT_CONTEXT_LOW_SIGNAL,
     PARENT_CONTEXT_NOFOLLOW,
@@ -19,10 +19,19 @@ from crawler.discovery import (
     SEED_DISCOVERY_VALUE,
     classify_parent_archetype,
     classify_url_archetype,
+    build_admission_control,
     decide_discovered_url_admission,
     rank_discovered_url,
     rank_seed_url,
     seed_hosts_from_urls,
+)
+
+
+BALANCED_CONTROL = AdmissionControl(
+    mode="balanced",
+    target_pending=500_000,
+    pending=500_000,
+    min_discovery_value=0.5,
 )
 
 
@@ -157,8 +166,7 @@ def test_decide_discovered_url_admission_admits_candidate():
         parent_url="https://example.com/",
         url="https://example.com/doc/rfc9000",
         seed_hosts={"example.com"},
-        min_discovery_value=0.5,
-        low_value_archetype_min_discovery_value=1.0,
+        admission_control=BALANCED_CONTROL,
     )
 
     assert result.admitted is True
@@ -177,8 +185,7 @@ def test_decide_discovered_url_admission_rejects_explained_low_value():
             title="Archive Table Index",
             meta_robots="nofollow",
         ),
-        min_discovery_value=0.5,
-        low_value_archetype_min_discovery_value=1.0,
+        admission_control=BALANCED_CONTROL,
     )
 
     assert result.admitted is False
@@ -186,35 +193,51 @@ def test_decide_discovered_url_admission_rejects_explained_low_value():
     assert result.parent_context == PARENT_CONTEXT_NOFOLLOW
 
 
-def test_decide_discovered_url_admission_rejects_external_generic_under_pressure():
+def test_build_admission_control_uses_target_pending_bands():
+    assert build_admission_control(pending=299_999, target_pending=500_000).mode == "expand"
+    assert build_admission_control(pending=300_000, target_pending=500_000).mode == "balanced"
+    assert build_admission_control(pending=600_000, target_pending=500_000).mode == "reduce"
+    assert build_admission_control(pending=900_000, target_pending=500_000).mode == "drain"
+
+
+def test_decide_discovered_url_admission_rejects_external_generic_under_reduce():
     result = decide_discovered_url_admission(
         parent_url="https://example.com/",
         url="https://external.example.net/project",
         seed_hosts={"example.com"},
-        min_discovery_value=0.5,
-        low_value_archetype_min_discovery_value=1.0,
-        frontier_pressure=FrontierPressure(
-            pending=100_000,
-            pending_threshold=100_000,
-            external_min_value=1.0,
+        admission_control=build_admission_control(
+            pending=866_000,
+            target_pending=500_000,
         ),
     )
 
     assert result.admitted is False
-    assert result.reason == ADMISSION_REASON_EXTERNAL_PRESSURE
+    assert result.reason == ADMISSION_REASON_SCORE_BELOW_THRESHOLD
 
 
-def test_decide_discovered_url_admission_keeps_document_external_under_pressure():
+def test_decide_discovered_url_admission_rejects_document_external_under_reduce():
     result = decide_discovered_url_admission(
         parent_url="https://example.com/",
         url="https://external.example.net/doc/rfc9000",
         seed_hosts={"example.com"},
-        min_discovery_value=0.5,
-        low_value_archetype_min_discovery_value=1.0,
-        frontier_pressure=FrontierPressure(
-            pending=100_000,
-            pending_threshold=100_000,
-            external_min_value=1.0,
+        admission_control=build_admission_control(
+            pending=866_000,
+            target_pending=500_000,
+        ),
+    )
+
+    assert result.admitted is False
+    assert result.reason == ADMISSION_REASON_SCORE_BELOW_THRESHOLD
+
+
+def test_decide_discovered_url_admission_keeps_same_host_document_under_drain():
+    result = decide_discovered_url_admission(
+        parent_url="https://example.com/",
+        url="https://example.com/doc/rfc9000",
+        seed_hosts={"example.com"},
+        admission_control=build_admission_control(
+            pending=950_000,
+            target_pending=500_000,
         ),
     )
 
@@ -227,8 +250,7 @@ def test_decide_discovered_url_admission_rejects_known_bad_host_after_penalty():
         parent_url="https://example.com/",
         url="https://bad.example.net/project",
         seed_hosts={"example.com"},
-        min_discovery_value=0.5,
-        low_value_archetype_min_discovery_value=1.0,
+        admission_control=BALANCED_CONTROL,
         host_context=HostAdmissionContext(
             known=True,
             failure_count=4,

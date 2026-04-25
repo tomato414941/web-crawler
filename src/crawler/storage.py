@@ -276,6 +276,7 @@ def _build_operator_summary(
             "finalize_queue_wait_max_ms": active_cycle.get("finalize_queue_wait_max_ms", 0.0),
             "publish_queue_wait_max_ms": active_cycle.get("publish_queue_wait_max_ms", 0.0),
         },
+        "admission_control": dict(active_cycle.get("admission_control", {})),
         "adaptive_budget": {
             "observed_hosts": int(host_budget_summary.get("observed_hosts", 0) or 0),
             "eligible_hosts": int(host_budget_summary.get("eligible_hosts", 0) or 0),

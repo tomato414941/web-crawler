@@ -16,10 +16,9 @@ PARENT_CONTEXT_NOFOLLOW = "nofollow_parent"
 PARENT_CONTEXT_LOW_SIGNAL = "low_signal_parent"
 
 ADMISSION_REASON_CANDIDATE = "candidate"
-ADMISSION_REASON_BELOW_MIN_VALUE = "below_min_value"
+ADMISSION_REASON_SCORE_BELOW_THRESHOLD = "score_below_threshold"
 ADMISSION_REASON_LOW_VALUE_ARCHETYPE = "low_value_archetype"
 ADMISSION_REASON_NOFOLLOW_PARENT = "nofollow_parent"
-ADMISSION_REASON_EXTERNAL_PRESSURE = "external_pressure"
 ADMISSION_REASON_HOST_POLICY_PENALTY = "host_policy_penalty"
 
 SEED_DISCOVERY_VALUE = 2.0
@@ -36,6 +35,7 @@ _ARCHETYPE_ADJUSTMENTS = {
 _LOW_VALUE_ARCHETYPES = {ARCHETYPE_REDIRECT_HUB, ARCHETYPE_REGISTRY_LISTING}
 
 _MIN_DISCOVERY_VALUE = 0.25
+_HOST_POLICY_PENALTY = 0.35
 _REDIRECT_SEGMENTS = {"go", "goto", "redirect", "r", "out", "jump"}
 _DOCUMENT_HINTS = {"doc", "docs", "document", "documents", "draft", "drafts", "spec", "specs"}
 _DOCUMENT_FILENAME_PREFIXES = ("draft-", "rfc")
@@ -100,16 +100,82 @@ class DiscoveryAdmissionDecision:
 
 
 @dataclass(frozen=True)
-class FrontierPressure:
-    """Current frontier pressure used to keep discovery growth bounded."""
+class AdmissionControl:
+    """Frontier-targeted controls derived from the current pending count."""
 
+    mode: str
+    target_pending: int
     pending: int = 0
-    pending_threshold: int = 0
-    external_min_value: float = 1.0
+    min_discovery_value: float = 0.5
+    per_page_cap: int = 200
+    per_target_host_cap: int = 8
+    new_external_host_cap: int = 8
 
     @property
     def active(self) -> bool:
-        return self.pending_threshold > 0 and self.pending >= self.pending_threshold
+        return self.mode in {"reduce", "drain"}
+
+    def snapshot(self) -> dict[str, object]:
+        return {
+            "mode": self.mode,
+            "target_pending": self.target_pending,
+            "pending": self.pending,
+            "min_score": self.min_discovery_value,
+            "per_page_cap": self.per_page_cap,
+            "per_target_host_cap": self.per_target_host_cap,
+            "new_external_host_cap": self.new_external_host_cap,
+        }
+
+
+FrontierPressure = AdmissionControl
+
+
+def build_admission_control(*, pending: int, target_pending: int) -> AdmissionControl:
+    """Derive admission limits from the distance to the pending target."""
+    if target_pending <= 0:
+        raise ValueError("target_pending must be positive")
+    pending = max(0, int(pending))
+    target_pending = int(target_pending)
+    ratio = pending / target_pending
+    if ratio < 0.6:
+        return AdmissionControl(
+            mode="expand",
+            target_pending=target_pending,
+            pending=pending,
+            min_discovery_value=0.5,
+            per_page_cap=200,
+            per_target_host_cap=8,
+            new_external_host_cap=8,
+        )
+    if ratio < 1.2:
+        return AdmissionControl(
+            mode="balanced",
+            target_pending=target_pending,
+            pending=pending,
+            min_discovery_value=0.8,
+            per_page_cap=160,
+            per_target_host_cap=6,
+            new_external_host_cap=5,
+        )
+    if ratio < 1.8:
+        return AdmissionControl(
+            mode="reduce",
+            target_pending=target_pending,
+            pending=pending,
+            min_discovery_value=1.0,
+            per_page_cap=80,
+            per_target_host_cap=4,
+            new_external_host_cap=2,
+        )
+    return AdmissionControl(
+        mode="drain",
+        target_pending=target_pending,
+        pending=pending,
+        min_discovery_value=1.15,
+        per_page_cap=40,
+        per_target_host_cap=2,
+        new_external_host_cap=1,
+    )
 
 
 @dataclass(frozen=True)
@@ -121,7 +187,7 @@ class HostAdmissionContext:
     failure_count: int = 0
     success_count: int = 0
     consecutive_failures: int = 0
-    penalty: float = 0.0
+    penalty: float = _HOST_POLICY_PENALTY
 
     @property
     def is_low_value(self) -> bool:
@@ -270,15 +336,6 @@ def _adjust_discovery_value(
     return max(_MIN_DISCOVERY_VALUE, round(discovery_value, 2)), archetype
 
 
-def _is_external_url(parent_url: str, url: str, seed_hosts: set[str] | None = None) -> bool:
-    child_host = host_key(url)
-    if not child_host:
-        return False
-    if child_host == host_key(parent_url):
-        return False
-    return child_host not in (seed_hosts or set())
-
-
 def _apply_host_policy(
     discovery_value: float,
     host_context: HostAdmissionContext | None,
@@ -351,24 +408,13 @@ def rank_discovered_url(
     )
 
 
-def _rejection_reason(decision: EnqueueDecision) -> str:
-    """Return the operator-facing reason a ranked URL should not be admitted."""
-    if decision.parent_context == PARENT_CONTEXT_NOFOLLOW:
-        return ADMISSION_REASON_NOFOLLOW_PARENT
-    if decision.archetype in _LOW_VALUE_ARCHETYPES:
-        return ADMISSION_REASON_LOW_VALUE_ARCHETYPE
-    return ADMISSION_REASON_BELOW_MIN_VALUE
-
-
 def decide_discovered_url_admission(
     *,
     parent_url: str,
     url: str,
     seed_hosts: set[str] | None = None,
     parent_signals: PageSignals | None = None,
-    min_discovery_value: float,
-    low_value_archetype_min_discovery_value: float,
-    frontier_pressure: FrontierPressure | None = None,
+    admission_control: AdmissionControl,
     host_context: HostAdmissionContext | None = None,
 ) -> DiscoveryAdmissionDecision:
     """Decide whether a discovered URL is valuable enough for scheduler admission."""
@@ -390,28 +436,18 @@ def decide_discovered_url_admission(
     )
     admitted = True
     reason = ADMISSION_REASON_CANDIDATE
-    if (
-        decision.archetype in _LOW_VALUE_ARCHETYPES
-        and decision.discovery_value < low_value_archetype_min_discovery_value
-    ) or decision.discovery_value < min_discovery_value:
+    if decision.parent_context == PARENT_CONTEXT_NOFOLLOW:
         admitted = False
-        reason = (
-            ADMISSION_REASON_HOST_POLICY_PENALTY
-            if host_penalized
-            else _rejection_reason(decision)
-        )
-    elif host_penalized and decision.discovery_value < low_value_archetype_min_discovery_value:
+        reason = ADMISSION_REASON_NOFOLLOW_PARENT
+    elif decision.archetype in _LOW_VALUE_ARCHETYPES:
+        admitted = False
+        reason = ADMISSION_REASON_LOW_VALUE_ARCHETYPE
+    elif host_penalized and decision.discovery_value < admission_control.min_discovery_value:
         admitted = False
         reason = ADMISSION_REASON_HOST_POLICY_PENALTY
-    elif (
-        frontier_pressure is not None
-        and frontier_pressure.active
-        and _is_external_url(parent_url, url, seed_hosts)
-        and decision.archetype == ARCHETYPE_GENERIC_PAGE
-        and decision.discovery_value < frontier_pressure.external_min_value
-    ):
+    elif decision.discovery_value < admission_control.min_discovery_value:
         admitted = False
-        reason = ADMISSION_REASON_EXTERNAL_PRESSURE
+        reason = ADMISSION_REASON_SCORE_BELOW_THRESHOLD
     return DiscoveryAdmissionDecision(
         url=url,
         discovery_value=decision.discovery_value,
