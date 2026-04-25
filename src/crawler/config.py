@@ -1,5 +1,6 @@
 """Configuration using pydantic-settings."""
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings
 
 
@@ -44,20 +45,20 @@ class CrawlerSettings(BaseSettings):
     stored_content_extended_bytes: int = 1_048_576
     stored_content_standard_min_discovery_value: float = 1.0
     stored_content_extended_min_discovery_value: float = 1.4
-    max_discovered_urls_per_page: int = 200
-    max_discovered_urls_per_target_host_per_page: int = 8
-    min_discovery_value: float = 0.5
-    low_value_archetype_min_discovery_value: float = 1.0
-    admission_frontier_pressure_pending_threshold: int = 100_000
-    admission_external_min_value_under_pressure: float = 1.0
-    admission_known_bad_host_penalty: float = 0.35
-    admission_new_host_per_page_limit_under_pressure: int = 3
+    admission_target_pending: int = 500_000
     finalizer_batch_size: int = 16
     finalizer_batch_wait_ms: float = 25.0
     publisher_batch_size: int = 16
     publisher_batch_wait_ms: float = 25.0
 
     model_config = {"env_prefix": "CRAWLER_"}
+
+    @field_validator("admission_target_pending")
+    @classmethod
+    def _validate_admission_target_pending(cls, value: int) -> int:
+        if value <= 0:
+            raise ValueError("admission_target_pending must be positive")
+        return value
 
 
 settings = CrawlerSettings()

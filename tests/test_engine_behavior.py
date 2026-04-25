@@ -213,10 +213,8 @@ class FakeFetcher:
 
 
 def test_discovered_tasks_are_capped_by_value_total_and_target_host(monkeypatch):
-    monkeypatch.setattr(settings, "min_discovery_value", 0.5)
-    monkeypatch.setattr(settings, "max_discovered_urls_per_page", 4)
-    monkeypatch.setattr(settings, "max_discovered_urls_per_target_host_per_page", 2)
-    ledger = FakeLedger([])
+    monkeypatch.setattr(settings, "admission_target_pending", 50)
+    ledger = FakeLedger([], pending_count=50)
     engine = CrawlerEngine(
         start_url="https://seed.example/",
         same_host=False,
@@ -224,38 +222,32 @@ def test_discovered_tasks_are_capped_by_value_total_and_target_host(monkeypatch)
         host_manager=FakeHostManager(),
     )
 
-    links = [
-        "https://a.example/docs/1",
-        "https://a.example/docs/2",
-        "https://a.example/docs/3",
-        "https://b.example/docs/1",
-        "https://b.example/docs/2",
-        "https://c.example/redirect/1",
-        "https://d.example/docs/1",
-    ]
+    links = [f"https://a.example/docs/{i}" for i in range(7)]
+    links.extend(
+        f"https://b{i:03d}.example/docs/1"
+        for i in range(159)
+    )
+    links.append("https://low.example/redirect/1")
 
     tasks, admission_counts = engine._build_discovered_tasks_with_admission_counts(
         "https://seed.example/",
         links,
     )
 
-    assert [task.url for task in tasks] == [
-        "https://a.example/docs/1",
-        "https://a.example/docs/2",
-        "https://b.example/docs/1",
-        "https://b.example/docs/2",
+    assert len(tasks) == 160
+    assert [task.url for task in tasks[:6]] == [
+        f"https://a.example/docs/{i}" for i in range(6)
     ]
-    assert all(task.discovery_value >= 0.5 for task in tasks)
-    assert admission_counts["extracted"] == 7
-    assert admission_counts["admitted"] == 4
-    assert admission_counts["per_page_cap"] == 1
+    assert all(task.discovery_value >= 0.8 for task in tasks)
+    assert admission_counts["extracted"] == 167
+    assert admission_counts["admitted"] == 160
+    assert admission_counts["per_target_host_cap"] == 1
+    assert admission_counts["per_page_cap"] == 5
     assert admission_counts["low_value_archetype"] == 1
+    assert engine.snapshot_runtime_stats()["admission_control"]["mode"] == "balanced"
 
 
-def test_discovered_tasks_explain_low_value_rejections(monkeypatch):
-    monkeypatch.setattr(settings, "min_discovery_value", 0.5)
-    monkeypatch.setattr(settings, "max_discovered_urls_per_page", 10)
-    monkeypatch.setattr(settings, "max_discovered_urls_per_target_host_per_page", 10)
+def test_discovered_tasks_explain_low_value_rejections():
     engine = CrawlerEngine(
         start_url="https://seed.example/",
         same_host=False,
@@ -277,21 +269,18 @@ def test_discovered_tasks_explain_low_value_rejections(monkeypatch):
         ),
     )
 
-    assert [task.url for task in tasks] == ["https://docs.example.net/doc/rfc9000"]
+    assert [task.url for task in tasks] == []
     assert admission_counts["extracted"] == 2
-    assert admission_counts["admitted"] == 1
-    assert admission_counts["nofollow_parent"] == 1
+    assert admission_counts["admitted"] == 0
+    assert admission_counts["nofollow_parent"] == 2
 
 
-def test_discovered_tasks_limit_external_generic_links_under_frontier_pressure(monkeypatch):
-    monkeypatch.setattr(settings, "max_discovered_urls_per_page", 10)
-    monkeypatch.setattr(settings, "max_discovered_urls_per_target_host_per_page", 10)
-    monkeypatch.setattr(settings, "admission_frontier_pressure_pending_threshold", 100)
-    monkeypatch.setattr(settings, "admission_external_min_value_under_pressure", 1.0)
+def test_discovered_tasks_limit_external_generic_links_under_target_pressure(monkeypatch):
+    monkeypatch.setattr(settings, "admission_target_pending", 500_000)
     engine = CrawlerEngine(
         start_url="https://seed.example/",
         same_host=False,
-        url_ledger=FakeLedger([], pending_count=100),
+        url_ledger=FakeLedger([], pending_count=866_000),
         host_manager=FakeHostManager(),
     )
 
@@ -306,22 +295,18 @@ def test_discovered_tasks_limit_external_generic_links_under_frontier_pressure(m
 
     assert [task.url for task in tasks] == [
         "https://seed.example/about",
-        "https://external.example.net/doc/rfc9000",
     ]
-    assert admission_counts["external_pressure"] == 1
-    assert admission_counts["admitted"] == 2
+    assert admission_counts["score_below_threshold"] == 2
+    assert admission_counts["admitted"] == 1
+    assert engine.snapshot_runtime_stats()["admission_control"]["mode"] == "reduce"
 
 
-def test_discovered_tasks_limit_new_external_hosts_under_frontier_pressure(monkeypatch):
-    monkeypatch.setattr(settings, "max_discovered_urls_per_page", 10)
-    monkeypatch.setattr(settings, "max_discovered_urls_per_target_host_per_page", 10)
-    monkeypatch.setattr(settings, "admission_frontier_pressure_pending_threshold", 100)
-    monkeypatch.setattr(settings, "admission_external_min_value_under_pressure", 0.5)
-    monkeypatch.setattr(settings, "admission_new_host_per_page_limit_under_pressure", 2)
+def test_discovered_tasks_reduce_external_documents_before_new_host_growth(monkeypatch):
+    monkeypatch.setattr(settings, "admission_target_pending", 500_000)
     engine = CrawlerEngine(
         start_url="https://seed.example/",
         same_host=False,
-        url_ledger=FakeLedger([], pending_count=100),
+        url_ledger=FakeLedger([], pending_count=866_000),
         host_manager=FakeHostManager(),
     )
 
@@ -337,17 +322,13 @@ def test_discovered_tasks_limit_new_external_hosts_under_frontier_pressure(monke
 
     assert [task.url for task in tasks] == [
         "https://seed.example/local",
-        "https://a.example/doc/rfc1",
-        "https://b.example/doc/rfc2",
     ]
-    assert admission_counts["new_host_pressure"] == 1
-    assert admission_counts["admitted"] == 3
+    assert admission_counts["score_below_threshold"] == 3
+    assert admission_counts["admitted"] == 1
 
 
 def test_discovered_tasks_penalize_known_bad_hosts(monkeypatch):
-    monkeypatch.setattr(settings, "max_discovered_urls_per_page", 10)
-    monkeypatch.setattr(settings, "max_discovered_urls_per_target_host_per_page", 10)
-    monkeypatch.setattr(settings, "admission_known_bad_host_penalty", 0.35)
+    monkeypatch.setattr(settings, "admission_target_pending", 500_000)
     ledger = FakeLedger([])
     engine = CrawlerEngine(
         start_url="https://seed.example/",
