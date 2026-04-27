@@ -63,6 +63,16 @@ def test_build_operator_observation_compacts_runtime_and_storage_shape():
                     "per_target_host_cap": 4,
                     "new_external_host_cap": 2,
                 },
+                "discovery_admission": {
+                    "extracted": 20,
+                    "admitted": 5,
+                    "rejected": 15,
+                    "admit_ratio": 0.25,
+                    "rejection_reasons": {
+                        "score_below_threshold": 10,
+                        "per_page_cap": 5,
+                    },
+                },
             },
             "runtime": {"updated_at": 1710000000.0},
         },
@@ -87,6 +97,11 @@ def test_build_operator_observation_compacts_runtime_and_storage_shape():
     assert observation["backpressure"]["publish_queue_size"] == 3
     assert observation["admission_control"]["mode"] == "reduce"
     assert observation["admission_control"]["per_target_host_cap"] == 4
+    assert observation["discovery_admission"]["admit_ratio"] == 0.25
+    assert observation["discovery_admission"]["rejection_reasons"] == {
+        "score_below_threshold": 10,
+        "per_page_cap": 5,
+    }
     assert observation["storage"]["outlinks"]["stored_ratio"] == 0.25
     assert observation["runtime"]["diagnostics_endpoint"] == "/stats/diagnostics"
 
@@ -121,6 +136,13 @@ def test_format_operator_observation_is_stable_and_readable():
                 "finalize_queue_wait_max_ms": 20.0,
                 "publish_queue_wait_max_ms": 30.0,
             },
+            "discovery_admission": {
+                "extracted": 20,
+                "admitted": 5,
+                "rejected": 15,
+                "admit_ratio": 0.25,
+                "rejection_reasons": {"score_below_threshold": 10},
+            },
             "storage": {
                 "tiers": [
                     {
@@ -140,6 +162,8 @@ def test_format_operator_observation_is_stable_and_readable():
     assert "Crawler Observation" in text
     assert "pages=10 hosts=3" in text
     assert "pending=50 runnable=30 scheduled=10 retry=2 leased=1" in text
+    assert "discovery extracted=20 admitted=5 rejected=15 admit_ratio=25.0%" in text
+    assert "rejection_reasons={'score_below_threshold': 10}" in text
     assert "stored_ratio=25.0%" in text
     assert "pages: 4.0 KiB" in text
 

@@ -206,6 +206,50 @@ def _surface_counts_from_physical_queue_count_values(
     return surface_counts
 
 
+def _discovery_admission_summary(
+    runtime_payload: Mapping[str, object],
+    active_cycle: Mapping[str, object],
+    last_completed_cycle: Mapping[str, object],
+) -> dict[str, object]:
+    timing_summary = runtime_payload.get("timing_summary")
+    if not isinstance(timing_summary, Mapping):
+        timing_summary = active_cycle.get("timing_summary")
+    if not isinstance(timing_summary, Mapping):
+        timing_summary = last_completed_cycle.get("timing_summary")
+    if not isinstance(timing_summary, Mapping):
+        timing_summary = {}
+
+    counts = timing_summary.get("counts")
+    if not isinstance(counts, Mapping):
+        counts = {}
+    admission_counts = counts.get("discovery_admission")
+    if not isinstance(admission_counts, Mapping):
+        admission_counts = {}
+
+    normalized = {
+        str(key): int(value or 0)
+        for key, value in admission_counts.items()
+        if int(value or 0) > 0
+    }
+    extracted = int(normalized.get("extracted", 0))
+    admitted = int(normalized.get("admitted", 0))
+    non_rejection_keys = {"extracted", "admitted", "external_generic"}
+    rejection_reasons = {
+        key: value
+        for key, value in sorted(normalized.items())
+        if key not in non_rejection_keys
+    }
+    rejected = sum(rejection_reasons.values())
+    return {
+        "extracted": extracted,
+        "admitted": admitted,
+        "rejected": rejected,
+        "admit_ratio": round(admitted / extracted, 4) if extracted else None,
+        "rejection_reasons": rejection_reasons,
+        "counts": normalized,
+    }
+
+
 def _build_operator_summary(
     scheduler_status: Mapping[str, object],
     readiness: Mapping[str, object],
@@ -277,6 +321,11 @@ def _build_operator_summary(
             "publish_queue_wait_max_ms": active_cycle.get("publish_queue_wait_max_ms", 0.0),
         },
         "admission_control": dict(active_cycle.get("admission_control", {})),
+        "discovery_admission": _discovery_admission_summary(
+            runtime_payload,
+            active_cycle,
+            last_completed_cycle,
+        ),
         "adaptive_budget": {
             "observed_hosts": int(host_budget_summary.get("observed_hosts", 0) or 0),
             "eligible_hosts": int(host_budget_summary.get("eligible_hosts", 0) or 0),
