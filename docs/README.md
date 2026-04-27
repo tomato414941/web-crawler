@@ -7,6 +7,7 @@ entry point for install, CLI/API usage, Docker, and deployment notes.
 
 - [README.md](../README.md) — project overview, runtime model, CLI/API usage, Docker, and deployment notes
 - [plan.md](../plan.md) — current milestone, recent completed work, and next candidates
+- [DESIGN_PRINCIPLES.md](DESIGN_PRINCIPLES.md) — conceptual positioning, core principles, non-goals, and architectural direction
 - [CONTENT_POLICY.md](CONTENT_POLICY.md) — content handling, metadata-only resources, storage tiers, and discovery breadth
 
 ## Design Documents

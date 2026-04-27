@@ -7,6 +7,26 @@ Current crawl coverage may be biased by implementation limits or temporary seed 
 bias is an artifact to correct, not the intended scope of the project. Seed URLs are bootstrap
 entry points for discovery, not an allowlist and not a statement of the crawler's target scope.
 
+## Design Philosophy
+
+This project is a broad public web crawler. Seeds are bootstrap entry points, not scope
+boundaries. Unless a run explicitly applies a restrictive policy such as same-host crawling,
+discovered links may lead to other hosts and become valid crawl targets.
+
+The crawler core is downstream-neutral. It is designed to produce reliable crawl observations for
+search, LLM-agent, monitoring, archival, and research systems, but it should not become a search
+ranking engine, an LLM memory system, or a domain-specific extractor.
+
+Broad web crawling is controlled contact with an untrusted and unbounded environment. External
+interactions are bounded by limits on time, body size, redirects, extracted links, admitted links,
+retries, rendering work, per-host concurrency, and global backlog. The public web boundary is also
+explicitly enforced: private networks, loopback addresses, metadata endpoints, unsupported schemes,
+and unsafe redirects are outside the intended crawl surface.
+
+In short, the crawler should safely, adaptively, and explainably observe the broad public web,
+producing neutral crawl data that downstream systems can trust and use. See
+[docs/DESIGN_PRINCIPLES.md](docs/DESIGN_PRINCIPLES.md) for the detailed design principles.
+
 ## Features
 
 - **Adaptive Fetching** — HTTP first, auto-switches to browser rendering for JS-heavy sites
