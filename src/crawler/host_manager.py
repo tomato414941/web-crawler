@@ -9,6 +9,7 @@ import httpx
 from robotexclusionrulesparser import RobotExclusionRulesParser
 
 from .config import settings
+from .egress_guard import AddressResolver, check_url
 from .host_state import PersistedHostState, RuntimeHostState
 from .telemetry import RobotsDecision
 from .tls import build_ssl_context
@@ -77,6 +78,7 @@ class HostManager:
         host_ledger_store: "HostLedgerStore | None" = None,
         host_backoff_seconds: float | None = None,
         max_host_backoff_seconds: float | None = None,
+        egress_resolver: AddressResolver | None = None,
     ):
         self.user_agent = user_agent
         self.default_delay = default_delay
@@ -98,6 +100,7 @@ class HostManager:
             if max_host_backoff_seconds is None
             else max_host_backoff_seconds
         )
+        self.egress_resolver = egress_resolver
         self._runtime_states: dict[str, RuntimeHostState] = {}
         self._locks: dict[str, asyncio.Lock] = {}
         self._robots_locks: dict[str, asyncio.Lock] = {}
@@ -213,20 +216,28 @@ class HostManager:
 
         robots_status = "unavailable"
         try:
-            client = await self._get_client()
-            resp = await client.get(robots_url)
-            if resp.status_code == 200:
-                robots_status = "ok"
-                parser = RobotExclusionRulesParser()
-                parser.parse(resp.text)
-                state.robots_parser = parser
-
-                # Get crawl delay if specified
-                delay = parser.get_crawl_delay(self.user_agent)
-                if delay:
-                    state.crawl_delay_seconds = max(delay, self.default_delay)
+            guard = await check_url(
+                robots_url,
+                resolver=self.egress_resolver,
+                allow_private_network_egress=settings.allow_private_network_egress,
+            )
+            if not guard.allowed:
+                robots_status = "egress_blocked"
             else:
-                robots_status = "http_4xx" if resp.status_code < 500 else "http_5xx"
+                client = await self._get_client()
+                resp = await client.get(robots_url)
+                if resp.status_code == 200:
+                    robots_status = "ok"
+                    parser = RobotExclusionRulesParser()
+                    parser.parse(resp.text)
+                    state.robots_parser = parser
+
+                    # Get crawl delay if specified
+                    delay = parser.get_crawl_delay(self.user_agent)
+                    if delay:
+                        state.crawl_delay_seconds = max(delay, self.default_delay)
+                else:
+                    robots_status = "http_4xx" if resp.status_code < 500 else "http_5xx"
         except httpx.TimeoutException:
             robots_status = "timeout"
         except httpx.ConnectError:

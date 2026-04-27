@@ -177,20 +177,22 @@ crawler serve --port 8080 --postgres postgresql://user:pass@localhost/db
 | Endpoint | Description |
 |---|---|
 | `GET /health` | Health check |
-| `GET /pages` | List pages (`?since=`, `?limit=`, `?host=`) |
+| `GET /pages` | List pages (`?since=`, `?limit=`, `?offset=`, `?host=`) |
 | `GET /pages/{url_hash}` | Get page details with content |
 | `GET /stats` | Fast runtime crawl statistics from the persisted daemon snapshot |
 | `GET /stats/diagnostics` | Runtime-only diagnostics surface; live full-queue diagnostics are disabled in production |
 
-Set `CRAWLER_API_TOKEN` to require either `Authorization: Bearer <token>` or
-`X-API-Token: <token>` for every endpoint except `/health`.
+Set `CRAWLER_API_TOKEN` to allow either `Authorization: Bearer <token>` or
+`X-API-Token: <token>` for every endpoint except `/health`. If the token is not configured,
+non-health endpoints fail closed. For local-only experiments, set
+`CRAWLER_ALLOW_UNAUTHENTICATED_API=true` to explicitly allow unauthenticated access.
 
 Daemon logs also emit a per-cycle `errors=...` summary using the same categories as `/stats`.
 
 ## Docker
 
 ```bash
-# Start the full stack
+# Start the full stack. CRAWLER_API_TOKEN is required by docker-compose.yml.
 docker compose up -d
 
 # The compose stack runs migrations before api / crawler
@@ -339,7 +341,7 @@ Current deployment shape:
 - Path: `~/projects/web-crawler`
 - Network: Tailscale preferred
 - Runtime: Docker Compose
-- Exposed API: port `8080`
+- Exposed API: loopback port `8080`; use Tailscale or a reverse proxy for remote access
 
 ### Production deploy
 
@@ -374,6 +376,11 @@ Rules:
 - Do not use `git reset` or bundle transfer for normal deploys.
 - Run `migrate` every deploy as an idempotent schema check.
 - Do not touch the PostgreSQL volume during a normal deploy.
+- Keep `CRAWLER_API_TOKEN` set. Unauthenticated API access requires an explicit local-only
+  override and should not be used in production.
+- The application rejects private, loopback, link-local, multicast, reserved, and unresolved
+  egress targets before fetch. This is a defense-in-depth guard; keep host firewall or network
+  policy controls in place for stronger protection against DNS rebinding.
 
 Recommended production `.env`:
 

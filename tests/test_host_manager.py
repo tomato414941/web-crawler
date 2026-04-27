@@ -156,7 +156,10 @@ class TestHostManagerIsAllowed:
         """Should allow all URLs when robots.txt is not available."""
         httpx_mock.add_response(url="http://example.com/robots.txt", status_code=404)
 
-        manager = HostManager()
+        async def resolver(_hostname: str, _port: int | None) -> list[str]:
+            return ["93.184.216.34"]
+
+        manager = HostManager(egress_resolver=resolver)
         try:
             allowed = await manager.is_allowed("http://example.com/page")
             assert allowed.allowed is True
@@ -251,6 +254,20 @@ Allow: /
             allowed = await manager.is_allowed("http://example.com/page")
             assert allowed.allowed is True  # Default to allow
             assert allowed.robots_status == "connect_error"
+        finally:
+            await manager.close()
+
+    async def test_is_allowed_does_not_fetch_robots_when_dns_guard_fails(self):
+        """Robots lookup should fail closed when the egress guard cannot resolve safely."""
+
+        async def resolver(_hostname: str, _port: int | None) -> list[str]:
+            raise OSError("no answer")
+
+        manager = HostManager(egress_resolver=resolver)
+        try:
+            allowed = await manager.is_allowed("http://example.com/page")
+            assert allowed.allowed is True
+            assert allowed.robots_status == "egress_blocked"
         finally:
             await manager.close()
 
@@ -525,7 +542,10 @@ class TestHostManagerCaching:
         httpx_mock.add_response(url="http://a.com/robots.txt", status_code=404)
         httpx_mock.add_response(url="http://b.com/robots.txt", status_code=404)
 
-        manager = HostManager()
+        async def resolver(_hostname: str, _port: int | None) -> list[str]:
+            return ["93.184.216.34"]
+
+        manager = HostManager(egress_resolver=resolver)
         try:
             await manager.get_state("http://a.com/page")
             await manager.get_state("http://b.com/page")

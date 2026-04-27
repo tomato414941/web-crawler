@@ -4,6 +4,7 @@ import ssl
 
 import pytest
 
+from crawler.egress_guard import EgressBlockedError
 from crawler.core import HttpFetcher, Response
 from crawler.tls import build_ssl_context
 
@@ -178,6 +179,63 @@ class TestHttpFetcher:
         assert response.telemetry is not None
         assert response.telemetry.body_truncated is True
         assert response.telemetry.bytes_read == 5
+
+    async def test_fetch_blocks_private_ip_before_request(self, monkeypatch):
+        """Private targets should be rejected before any outbound HTTP request is started."""
+
+        class DummyClient:
+            def stream(self, method, url):
+                raise AssertionError("network request should not be attempted for blocked egress")
+
+            async def aclose(self):
+                return None
+
+        monkeypatch.setattr(
+            "crawler.core.fetcher.httpx.AsyncClient",
+            lambda *args, **kwargs: DummyClient(),
+        )
+
+        fetcher = HttpFetcher(timeout=10.0)
+        with pytest.raises(EgressBlockedError) as exc_info:
+            await fetcher.fetch("http://127.0.0.1:8080/admin")
+
+        assert exc_info.value.decision.reason == "blocked_ip_literal"
+
+    async def test_fetch_blocks_private_redirect_before_following(self, httpx_mock):
+        """Redirects to private targets should be rejected before following them."""
+        httpx_mock.add_response(
+            url="http://example.com/old",
+            status_code=302,
+            headers={"location": "http://127.0.0.1/admin"},
+        )
+
+        async def resolver(_hostname: str, _port: int | None) -> list[str]:
+            return ["93.184.216.34"]
+
+        fetcher = HttpFetcher(timeout=10.0, egress_resolver=resolver)
+        with pytest.raises(EgressBlockedError) as exc_info:
+            await fetcher.fetch("http://example.com/old")
+
+        assert exc_info.value.decision.reason == "blocked_ip_literal"
+        assert len(httpx_mock.get_requests()) == 1
+
+    async def test_fetch_raises_on_redirect_limit(self, httpx_mock):
+        """Redirect loops should fail with an explicit redirect error."""
+        for _ in range(21):
+            httpx_mock.add_response(
+                url="http://example.com/loop",
+                status_code=302,
+                headers={"location": "http://example.com/loop"},
+            )
+
+        async def resolver(_hostname: str, _port: int | None) -> list[str]:
+            return ["93.184.216.34"]
+
+        fetcher = HttpFetcher(timeout=10.0, egress_resolver=resolver)
+        with pytest.raises(Exception) as exc_info:
+            await fetcher.fetch("http://example.com/loop")
+
+        assert "redirect" in type(exc_info.value).__name__.lower()
 
 
 class TestResponse:
