@@ -57,6 +57,7 @@ def build_operator_observation(
     throughput = _mapping(operator_summary.get("throughput"))
     backpressure = _mapping(operator_summary.get("backpressure"))
     admission_control = _mapping(operator_summary.get("admission_control"))
+    discovery_admission = _mapping(operator_summary.get("discovery_admission"))
     runtime = _mapping(stats.get("runtime"))
     storage_totals = _mapping(storage_shape.get("totals"))
 
@@ -105,6 +106,15 @@ def build_operator_observation(
                 admission_control.get("new_external_host_cap")
             ),
         },
+        "discovery_admission": {
+            "extracted": _int(discovery_admission.get("extracted")),
+            "admitted": _int(discovery_admission.get("admitted")),
+            "rejected": _int(discovery_admission.get("rejected")),
+            "admit_ratio": discovery_admission.get("admit_ratio"),
+            "rejection_reasons": dict(
+                _mapping(discovery_admission.get("rejection_reasons"))
+            ),
+        },
         "storage": {
             "tiers": list(storage_shape.get("tiers", [])),
             "relations": list(storage_shape.get("relations", [])),
@@ -133,6 +143,7 @@ def format_operator_observation(observation: Mapping[str, object]) -> str:
     throughput = _mapping(observation.get("throughput"))
     backpressure = _mapping(observation.get("backpressure"))
     admission_control = _mapping(observation.get("admission_control"))
+    discovery_admission = _mapping(observation.get("discovery_admission"))
     storage = _mapping(observation.get("storage"))
     runtime = _mapping(observation.get("runtime"))
 
@@ -177,6 +188,14 @@ def format_operator_observation(observation: Mapping[str, object]) -> str:
             f"target_host={_format_int(admission_control.get('per_target_host_cap'))} "
             f"new_external_host={_format_int(admission_control.get('new_external_host_cap'))}"
         ),
+        (
+            "  "
+            f"discovery extracted={_format_int(discovery_admission.get('extracted'))} "
+            f"admitted={_format_int(discovery_admission.get('admitted'))} "
+            f"rejected={_format_int(discovery_admission.get('rejected'))} "
+            f"admit_ratio={_format_ratio(discovery_admission.get('admit_ratio'))}"
+        ),
+        f"  rejection_reasons={dict(_mapping(discovery_admission.get('rejection_reasons')))}",
         "",
         "Backpressure",
         (
