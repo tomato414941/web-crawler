@@ -141,11 +141,17 @@ class FinalizerService:
                 if self.scheduler.mark_done(parsed.task.url, lease_token=parsed.task.lease_token):
                     updated_count += 1
         if updated_count != len(parsed_pages):
-            logger.warning(
-                "Scheduler mark_done updated fewer success rows than expected: updated=%s expected=%s",
-                updated_count,
-                len(parsed_pages),
-            )
+            fallback_count = 0
+            for parsed in parsed_pages:
+                if self.scheduler.mark_done(parsed.task.url, lease_token=None):
+                    fallback_count += 1
+            updated_count += fallback_count
+            if updated_count != len(parsed_pages):
+                logger.warning(
+                    "Scheduler mark_done updated fewer success rows than expected: updated=%s expected=%s",
+                    updated_count,
+                    len(parsed_pages),
+                )
         telemetry.mark_done_ms = _elapsed_ms(mark_started)
 
         if self.host_store is not None and updated_count:
@@ -226,6 +232,8 @@ class FinalizerService:
                 lease_token=failed.task.lease_token,
             )
             if not updated:
+                updated = self.scheduler.mark_done(failed.task.url, lease_token=None)
+            if not updated:
                 logger.warning("Scheduler mark_done no-op for failed task: url=%s", failed.task.url)
             telemetry.mark_done_ms = _elapsed_ms(mark_started)
             telemetry.total_ms = _elapsed_ms(total_started)
@@ -239,6 +247,14 @@ class FinalizerService:
             backoff_seconds=failed.backoff_seconds,
             lease_token=failed.task.lease_token,
         )
+        if not updated:
+            updated = self.scheduler.mark_failed(
+                failed.task.url,
+                retryable=failed.failure.retryable,
+                error=failed.failure.error,
+                backoff_seconds=failed.backoff_seconds,
+                lease_token=None,
+            )
         if not updated:
             logger.warning("Scheduler mark_failed no-op for failed task: url=%s", failed.task.url)
         telemetry.mark_failed_ms = _elapsed_ms(mark_started)
@@ -269,6 +285,8 @@ class FinalizerService:
         total_started = time.perf_counter()
         mark_started = time.perf_counter()
         updated = self.scheduler.mark_done(skipped.task.url, lease_token=skipped.task.lease_token)
+        if not updated:
+            updated = self.scheduler.mark_done(skipped.task.url, lease_token=None)
         if not updated:
             logger.warning("Scheduler mark_done no-op for skipped task: url=%s", skipped.task.url)
         telemetry.mark_done_ms = _elapsed_ms(mark_started)
