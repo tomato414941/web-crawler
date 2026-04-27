@@ -594,6 +594,43 @@ async def test_success_finalizer_batches_scheduler_mutations():
     assert [result.timings.finalizer.new_tasks_count for result in finalized] == [1, 1]
 
 
+def test_success_finalizer_caps_fallback_mark_done_count(caplog):
+    class PartialBatchLedger(_FakeLedger):
+        def __init__(self):
+            super().__init__(None)
+            self.done_batches = []
+
+        def mark_done_many(self, tasks):
+            self.done_batches.append(list(tasks))
+            return 1
+
+    ledger = PartialBatchLedger()
+    engine = CrawlerEngine(
+        max_pages=2,
+        url_ledger=ledger,
+        host_manager=_FakeHostManager(),
+    )
+    parsed_pages = [
+        _ParsedPage(
+            task=CrawlTask(url=f"https://example.com/{suffix}", lease_token=f"lease-{suffix}"),
+            result=_crawl_result(f"https://example.com/{suffix}"),
+            new_tasks=[],
+            process_started=time.perf_counter(),
+        )
+        for suffix in ("first", "second")
+    ]
+
+    with caplog.at_level("WARNING"):
+        telemetry = engine._finalizer_service().finalize_success_batch_sync(parsed_pages)
+
+    assert telemetry.mark_done_ms >= 0
+    assert ledger.done == [
+        ("https://example.com/first", None),
+        ("https://example.com/second", None),
+    ]
+    assert "updated fewer success rows than expected" not in caplog.text
+
+
 @pytest.mark.asyncio
 async def test_skipped_finalizer_records_mark_done_breakdown():
     ledger = _FakeLedger(None)

@@ -146,12 +146,13 @@ class FinalizerService:
                 if self.scheduler.mark_done(parsed.task.url, lease_token=None):
                     fallback_count += 1
             updated_count += fallback_count
-            if updated_count != len(parsed_pages):
+            if updated_count < len(parsed_pages):
                 logger.warning(
                     "Scheduler mark_done updated fewer success rows than expected: updated=%s expected=%s",
                     updated_count,
                     len(parsed_pages),
                 )
+            updated_count = min(updated_count, len(parsed_pages))
         telemetry.mark_done_ms = _elapsed_ms(mark_started)
 
         if self.host_store is not None and updated_count:
