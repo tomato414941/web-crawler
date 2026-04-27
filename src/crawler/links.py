@@ -8,6 +8,7 @@ import httpx
 
 from .config import settings
 from .core import HttpFetcher
+from .egress_guard import check_url as check_egress_url
 from .result import CheckedLink, LinkCheckResult, LinkReference
 from .urls import extract_anchors
 
@@ -23,13 +24,39 @@ def extract_links_from_html(html: str, base_url: str) -> list[LinkReference]:
 async def check_url(client: httpx.AsyncClient, url: str) -> CheckedLink:
     """Check a single URL and return its status."""
     try:
-        resp = await client.head(url, follow_redirects=True, timeout=10.0)
+        guard = await check_egress_url(
+            url,
+            allow_private_network_egress=settings.allow_private_network_egress,
+        )
+        if not guard.allowed:
+            return CheckedLink(url=url, status=0, error="egress_blocked", ok=False)
+        resp = await client.head(url, follow_redirects=False, timeout=10.0)
+        redirect = False
+        for _ in range(20):
+            if not (300 <= resp.status_code < 400 and "location" in resp.headers):
+                break
+            next_url = str(httpx.URL(resp.url).join(resp.headers["location"]))
+            guard = await check_egress_url(
+                next_url,
+                allow_private_network_egress=settings.allow_private_network_egress,
+            )
+            if not guard.allowed:
+                return CheckedLink(
+                    url=url,
+                    status=0,
+                    final_url=next_url,
+                    error="egress_blocked",
+                    ok=False,
+                    redirect=True,
+                )
+            redirect = True
+            resp = await client.head(next_url, follow_redirects=False, timeout=10.0)
         return CheckedLink(
             url=url,
             status=resp.status_code,
             final_url=str(resp.url),
             ok=200 <= resp.status_code < 400,
-            redirect=str(resp.url) != url,
+            redirect=redirect or str(resp.url) != url,
         )
     except httpx.TimeoutException:
         return CheckedLink(url=url, status=0, error="timeout", ok=False)
@@ -65,6 +92,13 @@ async def check_page_links(
                 current_url, depth = pages_to_check.pop(0)
 
                 if current_url in checked_urls:
+                    continue
+                guard = await check_egress_url(
+                    current_url,
+                    allow_private_network_egress=settings.allow_private_network_egress,
+                )
+                if not guard.allowed:
+                    checked_urls.add(current_url)
                     continue
                 checked_urls.add(current_url)
 

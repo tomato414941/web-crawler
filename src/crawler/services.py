@@ -128,6 +128,18 @@ class FinalizerService:
                 self.scheduler.place_many(all_new_tasks)
                 telemetry.admit_ms = _elapsed_ms(admit_started)
 
+        mark_started = time.perf_counter()
+        if hasattr(self.scheduler, "mark_done_many"):
+            updated_count = self.scheduler.mark_done_many([parsed.task for parsed in parsed_pages])
+        else:
+            updated_count = 0
+            for parsed in parsed_pages:
+                if self.scheduler.mark_done(parsed.task.url, lease_token=parsed.task.lease_token):
+                    updated_count += 1
+        if updated_count != len(parsed_pages):
+            raise RuntimeError("scheduler_mark_done_noop")
+        telemetry.mark_done_ms = _elapsed_ms(mark_started)
+
         if self.host_store is not None:
             host_started = time.perf_counter()
             success_records = [
@@ -147,13 +159,6 @@ class FinalizerService:
                     )
             telemetry.host_success_ms = _elapsed_ms(host_started)
 
-        mark_started = time.perf_counter()
-        if hasattr(self.scheduler, "mark_done_many"):
-            self.scheduler.mark_done_many([parsed.task for parsed in parsed_pages])
-        else:
-            for parsed in parsed_pages:
-                self.scheduler.mark_done(parsed.task.url, lease_token=parsed.task.lease_token)
-        telemetry.mark_done_ms = _elapsed_ms(mark_started)
         telemetry.total_ms = _elapsed_ms(total_started)
         return telemetry
 
@@ -208,19 +213,26 @@ class FinalizerService:
 
         if failed.mark_done:
             mark_started = time.perf_counter()
-            self.scheduler.mark_done(failed.task.url, lease_token=failed.task.lease_token)
+            updated = self.scheduler.mark_done(
+                failed.task.url,
+                lease_token=failed.task.lease_token,
+            )
+            if not updated:
+                raise RuntimeError("scheduler_mark_done_noop")
             telemetry.mark_done_ms = _elapsed_ms(mark_started)
             telemetry.total_ms = _elapsed_ms(total_started)
             return telemetry
 
         mark_started = time.perf_counter()
-        self.scheduler.mark_failed(
+        updated = self.scheduler.mark_failed(
             failed.task.url,
             retryable=failed.failure.retryable,
             error=failed.failure.error,
             backoff_seconds=failed.backoff_seconds,
             lease_token=failed.task.lease_token,
         )
+        if not updated:
+            raise RuntimeError("scheduler_mark_failed_noop")
         telemetry.mark_failed_ms = _elapsed_ms(mark_started)
         telemetry.total_ms = _elapsed_ms(total_started)
         return telemetry
@@ -248,7 +260,9 @@ class FinalizerService:
         telemetry = FinalizerTelemetry(kind="skipped")
         total_started = time.perf_counter()
         mark_started = time.perf_counter()
-        self.scheduler.mark_done(skipped.task.url, lease_token=skipped.task.lease_token)
+        updated = self.scheduler.mark_done(skipped.task.url, lease_token=skipped.task.lease_token)
+        if not updated:
+            raise RuntimeError("scheduler_mark_done_noop")
         telemetry.mark_done_ms = _elapsed_ms(mark_started)
         telemetry.total_ms = _elapsed_ms(total_started)
         return telemetry

@@ -232,6 +232,96 @@ async def test_fetch_stage_routes_skipped_and_failed_to_finalizer():
     assert queues.parse.empty()
 
 
+@pytest.mark.asyncio
+async def test_fetch_stage_releases_slot_when_lease_task_fails():
+    queues = PipelineQueues(maxsize=4)
+    releases = []
+
+    async def claim_page_slot():
+        return True
+
+    async def release_page_slot(success):
+        releases.append(success)
+
+    async def lease_task(_lease_started):
+        raise RuntimeError("lease unavailable")
+
+    stage = FetchStage(
+        parse_queue=queues.parse,
+        finalize_queue=queues.finalize,
+        parse_stats=queues.parse_stats,
+        finalize_stats=queues.finalize_stats,
+        is_running=lambda: True,
+        claim_page_slot=claim_page_slot,
+        release_page_slot=release_page_slot,
+        lease_task=lease_task,
+        process_url=lambda _task: None,
+        release_active_host=lambda _url: None,
+        record_failure_category=lambda _error: None,
+        worker_patience=1,
+    )
+
+    await stage.run()
+
+    assert releases == [False]
+    assert queues.parse.empty()
+    assert queues.finalize.empty()
+
+
+@pytest.mark.asyncio
+async def test_fetch_stage_converts_process_url_exception_to_failed_item():
+    queues = PipelineQueues(maxsize=4)
+    task = CrawlTask(url="https://example.com/error", lease_token="lease-1")
+    claimed = 0
+    releases = []
+    released_hosts = []
+    failures = []
+
+    async def claim_page_slot():
+        nonlocal claimed
+        claimed += 1
+        return claimed == 1
+
+    async def release_page_slot(success):
+        releases.append(success)
+
+    async def lease_task(_lease_started):
+        return task, _LeaseTelemetry()
+
+    async def process_url(_task):
+        raise RuntimeError("precheck exploded")
+
+    async def release_active_host(url):
+        released_hosts.append(url)
+
+    stage = FetchStage(
+        parse_queue=queues.parse,
+        finalize_queue=queues.finalize,
+        parse_stats=queues.parse_stats,
+        finalize_stats=queues.finalize_stats,
+        is_running=lambda: True,
+        claim_page_slot=claim_page_slot,
+        release_page_slot=release_page_slot,
+        lease_task=lease_task,
+        process_url=process_url,
+        release_active_host=release_active_host,
+        record_failure_category=failures.append,
+        worker_patience=1,
+    )
+
+    await stage.run()
+
+    item = queues.finalize.get_nowait()
+    assert item.failed is not None
+    assert item.failed.task is task
+    assert item.failed.failure.retryable is True
+    assert item.failed.failure.error == "precheck exploded"
+    assert releases == [False]
+    assert released_hosts == [task.url]
+    assert failures == ["precheck exploded"]
+    assert queues.parse.empty()
+
+
 def test_pipeline_queues_snapshot_records_depth_and_wait():
     queues = PipelineQueues(maxsize=4)
 

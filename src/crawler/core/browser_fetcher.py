@@ -5,6 +5,8 @@ import time
 
 from playwright.async_api import async_playwright, Browser, BrowserContext, Page
 
+from ..config import settings
+from ..egress_guard import check_url, raise_if_blocked
 from ..telemetry import FetchTelemetry
 from .protocols import Response
 
@@ -44,6 +46,7 @@ class BrowserPool:
             if self.user_agent:
                 context_opts["user_agent"] = self.user_agent
             self._context = await self._browser.new_context(**context_opts)
+            await self._context.route("**/*", _guard_browser_route)
 
             for _ in range(self.pool_size):
                 page = await self._context.new_page()
@@ -92,6 +95,12 @@ class BrowserFetcher:
 
     async def fetch(self, url: str) -> Response:
         """Fetch a URL using a pooled browser page."""
+        raise_if_blocked(
+            await check_url(
+                url,
+                allow_private_network_egress=settings.allow_private_network_egress,
+            )
+        )
         page = await self._pool.acquire()
         try:
             total_started = time.perf_counter()
@@ -103,6 +112,12 @@ class BrowserFetcher:
             content = await page.content()
             fetch_body_read_ms = round((time.perf_counter() - body_started) * 1000, 1)
             final_url = page.url
+            raise_if_blocked(
+                await check_url(
+                    final_url,
+                    allow_private_network_egress=settings.allow_private_network_egress,
+                )
+            )
 
             headers = {}
             status = 200
@@ -134,6 +149,12 @@ class BrowserFetcher:
 
     async def fetch_with_snapshot(self, url: str) -> tuple[Response, str]:
         """Fetch URL and return accessibility tree snapshot for AI agents."""
+        raise_if_blocked(
+            await check_url(
+                url,
+                allow_private_network_egress=settings.allow_private_network_egress,
+            )
+        )
         page = await self._pool.acquire()
         try:
             total_started = time.perf_counter()
@@ -145,6 +166,12 @@ class BrowserFetcher:
             content = await page.content()
             fetch_body_read_ms = round((time.perf_counter() - body_started) * 1000, 1)
             final_url = page.url
+            raise_if_blocked(
+                await check_url(
+                    final_url,
+                    allow_private_network_egress=settings.allow_private_network_egress,
+                )
+            )
 
             # Get accessibility tree snapshot
             snapshot = await page.accessibility.snapshot()
@@ -182,6 +209,18 @@ class BrowserFetcher:
     async def close(self):
         """Close the browser pool."""
         await self._pool.close()
+
+
+async def _guard_browser_route(route):
+    """Abort browser requests that target disallowed egress destinations."""
+    decision = await check_url(
+        route.request.url,
+        allow_private_network_egress=settings.allow_private_network_egress,
+    )
+    if decision.allowed:
+        await route.continue_()
+    else:
+        await route.abort()
 
 
 def _format_a11y_tree(node: dict, prefix: str = "", counter: list | None = None) -> str:

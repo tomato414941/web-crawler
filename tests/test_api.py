@@ -20,11 +20,22 @@ def reset_storage(monkeypatch):
     old_storage = api._storage
     api._storage = FakeStorage()
     monkeypatch.delenv("CRAWLER_API_TOKEN", raising=False)
+    monkeypatch.delenv("CRAWLER_ALLOW_UNAUTHENTICATED_API", raising=False)
     yield
     api._storage = old_storage
 
 
-def test_stats_uses_fast_runtime_summary():
+def test_stats_requires_configured_token_by_default():
+    client = TestClient(api.app)
+
+    response = client.get("/stats")
+
+    assert response.status_code == 503
+    assert response.json() == {"detail": "api_token_not_configured"}
+
+
+def test_stats_allows_explicit_unauthenticated_mode(monkeypatch):
+    monkeypatch.setenv("CRAWLER_ALLOW_UNAUTHENTICATED_API", "true")
     client = TestClient(api.app)
 
     response = client.get("/stats")
@@ -33,7 +44,8 @@ def test_stats_uses_fast_runtime_summary():
     assert response.json() == {"stats_source": "runtime_snapshot"}
 
 
-def test_stats_diagnostics_uses_runtime_snapshot_only():
+def test_stats_diagnostics_uses_runtime_snapshot_only(monkeypatch):
+    monkeypatch.setenv("CRAWLER_ALLOW_UNAUTHENTICATED_API", "true")
     client = TestClient(api.app)
 
     response = client.get("/stats/diagnostics")

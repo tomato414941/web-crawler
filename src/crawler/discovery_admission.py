@@ -16,6 +16,7 @@ from .discovery import (
     host_key,
     rank_discovered_url,
 )
+from .egress_guard import is_url_allowed_without_dns
 from .url_ledger import (
     CrawlTask,
     INTENT_EXPLORE,
@@ -27,6 +28,7 @@ ADMISSION_REASON_SCORE_BELOW_THRESHOLD = "score_below_threshold"
 ADMISSION_REASON_LOW_VALUE_ARCHETYPE = "low_value_archetype"
 ADMISSION_REASON_NOFOLLOW_PARENT = "nofollow_parent"
 ADMISSION_REASON_HOST_POLICY_PENALTY = "host_policy_penalty"
+ADMISSION_REASON_EGRESS_BLOCKED = "egress_blocked"
 
 _HOST_POLICY_PENALTY = 0.35
 _LOW_VALUE_ARCHETYPES = {ARCHETYPE_REDIRECT_HUB, ARCHETYPE_REGISTRY_LISTING}
@@ -215,9 +217,15 @@ class DiscoveryAdmissionPolicy:
         *,
         seed_hosts: set[str],
         is_valid_url: Callable[[str], bool],
+        is_egress_allowed_url: Callable[[str], bool] | None = None,
     ) -> None:
         self.seed_hosts = seed_hosts
         self.is_valid_url = is_valid_url
+        self.is_egress_allowed_url = (
+            is_egress_allowed_url
+            if is_egress_allowed_url is not None
+            else lambda url: is_url_allowed_without_dns(url).allowed
+        )
 
     def build_tasks(
         self,
@@ -266,6 +274,9 @@ class DiscoveryAdmissionPolicy:
         for link in links:
             if not self.is_valid_url(link):
                 counts["scope_filtered"] += 1
+                continue
+            if not self.is_egress_allowed_url(link):
+                counts[ADMISSION_REASON_EGRESS_BLOCKED] += 1
                 continue
             target_host = host_key(link)
             decision = decide_discovered_url_admission(

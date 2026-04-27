@@ -18,6 +18,7 @@ import typer
 from .config import settings
 from .content_policy import should_extract_links, should_store_text_content
 from .core import HttpFetcher, Response
+from .egress_guard import EgressBlockedError, is_url_allowed_without_dns
 from .discovery_admission import (
     AdmissionControl,
     DiscoveryAdmissionPolicy,
@@ -528,6 +529,38 @@ class CrawlerEngine:
         self.host_manager.record_error(url)
         return 0.0
 
+    def _build_retryable_failed_task(
+        self,
+        *,
+        task: CrawlTask,
+        error: str,
+        timings: CrawlStageTimings,
+        process_started: float,
+    ) -> _FailedTask:
+        """Build a retryable failure without letting host runtime hooks escape."""
+        try:
+            backoff_seconds = self._record_error_runtime(task.url)
+        except Exception:
+            logger.debug("Failed to record host runtime error", exc_info=True)
+            backoff_seconds = None
+        try:
+            retryable = self.host_manager.should_retry(task.url)
+        except Exception:
+            logger.debug("Failed to read host retry policy", exc_info=True)
+            retryable = True
+        return _FailedTask(
+            task=task,
+            failure=CrawlFailure(
+                url=task.url,
+                error=error,
+                retryable=retryable,
+                timings=timings,
+            ),
+            process_started=process_started,
+            record_error=True,
+            backoff_seconds=backoff_seconds,
+        )
+
     def _host_inflight_budget(self, host_key: str) -> int:
         """Resolve the allowed concurrent in-flight requests for a host."""
         default_budget = self.max_inflight_requests_per_host
@@ -548,6 +581,13 @@ class CrawlerEngine:
         if self.same_host:
             return urlparse(url).netloc == self.start_host
         return True
+
+    def _is_egress_allowed_url(self, url: str) -> bool:
+        """Check fast egress rules that do not require DNS resolution."""
+        return is_url_allowed_without_dns(
+            url,
+            allow_private_network_egress=settings.allow_private_network_egress,
+        ).allowed
 
     def _build_seed_task(self, url: str) -> CrawlTask:
         """Build the initial scheduler task for an explicit seed URL."""
@@ -605,6 +645,7 @@ class CrawlerEngine:
         result = DiscoveryAdmissionPolicy(
             seed_hosts=self.seed_hosts,
             is_valid_url=self._is_valid_url,
+            is_egress_allowed_url=self._is_egress_allowed_url,
         ).build_tasks(
             parent_url=parent_url,
             links=links,
@@ -678,8 +719,32 @@ class CrawlerEngine:
         process_started = time.perf_counter()
 
         precheck_started = time.perf_counter()
+        if not self._is_egress_allowed_url(url):
+            timings.precheck_ms = _elapsed_ms(precheck_started)
+            return _SkippedTask(
+                task=task,
+                reason="egress_blocked",
+                timings=timings,
+                process_started=process_started,
+            )
         robots_started = time.perf_counter()
-        robots_decision = await self.host_manager.is_allowed(url)
+        try:
+            robots_decision = await self.host_manager.is_allowed(url)
+        except Exception as e:
+            timings.robots_ms = _elapsed_ms(robots_started)
+            timings.precheck_ms = _elapsed_ms(precheck_started)
+            timings.fetch = FetchTelemetry(
+                outcome="precheck_error",
+                final_url=url,
+                total_ms=timings.precheck_ms,
+                error=str(e),
+            )
+            return self._build_retryable_failed_task(
+                task=task,
+                error=str(e),
+                timings=timings,
+                process_started=process_started,
+            )
         robots_allowed = (
             robots_decision.allowed
             if hasattr(robots_decision, "allowed")
@@ -702,7 +767,23 @@ class CrawlerEngine:
         if not hasattr(robots_decision, "elapsed_ms"):
             timings.robots_ms = _elapsed_ms(robots_started)
         rate_limit_started = time.perf_counter()
-        await self.host_manager.wait_for_rate_limit(url)
+        try:
+            await self.host_manager.wait_for_rate_limit(url)
+        except Exception as e:
+            timings.rate_limit_ms = _elapsed_ms(rate_limit_started)
+            timings.precheck_ms = _elapsed_ms(precheck_started)
+            timings.fetch = FetchTelemetry(
+                outcome="precheck_error",
+                final_url=url,
+                total_ms=timings.precheck_ms,
+                error=str(e),
+            )
+            return self._build_retryable_failed_task(
+                task=task,
+                error=str(e),
+                timings=timings,
+                process_started=process_started,
+            )
         timings.rate_limit_ms = _elapsed_ms(rate_limit_started)
         timings.precheck_ms = _elapsed_ms(precheck_started)
 
@@ -766,7 +847,6 @@ class CrawlerEngine:
                         )
                 else:
                     backoff_seconds = self._record_error_runtime(url)
-                    retryable = True
                     failed = _FailedTask(
                         task=task,
                         failure=CrawlFailure(
@@ -832,6 +912,21 @@ class CrawlerEngine:
                 backoff_seconds=backoff_seconds,
             )
 
+        except EgressBlockedError as e:
+            timings.fetch_ms = _elapsed_ms(fetch_started)
+            timings.fetch = FetchTelemetry(
+                outcome="egress_blocked",
+                final_url=e.decision.url,
+                total_ms=timings.fetch_ms,
+                error=e.decision.reason,
+            )
+            return _SkippedTask(
+                task=task,
+                reason="egress_blocked",
+                timings=timings,
+                process_started=process_started,
+            )
+
         except Exception as e:
             timings.fetch_ms = _elapsed_ms(fetch_started)
             timings.fetch = FetchTelemetry(
@@ -840,19 +935,11 @@ class CrawlerEngine:
                 total_ms=timings.fetch_ms,
                 error=str(e),
             )
-            backoff_seconds = self._record_error_runtime(url)
-            retryable = self.host_manager.should_retry(url)
-            return _FailedTask(
+            return self._build_retryable_failed_task(
                 task=task,
-                failure=CrawlFailure(
-                    url=url,
-                    error=str(e),
-                    retryable=retryable,
-                    timings=timings,
-                ),
+                error=str(e),
+                timings=timings,
                 process_started=process_started,
-                record_error=True,
-                backoff_seconds=backoff_seconds,
             )
 
     def _host_key_for_url(self, url: str) -> str:
@@ -1172,7 +1259,11 @@ class CrawlerEngine:
         if callable(reset_fallback_stats):
             reset_fallback_stats()
 
-        if self.start_url and self.scheduler.pending_count() == 0:
+        if (
+            self.start_url
+            and self._is_egress_allowed_url(self.start_url)
+            and self.scheduler.pending_count() == 0
+        ):
             self.scheduler.place(self._build_seed_task(self.start_url))
 
         self._pipeline_queues = PipelineQueues(maxsize=self._pipeline_queue_maxsize)

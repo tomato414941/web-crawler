@@ -539,7 +539,16 @@ class FetchStage:
 
             slot_started = time.perf_counter()
             lease_started = time.perf_counter()
-            task, lease_telemetry = await self.lease_task(lease_started)
+            try:
+                task, lease_telemetry = await self.lease_task(lease_started)
+            except Exception:
+                await self.release_page_slot(False)
+                idle_ticks += 1
+                logger.exception("Fetch worker failed while leasing task")
+                if idle_ticks >= self.worker_patience:
+                    break
+                await asyncio.sleep(0.1)
+                continue
             lease_ms = getattr(lease_telemetry, "elapsed_ms", 0.0)
             if not task:
                 await self.release_page_slot(False)
@@ -552,6 +561,19 @@ class FetchStage:
             idle_ticks = 0
             try:
                 result = await self.process_url(task)
+            except Exception as exc:
+                result = FailedTask(
+                    task=task,
+                    failure=CrawlFailure(
+                        url=task.url,
+                        error=str(exc),
+                        retryable=True,
+                        timings=CrawlStageTimings(),
+                    ),
+                    process_started=slot_started,
+                    record_error=True,
+                )
+                logger.exception("Fetch worker failed while processing URL: url=%s", task.url)
             finally:
                 await self.release_active_host(task.url)
 
