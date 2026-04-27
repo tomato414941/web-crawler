@@ -606,6 +606,14 @@ def test_get_stats_includes_runtime_snapshot(pg_storage):
             "publish_queue_wait_max_ms": 4.5,
         },
         "admission_control": {},
+        "discovery_admission": {
+            "extracted": 0,
+            "admitted": 0,
+            "rejected": 0,
+            "admit_ratio": None,
+            "rejection_reasons": {},
+            "counts": {},
+        },
         "adaptive_budget": {
             "observed_hosts": 0,
             "eligible_hosts": 0,
@@ -680,6 +688,16 @@ def test_get_runtime_stats_summary_uses_persisted_snapshot(pg_storage):
                 "host_backoff": 0,
                 "retry_quarantine": 0,
             },
+            "timing_summary": {
+                "counts": {
+                    "discovery_admission": {
+                        "extracted": 20,
+                        "admitted": 8,
+                        "score_below_threshold": 7,
+                        "per_page_cap": 5,
+                    }
+                }
+            },
         },
     )
 
@@ -695,6 +713,22 @@ def test_get_runtime_stats_summary_uses_persisted_snapshot(pg_storage):
     assert stats["active_error_breakdown"] == {"timeout": 2}
     assert stats["top_pending_hosts"] == []
     assert stats["operator_summary"]["throughput"]["pages_per_second"] == 3.5
+    assert stats["operator_summary"]["discovery_admission"] == {
+        "extracted": 20,
+        "admitted": 8,
+        "rejected": 12,
+        "admit_ratio": 0.4,
+        "rejection_reasons": {
+            "per_page_cap": 5,
+            "score_below_threshold": 7,
+        },
+        "counts": {
+            "extracted": 20,
+            "admitted": 8,
+            "score_below_threshold": 7,
+            "per_page_cap": 5,
+        },
+    }
 
 
 def test_get_runtime_stats_summary_handles_missing_runtime_snapshot(pg_storage):
