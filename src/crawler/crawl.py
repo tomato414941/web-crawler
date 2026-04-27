@@ -18,15 +18,14 @@ import typer
 from .config import settings
 from .content_policy import should_extract_links, should_store_text_content
 from .core import HttpFetcher, Response
-from .discovery import (
-    ARCHETYPE_GENERIC_PAGE,
+from .discovery_admission import (
     AdmissionControl,
-    DiscoveryAdmissionDecision,
+    DiscoveryAdmissionPolicy,
     HostAdmissionContext,
-    PageSignals,
     build_admission_control,
-    classify_url_archetype,
-    decide_discovered_url_admission,
+)
+from .discovery import (
+    PageSignals,
     host_key,
     rank_seed_url,
     seed_hosts_from_urls,
@@ -64,7 +63,6 @@ from .url_ledger import (
     INTENT_REFRESH,
     LEASE_STRATEGY_HOST_FIRST,
     LEASE_STRATEGY_URL_ORDER,
-    SCHEDULER_SURFACE_SCHEDULED,
     SCHEDULER_SURFACE_RUNNABLE,
     SCHEDULER_SURFACE_NORMAL,
     SCHEDULER_SURFACE_REFRESH,
@@ -601,75 +599,21 @@ class CrawlerEngine:
         parent_signals: PageSignals | None = None,
     ) -> tuple[list[CrawlTask], dict[str, int]]:
         """Build admitted tasks and explain why discovered links were kept or rejected."""
-        admission_counts: Counter[str] = Counter()
-        admission_counts["extracted"] = len(links)
         admission_control = self._admission_control()
         self._runtime.admission_control = admission_control.snapshot()
         host_contexts = self._host_admission_contexts(links)
-        candidates: list[tuple[CrawlTask, DiscoveryAdmissionDecision]] = []
-        for link in links:
-            if not self._is_valid_url(link):
-                admission_counts["scope_filtered"] += 1
-                continue
-            target_host = host_key(link)
-            decision = decide_discovered_url_admission(
-                parent_url=parent_url,
-                url=link,
-                seed_hosts=self.seed_hosts,
-                parent_signals=parent_signals,
-                admission_control=admission_control,
-                host_context=host_contexts.get(target_host),
-            )
-            if not decision.admitted:
-                admission_counts[decision.reason] += 1
-                continue
-            candidates.append(
-                (
-                    CrawlTask(
-                        url=link,
-                        discovery_value=decision.discovery_value,
-                        runnable_surface=SCHEDULER_SURFACE_SCHEDULED,
-                        intent=INTENT_EXPLORE,
-                        source_url=parent_url,
-                    ),
-                    decision,
-                )
-            )
-        candidates.sort(key=lambda item: (-item[0].discovery_value, item[0].url))
-
-        selected: list[CrawlTask] = []
-        target_host_counts: Counter[str] = Counter()
-        pressure_new_hosts: set[str] = set()
-        total_limit = admission_control.per_page_cap
-        per_host_limit = admission_control.per_target_host_cap
-        for task, _decision in candidates:
-            if total_limit > 0 and len(selected) >= total_limit:
-                admission_counts["per_page_cap"] += 1
-                continue
-            target_host = urlparse(task.url).netloc.lower()
-            if self._is_pressure_limited_new_host(
-                parent_url=parent_url,
-                target_host=target_host,
-                admission_control=admission_control,
-                host_context=host_contexts.get(target_host),
-                selected_new_hosts=pressure_new_hosts,
-            ):
-                admission_counts["new_host_pressure"] += 1
-                continue
-            if per_host_limit > 0 and target_host_counts[target_host] >= per_host_limit:
-                admission_counts["per_target_host_cap"] += 1
-                continue
-            selected.append(task)
-            target_host_counts[target_host] += 1
-            if self._is_external_generic(parent_url, task.url):
-                admission_counts["external_generic"] += 1
-            if (
-                admission_control.active
-                and self._is_external_host(parent_url, target_host)
-                and not host_contexts.get(target_host, HostAdmissionContext()).known
-            ):
-                pressure_new_hosts.add(target_host)
-
+        result = DiscoveryAdmissionPolicy(
+            seed_hosts=self.seed_hosts,
+            is_valid_url=self._is_valid_url,
+        ).build_tasks(
+            parent_url=parent_url,
+            links=links,
+            parent_signals=parent_signals,
+            admission_control=admission_control,
+            host_contexts=host_contexts,
+        )
+        selected = result.tasks
+        admission_counts = result.counts
         if hasattr(self.scheduler, "preview_tasks"):
             selected = self.scheduler.preview_tasks(selected)
         admission_counts["admitted"] = len(selected)
@@ -720,39 +664,6 @@ class CrawlerEngine:
             )
             for host, record in records.items()
         }
-
-    def _is_external_generic(self, parent_url: str, url: str) -> bool:
-        target_host = host_key(url)
-        if not self._is_external_host(parent_url, target_host):
-            return False
-        return classify_url_archetype(url) == ARCHETYPE_GENERIC_PAGE
-
-    def _is_external_host(self, parent_url: str, target_host: str) -> bool:
-        return bool(
-            target_host
-            and target_host != host_key(parent_url)
-            and target_host not in self.seed_hosts
-        )
-
-    def _is_pressure_limited_new_host(
-        self,
-        *,
-        parent_url: str,
-        target_host: str,
-        admission_control: AdmissionControl,
-        host_context: HostAdmissionContext | None,
-        selected_new_hosts: set[str],
-    ) -> bool:
-        if not admission_control.active:
-            return False
-        limit = admission_control.new_external_host_cap
-        if limit <= 0 or len(selected_new_hosts) < limit:
-            return False
-        if host_context is not None and host_context.known:
-            return False
-        if target_host == host_key(parent_url) or target_host in self.seed_hosts:
-            return False
-        return target_host not in selected_new_hosts
 
     async def _finalize_skipped_task(self, skipped: _SkippedTask) -> _SkippedTask:
         """Apply scheduler mutations for a skipped crawl outside fetch workers."""

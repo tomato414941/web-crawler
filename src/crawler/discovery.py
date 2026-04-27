@@ -35,7 +35,6 @@ _ARCHETYPE_ADJUSTMENTS = {
 _LOW_VALUE_ARCHETYPES = {ARCHETYPE_REDIRECT_HUB, ARCHETYPE_REGISTRY_LISTING}
 
 _MIN_DISCOVERY_VALUE = 0.25
-_HOST_POLICY_PENALTY = 0.35
 _REDIRECT_SEGMENTS = {"go", "goto", "redirect", "r", "out", "jump"}
 _DOCUMENT_HINTS = {"doc", "docs", "document", "documents", "draft", "drafts", "spec", "specs"}
 _DOCUMENT_FILENAME_PREFIXES = ("draft-", "rfc")
@@ -85,117 +84,6 @@ class EnqueueDecision:
     archetype: str = ARCHETYPE_GENERIC_PAGE
     parent_archetype: str = ARCHETYPE_GENERIC_PAGE
     parent_context: str = PARENT_CONTEXT_GENERIC
-
-
-@dataclass(frozen=True)
-class DiscoveryAdmissionDecision:
-    """Scheduler admission decision for a discovered URL."""
-
-    url: str
-    discovery_value: float
-    archetype: str
-    parent_context: str
-    admitted: bool
-    reason: str
-
-
-@dataclass(frozen=True)
-class AdmissionControl:
-    """Frontier-targeted controls derived from the current pending count."""
-
-    mode: str
-    target_pending: int
-    pending: int = 0
-    min_discovery_value: float = 0.5
-    per_page_cap: int = 200
-    per_target_host_cap: int = 8
-    new_external_host_cap: int = 8
-
-    @property
-    def active(self) -> bool:
-        return self.mode in {"reduce", "drain"}
-
-    def snapshot(self) -> dict[str, object]:
-        return {
-            "mode": self.mode,
-            "target_pending": self.target_pending,
-            "pending": self.pending,
-            "min_score": self.min_discovery_value,
-            "per_page_cap": self.per_page_cap,
-            "per_target_host_cap": self.per_target_host_cap,
-            "new_external_host_cap": self.new_external_host_cap,
-        }
-
-
-FrontierPressure = AdmissionControl
-
-
-def build_admission_control(*, pending: int, target_pending: int) -> AdmissionControl:
-    """Derive admission limits from the distance to the pending target."""
-    if target_pending <= 0:
-        raise ValueError("target_pending must be positive")
-    pending = max(0, int(pending))
-    target_pending = int(target_pending)
-    ratio = pending / target_pending
-    if ratio < 0.6:
-        return AdmissionControl(
-            mode="expand",
-            target_pending=target_pending,
-            pending=pending,
-            min_discovery_value=0.5,
-            per_page_cap=200,
-            per_target_host_cap=8,
-            new_external_host_cap=8,
-        )
-    if ratio < 1.2:
-        return AdmissionControl(
-            mode="balanced",
-            target_pending=target_pending,
-            pending=pending,
-            min_discovery_value=0.8,
-            per_page_cap=160,
-            per_target_host_cap=6,
-            new_external_host_cap=5,
-        )
-    if ratio < 1.8:
-        return AdmissionControl(
-            mode="reduce",
-            target_pending=target_pending,
-            pending=pending,
-            min_discovery_value=1.0,
-            per_page_cap=80,
-            per_target_host_cap=4,
-            new_external_host_cap=2,
-        )
-    return AdmissionControl(
-        mode="drain",
-        target_pending=target_pending,
-        pending=pending,
-        min_discovery_value=1.15,
-        per_page_cap=40,
-        per_target_host_cap=2,
-        new_external_host_cap=1,
-    )
-
-
-@dataclass(frozen=True)
-class HostAdmissionContext:
-    """Known host quality signals for admission scoring."""
-
-    known: bool = False
-    robots_status: str | None = None
-    failure_count: int = 0
-    success_count: int = 0
-    consecutive_failures: int = 0
-    penalty: float = _HOST_POLICY_PENALTY
-
-    @property
-    def is_low_value(self) -> bool:
-        if self.consecutive_failures >= 4:
-            return True
-        if self.robots_status in {"denied", "disallowed"}:
-            return True
-        return self.failure_count >= 3 and self.success_count == 0
 
 
 def host_key(url: str) -> str:
@@ -336,16 +224,6 @@ def _adjust_discovery_value(
     return max(_MIN_DISCOVERY_VALUE, round(discovery_value, 2)), archetype
 
 
-def _apply_host_policy(
-    discovery_value: float,
-    host_context: HostAdmissionContext | None,
-) -> tuple[float, bool]:
-    if host_context is None or not host_context.is_low_value:
-        return discovery_value, False
-    penalty = max(0.0, host_context.penalty)
-    return max(_MIN_DISCOVERY_VALUE, round(discovery_value - penalty, 2)), True
-
-
 def rank_seed_url(url: str) -> EnqueueDecision:
     """Assign the highest discovery value to explicit seed URLs."""
     return EnqueueDecision(discovery_value=SEED_DISCOVERY_VALUE)
@@ -408,51 +286,19 @@ def rank_discovered_url(
     )
 
 
-def decide_discovered_url_admission(
-    *,
-    parent_url: str,
-    url: str,
-    seed_hosts: set[str] | None = None,
-    parent_signals: PageSignals | None = None,
-    admission_control: AdmissionControl,
-    host_context: HostAdmissionContext | None = None,
-) -> DiscoveryAdmissionDecision:
-    """Decide whether a discovered URL is valuable enough for scheduler admission."""
-    decision = rank_discovered_url(
-        parent_url=parent_url,
-        url=url,
-        seed_hosts=seed_hosts,
-        parent_signals=parent_signals,
-    )
-    discovery_value, host_penalized = _apply_host_policy(
-        decision.discovery_value,
-        host_context,
-    )
-    decision = EnqueueDecision(
-        discovery_value=discovery_value,
-        archetype=decision.archetype,
-        parent_archetype=decision.parent_archetype,
-        parent_context=decision.parent_context,
-    )
-    admitted = True
-    reason = ADMISSION_REASON_CANDIDATE
-    if decision.parent_context == PARENT_CONTEXT_NOFOLLOW:
-        admitted = False
-        reason = ADMISSION_REASON_NOFOLLOW_PARENT
-    elif decision.archetype in _LOW_VALUE_ARCHETYPES:
-        admitted = False
-        reason = ADMISSION_REASON_LOW_VALUE_ARCHETYPE
-    elif host_penalized and decision.discovery_value < admission_control.min_discovery_value:
-        admitted = False
-        reason = ADMISSION_REASON_HOST_POLICY_PENALTY
-    elif decision.discovery_value < admission_control.min_discovery_value:
-        admitted = False
-        reason = ADMISSION_REASON_SCORE_BELOW_THRESHOLD
-    return DiscoveryAdmissionDecision(
-        url=url,
-        discovery_value=decision.discovery_value,
-        archetype=decision.archetype,
-        parent_context=decision.parent_context,
-        admitted=admitted,
-        reason=reason,
-    )
+_ADMISSION_EXPORTS = {
+    "AdmissionControl",
+    "DiscoveryAdmissionDecision",
+    "FrontierPressure",
+    "HostAdmissionContext",
+    "build_admission_control",
+    "decide_discovered_url_admission",
+}
+
+
+def __getattr__(name: str) -> object:
+    if name in _ADMISSION_EXPORTS:
+        from . import discovery_admission
+
+        return getattr(discovery_admission, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
