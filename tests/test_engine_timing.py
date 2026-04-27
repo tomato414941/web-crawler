@@ -51,6 +51,7 @@ class _FakeLedger:
 
     def mark_done(self, url, lease_token=None):
         self.done.append((url, lease_token))
+        return True
 
     def mark_failed(self, url, retryable, error, lease_token=None):
         raise AssertionError(f"unexpected failure for {url}: {error}")
@@ -392,7 +393,7 @@ async def test_finalizer_survives_item_error_and_drains_next_item():
             if self.fail_once:
                 self.fail_once = False
                 raise RuntimeError("boom")
-            super().mark_done(url, lease_token=lease_token)
+            return super().mark_done(url, lease_token=lease_token)
 
     ledger = FlakyLedger()
     engine = CrawlerEngine(
@@ -626,6 +627,7 @@ async def test_failed_finalizer_records_mark_failed_breakdown():
 
         def mark_failed(self, url, retryable, error, backoff_seconds=None, lease_token=None):
             self.failed.append((url, retryable, error, backoff_seconds, lease_token))
+            return True
 
     ledger = FailedLedger()
     engine = CrawlerEngine(

@@ -12,6 +12,7 @@ from urllib.parse import urlparse
 import psycopg2.extras
 
 from .config import settings
+from .egress_guard import is_url_allowed_without_dns
 from .host_runnable_heads import (
     HostRunnableHead,
     HostRunnableHeadDirtyRefreshSummary,
@@ -1216,7 +1217,13 @@ class UrlLedger:
         """Normalize and deduplicate tasks before writing to Postgres."""
         merged: dict[str, CrawlTask] = {}
         for task in tasks:
-            normalized = self._normalize_task_metadata(task, normalized_url=normalize_url(task.url))
+            normalized_url = normalize_url(task.url)
+            if not is_url_allowed_without_dns(
+                normalized_url,
+                allow_private_network_egress=settings.allow_private_network_egress,
+            ).allowed:
+                continue
+            normalized = self._normalize_task_metadata(task, normalized_url=normalized_url)
             existing = merged.get(normalized.url)
             if existing is None:
                 merged[normalized.url] = normalized

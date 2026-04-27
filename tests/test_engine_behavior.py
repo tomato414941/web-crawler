@@ -123,6 +123,7 @@ class FakeLedger:
 
     def mark_done(self, url: str, lease_token: str | None = None):
         self.done.append(url)
+        return True
 
     def mark_failed(
         self,
@@ -142,6 +143,7 @@ class FakeLedger:
                 "lease_token": lease_token,
             }
         )
+        return True
 
     def rebuild_host_runnable_heads(self, **kwargs: object):
         self.rebuild_calls.append(kwargs)

@@ -46,6 +46,7 @@ class CrawlerSettings(BaseSettings):
     stored_content_standard_min_discovery_value: float = 1.0
     stored_content_extended_min_discovery_value: float = 1.4
     admission_target_pending: int = 500_000
+    allow_private_network_egress: bool = False
     finalizer_batch_size: int = 16
     finalizer_batch_wait_ms: float = 25.0
     publisher_batch_size: int = 16

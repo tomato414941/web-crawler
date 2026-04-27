@@ -33,7 +33,13 @@ def require_api_token(
 ) -> None:
     token = os.environ.get("CRAWLER_API_TOKEN", "").strip()
     if not token:
-        return
+        allow_unauthenticated = (
+            os.environ.get("CRAWLER_ALLOW_UNAUTHENTICATED_API", "").strip().lower()
+            in {"1", "true", "yes"}
+        )
+        if allow_unauthenticated:
+            return
+        raise HTTPException(status_code=503, detail="api_token_not_configured")
 
     supplied = x_api_token or ""
     if authorization:
