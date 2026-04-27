@@ -6,6 +6,7 @@ import asyncio
 from collections.abc import Callable
 import concurrent.futures
 from dataclasses import dataclass, replace
+import logging
 import time
 from typing import TYPE_CHECKING
 
@@ -17,6 +18,9 @@ if TYPE_CHECKING:
     from .pipeline import FailedTask, ParsedPage, SkippedTask
     from .storage import PgStorage
     from .url_ledger import UrlLedger
+
+
+logger = logging.getLogger(__name__)
 
 
 def _elapsed_ms(started_at: float) -> float:
@@ -137,10 +141,14 @@ class FinalizerService:
                 if self.scheduler.mark_done(parsed.task.url, lease_token=parsed.task.lease_token):
                     updated_count += 1
         if updated_count != len(parsed_pages):
-            raise RuntimeError("scheduler_mark_done_noop")
+            logger.warning(
+                "Scheduler mark_done updated fewer success rows than expected: updated=%s expected=%s",
+                updated_count,
+                len(parsed_pages),
+            )
         telemetry.mark_done_ms = _elapsed_ms(mark_started)
 
-        if self.host_store is not None:
+        if self.host_store is not None and updated_count:
             host_started = time.perf_counter()
             success_records = [
                 (
@@ -218,7 +226,7 @@ class FinalizerService:
                 lease_token=failed.task.lease_token,
             )
             if not updated:
-                raise RuntimeError("scheduler_mark_done_noop")
+                logger.warning("Scheduler mark_done no-op for failed task: url=%s", failed.task.url)
             telemetry.mark_done_ms = _elapsed_ms(mark_started)
             telemetry.total_ms = _elapsed_ms(total_started)
             return telemetry
@@ -232,7 +240,7 @@ class FinalizerService:
             lease_token=failed.task.lease_token,
         )
         if not updated:
-            raise RuntimeError("scheduler_mark_failed_noop")
+            logger.warning("Scheduler mark_failed no-op for failed task: url=%s", failed.task.url)
         telemetry.mark_failed_ms = _elapsed_ms(mark_started)
         telemetry.total_ms = _elapsed_ms(total_started)
         return telemetry
@@ -262,7 +270,7 @@ class FinalizerService:
         mark_started = time.perf_counter()
         updated = self.scheduler.mark_done(skipped.task.url, lease_token=skipped.task.lease_token)
         if not updated:
-            raise RuntimeError("scheduler_mark_done_noop")
+            logger.warning("Scheduler mark_done no-op for skipped task: url=%s", skipped.task.url)
         telemetry.mark_done_ms = _elapsed_ms(mark_started)
         telemetry.total_ms = _elapsed_ms(total_started)
         return telemetry
