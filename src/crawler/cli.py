@@ -359,6 +359,11 @@ def scheduler_check(
     ),
     json_output: bool = typer.Option(False, "--json", help="Output raw invariant JSON"),
     sample_limit: int = typer.Option(5, "--sample-limit", help="Sample URLs per violation type"),
+    repair_terminal: bool = typer.Option(
+        False,
+        "--repair-terminal",
+        help="Remove terminal URLs from live scheduler membership tables",
+    ),
 ):
     """Run read-only scheduler invariant checks."""
     if not postgres:
@@ -372,11 +377,29 @@ def scheduler_check(
     from .storage import PgStorage
 
     with PgStorage(postgres) as storage:
-        report = SchedulerInvariantChecker(storage.conn).check(sample_limit=sample_limit).to_dict()
+        checker = SchedulerInvariantChecker(storage.conn)
+        repair_report = None
+        if repair_terminal:
+            repair_report = checker.repair_terminal_memberships().to_dict()
+        report = checker.check(sample_limit=sample_limit).to_dict()
 
     if json_output:
-        typer.echo(json.dumps(report, indent=2, ensure_ascii=False))
+        output = {"invariants": report}
+        if repair_report is not None:
+            output["repair_terminal"] = repair_report
+        typer.echo(json.dumps(output if repair_report is not None else report, indent=2, ensure_ascii=False))
         return
+
+    if repair_report is not None:
+        typer.echo("Scheduler Terminal Repair")
+        typer.echo(
+            f"  deleted_total={repair_report['deleted_total']} "
+            f"queues={repair_report['deleted_queue_rows']} "
+            f"blocked={repair_report['deleted_blocked_rows']} "
+            f"leases={repair_report['deleted_leases']} "
+            f"heads={repair_report['deleted_host_heads']} "
+            f"dirty={repair_report['deleted_dirty_hosts']}"
+        )
 
     typer.echo("Scheduler Invariants")
     typer.echo(f"  ok={str(bool(report['ok'])).lower()} violations={report['violations_total']}")

@@ -8,6 +8,7 @@ from typing import Any
 
 from .url_ledger import (
     BLOCKED_HOST_BACKOFF_TABLE,
+    HOST_RUNNABLE_HEAD_DIRTY_HOSTS_TABLE,
     HOST_RUNNABLE_HEADS_TABLE,
     LEASE_TABLE,
     PHYSICAL_QUEUE_TABLES,
@@ -58,6 +59,41 @@ class SchedulerInvariantReport:
         }
 
 
+@dataclass(frozen=True, slots=True)
+class SchedulerTerminalRepairReport:
+    """Summary of terminal URL scheduler membership removals."""
+
+    repaired_at: float
+    deleted_queue_rows: dict[str, int]
+    deleted_blocked_rows: int = 0
+    deleted_leases: int = 0
+    deleted_host_heads: int = 0
+    deleted_dirty_hosts: int = 0
+
+    @property
+    def deleted_total(self) -> int:
+        """Return the total number of scheduler-side rows removed."""
+        return (
+            sum(self.deleted_queue_rows.values())
+            + self.deleted_blocked_rows
+            + self.deleted_leases
+            + self.deleted_host_heads
+            + self.deleted_dirty_hosts
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return a JSON-serializable repair report."""
+        return {
+            "repaired_at": self.repaired_at,
+            "deleted_total": self.deleted_total,
+            "deleted_queue_rows": dict(self.deleted_queue_rows),
+            "deleted_blocked_rows": self.deleted_blocked_rows,
+            "deleted_leases": self.deleted_leases,
+            "deleted_host_heads": self.deleted_host_heads,
+            "deleted_dirty_hosts": self.deleted_dirty_hosts,
+        }
+
+
 class SchedulerInvariantChecker:
     """Check scheduler invariants without mutating scheduler state."""
 
@@ -93,6 +129,69 @@ class SchedulerInvariantChecker:
             orphan_host_heads=orphan_count,
             host_head_mismatches=mismatch_count,
             samples=samples,
+        )
+
+    def repair_terminal_memberships(
+        self,
+        *,
+        now: float | None = None,
+    ) -> SchedulerTerminalRepairReport:
+        """Remove terminal URLs from live scheduler membership tables only."""
+        repaired_at = time.time() if now is None else now
+        deleted_queue_rows: dict[str, int] = {}
+        with self._conn.cursor() as cur:
+            cur.execute(
+                f"""DELETE FROM {HOST_RUNNABLE_HEAD_DIRTY_HOSTS_TABLE} AS dirty
+                    USING {HOST_RUNNABLE_HEADS_TABLE} AS heads,
+                          {URL_LEDGER_TABLE} AS ledger
+                    WHERE dirty.physical_queue = heads.physical_queue
+                      AND dirty.host = heads.host
+                      AND heads.head_url = ledger.url
+                      AND ledger.terminal_reason IS NOT NULL"""
+            )
+            deleted_dirty_hosts = cur.rowcount
+
+            cur.execute(
+                f"""DELETE FROM {HOST_RUNNABLE_HEADS_TABLE} AS heads
+                    USING {URL_LEDGER_TABLE} AS ledger
+                    WHERE heads.head_url = ledger.url
+                      AND ledger.terminal_reason IS NOT NULL"""
+            )
+            deleted_host_heads = cur.rowcount
+
+            cur.execute(
+                f"""DELETE FROM {LEASE_TABLE} AS leases
+                    USING {URL_LEDGER_TABLE} AS ledger
+                    WHERE leases.url = ledger.url
+                      AND ledger.terminal_reason IS NOT NULL"""
+            )
+            deleted_leases = cur.rowcount
+
+            cur.execute(
+                f"""DELETE FROM {BLOCKED_HOST_BACKOFF_TABLE} AS blocked
+                    USING {URL_LEDGER_TABLE} AS ledger
+                    WHERE blocked.url = ledger.url
+                      AND ledger.terminal_reason IS NOT NULL"""
+            )
+            deleted_blocked_rows = cur.rowcount
+
+            for physical_queue, table_name in PHYSICAL_QUEUE_TABLES.items():
+                cur.execute(
+                    f"""DELETE FROM {table_name} AS queue
+                        USING {URL_LEDGER_TABLE} AS ledger
+                        WHERE queue.url = ledger.url
+                          AND ledger.terminal_reason IS NOT NULL"""
+                )
+                deleted_queue_rows[physical_queue] = cur.rowcount
+
+        self._conn.commit()
+        return SchedulerTerminalRepairReport(
+            repaired_at=repaired_at,
+            deleted_queue_rows=deleted_queue_rows,
+            deleted_blocked_rows=deleted_blocked_rows,
+            deleted_leases=deleted_leases,
+            deleted_host_heads=deleted_host_heads,
+            deleted_dirty_hosts=deleted_dirty_hosts,
         )
 
     def _live_membership_union_sql(self) -> str:
