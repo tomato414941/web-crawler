@@ -191,6 +191,8 @@ Options:
   --json              Emit the invariant report as structured JSON
   --sample-limit      Sample URLs per violation type (default: 5)
   --repair-terminal   Remove terminal URLs from live scheduler membership tables
+  --repair-host-heads N
+                      Repair up to N stale or orphan host-head read-model rows
 ```
 
 `observe` is read-only. It summarizes crawl totals, scheduler readiness, throughput,

@@ -364,6 +364,11 @@ def scheduler_check(
         "--repair-terminal",
         help="Remove terminal URLs from live scheduler membership tables",
     ),
+    repair_host_heads: int = typer.Option(
+        0,
+        "--repair-host-heads",
+        help="Repair a bounded number of stale or orphan host-head read-model rows",
+    ),
 ):
     """Run read-only scheduler invariant checks."""
     if not postgres:
@@ -372,22 +377,39 @@ def scheduler_check(
     if sample_limit < 0:
         typer.echo("Error: --sample-limit must be 0 or greater", err=True)
         raise typer.Exit(1)
+    if repair_host_heads < 0:
+        typer.echo("Error: --repair-host-heads must be 0 or greater", err=True)
+        raise typer.Exit(1)
 
     from .scheduler_invariants import SchedulerInvariantChecker
     from .storage import PgStorage
+    from .url_ledger import UrlLedger
 
     with PgStorage(postgres) as storage:
         checker = SchedulerInvariantChecker(storage.conn)
         repair_report = None
+        host_head_repair_report = None
         if repair_terminal:
             repair_report = checker.repair_terminal_memberships().to_dict()
+        if repair_host_heads:
+            host_head_repair_report = UrlLedger(storage.conn).repair_host_runnable_heads(
+                limit=repair_host_heads
+            ).as_dict()
         report = checker.check(sample_limit=sample_limit).to_dict()
 
     if json_output:
         output = {"invariants": report}
         if repair_report is not None:
             output["repair_terminal"] = repair_report
-        typer.echo(json.dumps(output if repair_report is not None else report, indent=2, ensure_ascii=False))
+        if host_head_repair_report is not None:
+            output["repair_host_heads"] = host_head_repair_report
+        typer.echo(
+            json.dumps(
+                output if repair_report is not None or host_head_repair_report is not None else report,
+                indent=2,
+                ensure_ascii=False,
+            )
+        )
         return
 
     if repair_report is not None:
@@ -399,6 +421,15 @@ def scheduler_check(
             f"leases={repair_report['deleted_leases']} "
             f"heads={repair_report['deleted_host_heads']} "
             f"dirty={repair_report['deleted_dirty_hosts']}"
+        )
+    if host_head_repair_report is not None:
+        typer.echo("Scheduler Host-Head Repair")
+        typer.echo(
+            f"  checked={host_head_repair_report['checked_heads']} "
+            f"orphan={host_head_repair_report['orphan_heads']} "
+            f"stale={host_head_repair_report['stale_heads']} "
+            f"missing={host_head_repair_report['missing_heads']} "
+            f"repaired={host_head_repair_report['repaired_hosts']}"
         )
 
     typer.echo("Scheduler Invariants")

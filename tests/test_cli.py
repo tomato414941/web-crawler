@@ -233,6 +233,66 @@ def test_scheduler_check_repair_terminal_prints_repair_summary(monkeypatch):
     assert "ok=true violations=0" in result.stdout
 
 
+def test_scheduler_check_repair_host_heads_prints_repair_summary(monkeypatch):
+    runner = CliRunner()
+
+    class FakeChecker:
+        def __init__(self, conn):
+            self.conn = conn
+
+        def check(self, sample_limit=5):
+            return type(
+                "Report",
+                (),
+                {
+                    "to_dict": lambda self: {
+                        "ok": True,
+                        "violations_total": 0,
+                        "duplicate_memberships": 0,
+                        "terminal_in_live_queue": 0,
+                        "expired_leases": 0,
+                        "orphan_host_heads": 0,
+                        "host_head_mismatches": 0,
+                        "samples": {},
+                    }
+                },
+            )()
+
+    class FakeLedger:
+        def __init__(self, conn):
+            self.conn = conn
+
+        def repair_host_runnable_heads(self, *, limit):
+            assert limit == 7
+            return type(
+                "RepairReport",
+                (),
+                {
+                    "as_dict": lambda self: {
+                        "checked_heads": 3,
+                        "orphan_heads": 1,
+                        "stale_heads": 0,
+                        "missing_heads": 0,
+                        "repaired_hosts": 1,
+                    }
+                },
+            )()
+
+    monkeypatch.setattr("crawler.storage.PgStorage", FakeStorage)
+    monkeypatch.setattr("crawler.scheduler_invariants.SchedulerInvariantChecker", FakeChecker)
+    monkeypatch.setattr("crawler.url_ledger.UrlLedger", FakeLedger)
+
+    result = runner.invoke(
+        app,
+        ["scheduler-check", "--postgres", "postgresql://example", "--repair-host-heads", "7"],
+    )
+
+    assert result.exit_code == 0
+    assert "Scheduler Host-Head Repair" in result.stdout
+    assert "checked=3 orphan=1 stale=0 missing=0 repaired=1" in result.stdout
+    assert "ok=true violations=0" in result.stdout
+
+
 def test_scheduler_check_requires_postgres():
     runner = CliRunner()
 
