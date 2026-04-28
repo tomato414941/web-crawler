@@ -43,6 +43,7 @@ def _reset(fetcher_type):
 
 class FakeStorage:
     dsn: str | None = None
+    conn = object()
 
     def __init__(self, dsn: str):
         type(self).dsn = dsn
@@ -115,6 +116,55 @@ def test_agent_command_requires_experimental_acknowledgement():
 
     assert result.exit_code == 2
     assert "experimental" in result.stderr
+
+
+def test_scheduler_check_command_prints_summary(monkeypatch):
+    runner = CliRunner()
+
+    class FakeChecker:
+        def __init__(self, conn):
+            self.conn = conn
+
+        def check(self, sample_limit=5):
+            assert sample_limit == 2
+            return type(
+                "Report",
+                (),
+                {
+                    "to_dict": lambda self: {
+                        "ok": False,
+                        "violations_total": 1,
+                        "duplicate_memberships": 1,
+                        "terminal_in_live_queue": 0,
+                        "expired_leases": 0,
+                        "orphan_host_heads": 0,
+                        "host_head_mismatches": 0,
+                        "samples": {},
+                    }
+                },
+            )()
+
+    monkeypatch.setattr("crawler.storage.PgStorage", FakeStorage)
+    monkeypatch.setattr("crawler.scheduler_invariants.SchedulerInvariantChecker", FakeChecker)
+
+    result = runner.invoke(
+        app,
+        ["scheduler-check", "--postgres", "postgresql://example", "--sample-limit", "2"],
+    )
+
+    assert result.exit_code == 0
+    assert "Scheduler Invariants" in result.stdout
+    assert "ok=false violations=1" in result.stdout
+    assert "duplicates=1 terminal=0 expired_leases=0" in result.stdout
+
+
+def test_scheduler_check_requires_postgres():
+    runner = CliRunner()
+
+    result = runner.invoke(app, ["scheduler-check"])
+
+    assert result.exit_code == 1
+    assert "CRAWLER_POSTGRES_DSN is required" in result.stderr
 
 
 def test_observe_command_prints_json_observation(monkeypatch):

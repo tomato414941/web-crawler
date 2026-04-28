@@ -17,6 +17,7 @@ from .url_ledger import (
     PHYSICAL_QUEUE_TABLES,
     URL_LEDGER_TABLE,
 )
+from .scheduler_invariants import SchedulerInvariantChecker
 
 logger = logging.getLogger(__name__)
 
@@ -44,12 +45,14 @@ def read_operator_observation(storage: Any) -> dict[str, object]:
     """Read a compact, repeatable production observation from Postgres."""
     stats = storage.get_runtime_stats_summary()
     storage_shape = _read_storage_shape(storage.conn)
-    return build_operator_observation(stats, storage_shape)
+    scheduler_invariants = SchedulerInvariantChecker(storage.conn).check(sample_limit=0).to_dict()
+    return build_operator_observation(stats, storage_shape, scheduler_invariants)
 
 
 def build_operator_observation(
     stats: Mapping[str, object],
     storage_shape: Mapping[str, object],
+    scheduler_invariants: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
     """Build a stable operator-facing observation from detailed stats."""
     operator_summary = _mapping(stats.get("operator_summary"))
@@ -60,6 +63,7 @@ def build_operator_observation(
     discovery_admission = _mapping(operator_summary.get("discovery_admission"))
     runtime = _mapping(stats.get("runtime"))
     storage_totals = _mapping(storage_shape.get("totals"))
+    invariants = _mapping(scheduler_invariants)
 
     return {
         "crawl": {
@@ -78,6 +82,16 @@ def build_operator_observation(
             "blocked_host_next_request": _int(scheduler.get("blocked_host_next_request")),
             "blocked_host_backoff": _int(scheduler.get("blocked_host_backoff")),
             "leased": _int(scheduler.get("leased")),
+            "invariants": {
+                "ok": bool(invariants.get("ok", True)),
+                "violations_total": _int(invariants.get("violations_total")),
+                "duplicate_memberships": _int(invariants.get("duplicate_memberships")),
+                "terminal_in_live_queue": _int(invariants.get("terminal_in_live_queue")),
+                "expired_leases": _int(invariants.get("expired_leases")),
+                "orphan_host_heads": _int(invariants.get("orphan_host_heads")),
+                "host_head_mismatches": _int(invariants.get("host_head_mismatches")),
+                "checked_at": invariants.get("checked_at"),
+            },
         },
         "throughput": {
             "pages_per_second": throughput.get("pages_per_second"),
@@ -140,6 +154,7 @@ def format_operator_observation(observation: Mapping[str, object]) -> str:
     """Format an observation snapshot for terminal use."""
     crawl = _mapping(observation.get("crawl"))
     scheduler = _mapping(observation.get("scheduler"))
+    invariants = _mapping(scheduler.get("invariants"))
     throughput = _mapping(observation.get("throughput"))
     backpressure = _mapping(observation.get("backpressure"))
     admission_control = _mapping(observation.get("admission_control"))
@@ -163,6 +178,15 @@ def format_operator_observation(observation: Mapping[str, object]) -> str:
             f"scheduled={_format_int(scheduler.get('scheduled'))} "
             f"retry={_format_int(scheduler.get('retry_quarantine'))} "
             f"leased={_format_int(scheduler.get('leased'))}"
+        ),
+        (
+            "  "
+            f"invariants ok={str(bool(invariants.get('ok', True))).lower()} "
+            f"violations={_format_int(invariants.get('violations_total'))} "
+            f"duplicates={_format_int(invariants.get('duplicate_memberships'))} "
+            f"terminal={_format_int(invariants.get('terminal_in_live_queue'))} "
+            f"expired_leases={_format_int(invariants.get('expired_leases'))} "
+            f"orphan_heads={_format_int(invariants.get('orphan_host_heads'))}"
         ),
         "",
         "Throughput",

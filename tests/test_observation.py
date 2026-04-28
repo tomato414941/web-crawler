@@ -89,10 +89,30 @@ def test_build_operator_observation_compacts_runtime_and_storage_shape():
             "url_ledger": {"urls": 50, "hosts": 10},
             "relations": [{"relation": "pages", "total_bytes": 4096}],
         },
+        {
+            "ok": False,
+            "violations_total": 2,
+            "duplicate_memberships": 1,
+            "terminal_in_live_queue": 1,
+            "expired_leases": 0,
+            "orphan_host_heads": 0,
+            "host_head_mismatches": 0,
+            "checked_at": 1710000001.0,
+        },
     )
 
     assert observation["crawl"]["total_pages"] == 10
     assert observation["scheduler"]["runnable"] == 30
+    assert observation["scheduler"]["invariants"] == {
+        "ok": False,
+        "violations_total": 2,
+        "duplicate_memberships": 1,
+        "terminal_in_live_queue": 1,
+        "expired_leases": 0,
+        "orphan_host_heads": 0,
+        "host_head_mismatches": 0,
+        "checked_at": 1710000001.0,
+    }
     assert observation["throughput"]["errors"] == {"timeout": 1}
     assert observation["backpressure"]["publish_queue_size"] == 3
     assert observation["admission_control"]["mode"] == "reduce"
@@ -121,6 +141,14 @@ def test_format_operator_observation_is_stable_and_readable():
                 "scheduled": 10,
                 "retry_quarantine": 2,
                 "leased": 1,
+                "invariants": {
+                    "ok": False,
+                    "violations_total": 3,
+                    "duplicate_memberships": 1,
+                    "terminal_in_live_queue": 0,
+                    "expired_leases": 1,
+                    "orphan_host_heads": 1,
+                },
             },
             "throughput": {
                 "pages_per_second": 4.5,
@@ -162,6 +190,7 @@ def test_format_operator_observation_is_stable_and_readable():
     assert "Crawler Observation" in text
     assert "pages=10 hosts=3" in text
     assert "pending=50 runnable=30 scheduled=10 retry=2 leased=1" in text
+    assert "invariants ok=false violations=3 duplicates=1 terminal=0" in text
     assert "discovery extracted=20 admitted=5 rejected=15 admit_ratio=25.0%" in text
     assert "rejection_reasons={'score_below_threshold': 10}" in text
     assert "stored_ratio=25.0%" in text

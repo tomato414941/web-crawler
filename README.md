@@ -112,6 +112,7 @@ crawler observe --postgres postgresql://crawler:crawler@localhost:5433/crawldb
 | `serve` | Start REST API server |
 | `migrate` | Apply pending database migrations |
 | `observe` | Print a read-only operator snapshot from PostgreSQL |
+| `scheduler-check` | Run read-only scheduler invariant checks |
 | `daemon` | Run the continuous crawler loop |
 
 ### crawl
@@ -176,6 +177,17 @@ crawler observe --postgres postgresql://user:pass@host/db
 Options:
   --postgres DSN      Required: PostgreSQL DSN, also read from CRAWLER_POSTGRES_DSN
   --json              Emit the observation as structured JSON
+```
+
+### scheduler-check
+
+```bash
+crawler scheduler-check --postgres postgresql://user:pass@host/db
+
+Options:
+  --postgres DSN      Required: PostgreSQL DSN, also read from CRAWLER_POSTGRES_DSN
+  --json              Emit the invariant report as structured JSON
+  --sample-limit      Sample URLs per violation type (default: 5)
 ```
 
 `observe` is read-only. It summarizes crawl totals, scheduler readiness, throughput,
