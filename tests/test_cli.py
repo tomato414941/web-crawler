@@ -95,7 +95,7 @@ def test_observe_command_prints_formatted_observation(monkeypatch):
     monkeypatch.setattr("crawler.storage.PgStorage", FakeStorage)
     monkeypatch.setattr(
         "crawler.observation.read_operator_observation",
-        lambda storage: {"crawl": {"total_pages": 1}},
+        lambda storage, **_kwargs: {"crawl": {"total_pages": 1}},
     )
     monkeypatch.setattr(
         "crawler.observation.format_operator_observation",
@@ -173,7 +173,7 @@ def test_observe_command_prints_json_observation(monkeypatch):
     monkeypatch.setattr("crawler.storage.PgStorage", FakeStorage)
     monkeypatch.setattr(
         "crawler.observation.read_operator_observation",
-        lambda storage: {"crawl": {"total_pages": 1}},
+        lambda storage, **_kwargs: {"crawl": {"total_pages": 1}},
     )
 
     result = runner.invoke(app, ["observe", "--postgres", "postgresql://example", "--json"])
