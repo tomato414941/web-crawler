@@ -11,7 +11,7 @@ class CrawlerSettings(BaseSettings):
     fetch_body_timeout: float = 10.0
     fetch_total_timeout: float = 35.0
     max_response_body_bytes: int = 2_000_000
-    user_agent: str = "WebCrawler/0.1 (+https://github.com/web-crawler)"
+    user_agent: str = "WebCrawler/0.1 (+https://github.com/tomato414941/web-crawler)"
     max_connections: int = 100
     max_keepalive_connections: int = 20
     max_inflight_requests_per_host: int = 1

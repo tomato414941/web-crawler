@@ -1,12 +1,19 @@
 """AI agent for autonomous web browsing using Claude."""
 
+from __future__ import annotations
+
 import json
 import re
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Any
 
-import anthropic
 import typer
-from playwright.async_api import Page, async_playwright
+
+from .config import settings
+from .egress_guard import check_url, raise_if_blocked
+
+if TYPE_CHECKING:
+    from playwright.async_api import Page
 
 SYSTEM_PROMPT = """You are a web browsing agent. You interact with web pages to complete tasks.
 
@@ -45,6 +52,7 @@ These correspond to interactive elements in the accessibility tree.
 - Use the accessibility tree to understand the page structure
 - Click buttons and links to navigate
 - Type in text fields for search or forms
+- Only navigate to public http/https URLs
 - Be efficient - complete tasks in as few steps as possible
 - If stuck, try a different approach
 - Report completion or failure clearly
@@ -118,6 +126,14 @@ class WebAgent:
         self.max_steps = max_steps
         self.headless = headless
         self.verbose = verbose
+
+        try:
+            import anthropic
+        except ImportError as exc:  # pragma: no cover - depends on optional extra
+            raise RuntimeError(
+                'The agent command requires the optional "agent" dependencies. '
+                'Install with: pip install -e ".[agent]"'
+            ) from exc
 
         self.client = anthropic.Anthropic()
         self.state: AgentState | None = None
@@ -208,6 +224,7 @@ class WebAgent:
                 if selector:
                     await page.locator(selector).first.click()
                     await page.wait_for_load_state("networkidle", timeout=5000)
+                    await self._guard_current_page(page)
                     return f"Clicked {ref}"
                 return f"Could not find element {ref}"
 
@@ -228,7 +245,9 @@ class WebAgent:
 
             elif action_type == "goto":
                 url = action.get("url", "")
+                await self._guard_url(url)
                 await page.goto(url, wait_until="networkidle", timeout=30000)
+                await self._guard_current_page(page)
                 return f"Navigated to {url}"
 
             elif action_type == "wait":
@@ -253,6 +272,20 @@ class WebAgent:
 
         except Exception as e:
             return f"Error executing {action_type}: {str(e)}"
+
+    @staticmethod
+    async def _guard_url(url: str) -> None:
+        """Apply crawler egress policy before browser navigation."""
+        raise_if_blocked(
+            await check_url(
+                url,
+                allow_private_network_egress=settings.allow_private_network_egress,
+            )
+        )
+
+    async def _guard_current_page(self, page: Page) -> None:
+        """Apply crawler egress policy after browser-driven navigation."""
+        await self._guard_url(page.url)
 
     def _build_messages(self, a11y_tree: str, last_result: str | None = None) -> list[dict]:
         """Build messages for Claude API."""
@@ -284,14 +317,25 @@ Step {self.state.steps + 1}/{self.max_steps}"""
 
     async def run(self, start_url: str) -> dict:
         """Run the agent starting from a URL."""
+        try:
+            from playwright.async_api import async_playwright
+        except ImportError as exc:  # pragma: no cover - depends on optional extra
+            raise RuntimeError(
+                'The agent command requires the optional "agent" dependencies. '
+                'Install with: pip install -e ".[agent]"'
+            ) from exc
+
+        await self._guard_url(start_url)
         self.state = AgentState(url=start_url, task=self.task)
 
         async with async_playwright() as p:
             browser = await p.chromium.launch(headless=self.headless)
-            context = await browser.new_context()
+            context = await browser.new_context(user_agent=settings.user_agent)
+            await context.route("**/*", _guard_browser_route)
             page = await context.new_page()
 
             await page.goto(start_url, wait_until="networkidle", timeout=30000)
+            await self._guard_current_page(page)
             self.state.url = page.url
 
             last_result = None
@@ -376,3 +420,15 @@ async def run_agent(
 
     result = await agent.run(start_url)
     return result
+
+
+async def _guard_browser_route(route: Any) -> None:
+    """Abort browser requests that target disallowed egress destinations."""
+    decision = await check_url(
+        route.request.url,
+        allow_private_network_egress=settings.allow_private_network_egress,
+    )
+    if decision.allowed:
+        await route.continue_()
+    else:
+        await route.abort()
