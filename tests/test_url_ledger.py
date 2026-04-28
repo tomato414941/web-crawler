@@ -320,6 +320,51 @@ class TestUrlLedger:
         assert scheduled_queue_count == 1
         assert refresh_count == 0
 
+    def test_admission_does_not_resurrect_terminal_url(self, ledger):
+        now = 1000.0
+        ledger.discover(CrawlTask(url="http://example.com/terminal"))
+        with ledger._conn.cursor() as cur:
+            cur.execute(
+                f"""UPDATE {URL_LEDGER_TABLE}
+                    SET terminal_reason = 'test_terminal',
+                        terminalized_at = %s,
+                        current_intent = NULL
+                    WHERE url = %s""",
+                (now, "http://example.com/terminal"),
+            )
+        ledger._conn.commit()
+
+        placed = ledger.place(
+            CrawlTask(
+                url="http://example.com/terminal",
+                discovery_value=10.0,
+                runnable_surface=SCHEDULER_SURFACE_RUNNABLE,
+                intent=INTENT_EXPLORE,
+            )
+        )
+        admitted = ledger.admit_urls(
+            ["http://example.com/terminal"],
+            runnable_surface=SCHEDULER_SURFACE_RUNNABLE,
+            intent=INTENT_EXPLORE,
+        )
+
+        runnable_queue_count, scheduled_queue_count, refresh_count = self._queue_counts(
+            ledger, "http://example.com/terminal"
+        )
+        assert placed is False
+        assert admitted == 0
+        assert runnable_queue_count == 0
+        assert scheduled_queue_count == 0
+        assert refresh_count == 0
+        with ledger._conn.cursor() as cur:
+            cur.execute(
+                f"""SELECT terminal_reason, current_intent
+                    FROM {URL_LEDGER_TABLE}
+                    WHERE url = %s""",
+                ("http://example.com/terminal",),
+            )
+            assert cur.fetchone() == ("test_terminal", None)
+
     def test_admit_urls_can_target_refresh_intent_surface(self, ledger):
         ledger.discover(CrawlTask(url="http://example.com/discovered"))
 
