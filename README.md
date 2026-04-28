@@ -190,6 +190,7 @@ Options:
   --postgres DSN      Required: PostgreSQL DSN, also read from CRAWLER_POSTGRES_DSN
   --json              Emit the invariant report as structured JSON
   --sample-limit      Sample URLs per violation type (default: 5)
+  --repair-terminal   Remove terminal URLs from live scheduler membership tables
 ```
 
 `observe` is read-only. It summarizes crawl totals, scheduler readiness, throughput,
