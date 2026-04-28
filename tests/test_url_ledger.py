@@ -1371,6 +1371,64 @@ class TestUrlLedger:
             (stale_count,) = cur.fetchone()
         assert stale_count == 0
 
+    def test_lease_next_host_first_rechecks_terminal_state_before_leasing(self, ledger):
+        now = 1000.0
+        ledger.place(CrawlTask(url="http://a.com/1", added_at=900, next_fetch_at=now - 1))
+        ledger.place(CrawlTask(url="http://b.com/1", added_at=1000, next_fetch_at=now - 1))
+        ledger.rebuild_host_runnable_heads(
+            runnable_surface=SCHEDULER_SURFACE_RUNNABLE,
+            now=now,
+        )
+        with ledger._conn.cursor() as cur:
+            cur.execute(
+                f"""UPDATE {URL_LEDGER_TABLE}
+                    SET terminal_reason = 'test_terminal', terminalized_at = %s
+                    WHERE url = %s""",
+                (now, "http://a.com/1"),
+            )
+        ledger._conn.commit()
+
+        result = ledger.lease_next(
+            lease_strategy=LEASE_STRATEGY_HOST_FIRST,
+            runnable_surface=SCHEDULER_SURFACE_RUNNABLE,
+        )
+
+        assert result is not None
+        assert result.url == "http://b.com/1"
+        with ledger._conn.cursor() as cur:
+            cur.execute(f"SELECT COUNT(*) FROM {LEASE_TABLE} WHERE url = %s", ("http://a.com/1",))
+            (terminal_lease_count,) = cur.fetchone()
+            cur.execute(
+                f"SELECT COUNT(*) FROM {HOST_RUNNABLE_HEADS_TABLE} WHERE head_url = %s",
+                ("http://a.com/1",),
+            )
+            (stale_head_count,) = cur.fetchone()
+        assert terminal_lease_count == 0
+        assert stale_head_count == 0
+
+    def test_lease_next_url_order_rechecks_terminal_state_before_leasing(self, ledger):
+        now = 1000.0
+        ledger.place(CrawlTask(url="http://terminal.com/1", added_at=900, next_fetch_at=now - 1))
+        with ledger._conn.cursor() as cur:
+            cur.execute(
+                f"""UPDATE {URL_LEDGER_TABLE}
+                    SET terminal_reason = 'test_terminal', terminalized_at = %s
+                    WHERE url = %s""",
+                (now, "http://terminal.com/1"),
+            )
+        ledger._conn.commit()
+
+        result = ledger.lease_next(runnable_surface=SCHEDULER_SURFACE_RUNNABLE)
+
+        assert result is None
+        with ledger._conn.cursor() as cur:
+            cur.execute(
+                f"SELECT COUNT(*) FROM {LEASE_TABLE} WHERE url = %s",
+                ("http://terminal.com/1",),
+            )
+            (terminal_lease_count,) = cur.fetchone()
+        assert terminal_lease_count == 0
+
     def test_select_runnable_host_head_uses_same_host_first_order(self, ledger):
         ledger.place(
             CrawlTask(

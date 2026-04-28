@@ -122,7 +122,7 @@ host capability signal を同居させている。これらの capability field 
 lease path は cheap-miss pattern を使う。
 
 - `host_runnable_heads` から candidate host head を読む
-- queue membership、active lease、`host_state` で candidate を再検証する
+- queue membership、terminal ledger state、active lease、`host_state` で candidate を再検証する
 - stale candidate は削除し、その host の head を局所的に refresh する
 - read model が空または利用不能な場合だけ bounded queue scan を safety fallback として使う
 
