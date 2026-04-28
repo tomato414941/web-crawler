@@ -6,6 +6,7 @@ import json
 import re
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
+from urllib.parse import urlparse
 
 import typer
 
@@ -51,8 +52,9 @@ These correspond to interactive elements in the accessibility tree.
 
 - Use the accessibility tree to understand the page structure
 - Click buttons and links to navigate
-- Type in text fields for search or forms
+- Do not type into forms unless the operator explicitly allowed input
 - Only navigate to public http/https URLs
+- Stay on the starting host unless the operator explicitly allowed external navigation
 - Be efficient - complete tasks in as few steps as possible
 - If stuck, try a different approach
 - Report completion or failure clearly
@@ -120,12 +122,17 @@ class WebAgent:
         max_steps: int = 10,
         headless: bool = True,
         verbose: bool = False,
+        allow_external_navigation: bool = False,
+        allow_form_input: bool = False,
     ):
         self.task = task
         self.model = model
         self.max_steps = max_steps
         self.headless = headless
         self.verbose = verbose
+        self.allow_external_navigation = allow_external_navigation
+        self.allow_form_input = allow_form_input
+        self._start_host: str | None = None
 
         try:
             import anthropic
@@ -229,6 +236,8 @@ class WebAgent:
                 return f"Could not find element {ref}"
 
             elif action_type == "type":
+                if not self.allow_form_input:
+                    return "Form input is disabled for this agent run"
                 ref = action.get("ref", "")
                 text = action.get("text", "")
                 selector = await self._find_element(page, ref)
@@ -246,6 +255,7 @@ class WebAgent:
             elif action_type == "goto":
                 url = action.get("url", "")
                 await self._guard_url(url)
+                self._guard_navigation_scope(url)
                 await page.goto(url, wait_until="networkidle", timeout=30000)
                 await self._guard_current_page(page)
                 return f"Navigated to {url}"
@@ -286,6 +296,20 @@ class WebAgent:
     async def _guard_current_page(self, page: Page) -> None:
         """Apply crawler egress policy after browser-driven navigation."""
         await self._guard_url(page.url)
+        self._guard_navigation_scope(page.url)
+
+    @staticmethod
+    def _host_for_url(url: str) -> str | None:
+        """Return a normalized hostname for navigation-scope checks."""
+        return urlparse(url).hostname
+
+    def _guard_navigation_scope(self, url: str) -> None:
+        """Reject main-frame navigation outside the run scope by default."""
+        if self.allow_external_navigation or self._start_host is None:
+            return
+        target_host = self._host_for_url(url)
+        if target_host != self._start_host:
+            raise ValueError("agent external navigation is disabled")
 
     def _build_messages(self, a11y_tree: str, last_result: str | None = None) -> list[dict]:
         """Build messages for Claude API."""
@@ -326,12 +350,13 @@ Step {self.state.steps + 1}/{self.max_steps}"""
             ) from exc
 
         await self._guard_url(start_url)
+        self._start_host = self._host_for_url(start_url)
         self.state = AgentState(url=start_url, task=self.task)
 
         async with async_playwright() as p:
             browser = await p.chromium.launch(headless=self.headless)
             context = await browser.new_context(user_agent=settings.user_agent)
-            await context.route("**/*", _guard_browser_route)
+            await context.route("**/*", lambda route: self._guard_browser_route(route))
             page = await context.new_page()
 
             await page.goto(start_url, wait_until="networkidle", timeout=30000)
@@ -397,6 +422,23 @@ Step {self.state.steps + 1}/{self.max_steps}"""
             "history": self.state.history,
         }
 
+    async def _guard_browser_route(self, route: Any) -> None:
+        """Abort browser requests that target disallowed egress destinations."""
+        decision = await check_url(
+            route.request.url,
+            allow_private_network_egress=settings.allow_private_network_egress,
+        )
+        if not decision.allowed:
+            await route.abort()
+            return
+        if route.request.is_navigation_request():
+            try:
+                self._guard_navigation_scope(route.request.url)
+            except ValueError:
+                await route.abort()
+                return
+        await route.continue_()
+
 
 async def run_agent(
     start_url: str,
@@ -405,6 +447,8 @@ async def run_agent(
     model: str = "claude-sonnet-4-20250514",
     headless: bool = True,
     verbose: bool = False,
+    allow_external_navigation: bool = False,
+    allow_form_input: bool = False,
 ) -> dict:
     """Run an AI agent to perform a task on web pages."""
     agent = WebAgent(
@@ -413,6 +457,8 @@ async def run_agent(
         max_steps=max_steps,
         headless=headless,
         verbose=verbose,
+        allow_external_navigation=allow_external_navigation,
+        allow_form_input=allow_form_input,
     )
 
     typer.echo(f"Starting agent with task: {task}")
@@ -420,15 +466,3 @@ async def run_agent(
 
     result = await agent.run(start_url)
     return result
-
-
-async def _guard_browser_route(route: Any) -> None:
-    """Abort browser requests that target disallowed egress destinations."""
-    decision = await check_url(
-        route.request.url,
-        allow_private_network_egress=settings.allow_private_network_egress,
-    )
-    if decision.allowed:
-        await route.continue_()
-    else:
-        await route.abort()
