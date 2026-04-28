@@ -13,7 +13,7 @@ from ..telemetry import FetchTelemetry
 from ..tls import build_ssl_context
 from .protocols import Response
 
-DEFAULT_USER_AGENT = "WebCrawler/0.1 (+https://github.com/web-crawler)"
+DEFAULT_USER_AGENT = "WebCrawler/0.1 (+https://github.com/tomato414941/web-crawler)"
 MAX_REDIRECTS = 20
 
 

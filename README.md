@@ -1,6 +1,6 @@
 # web-crawler
 
-Async web crawler with adaptive rendering, AI agent, and REST API.
+Async web crawler with adaptive rendering, an experimental AI agent, and REST API.
 
 This project targets the broad public web as a whole. It is not a site-specific crawler.
 Current crawl coverage may be biased by implementation limits or temporary seed choices; that
@@ -30,7 +30,7 @@ producing neutral crawl data that downstream systems can trust and use. See
 ## Features
 
 - **Adaptive Fetching** — HTTP first, auto-switches to browser rendering for JS-heavy sites
-- **AI Agent** — Claude-powered autonomous browsing for complex tasks
+- **Experimental AI Agent** — Claude-powered autonomous browsing behind explicit opt-in
 - **Web-scale Discovery** — Seed URLs start the crawl, but discovered external hosts are valid crawl targets
 - **Postgres-backed Scheduler** — Persistent crawl scheduler with URL leasing and retry backoff
 - **Physical Scheduler Queues** — Runnable / scheduled / refresh queues plus retry quarantine
@@ -103,7 +103,7 @@ crawler observe --postgres postgresql://crawler:crawler@localhost:5433/crawldb
 | `crawl` | Crawl a site with persistent scheduler management |
 | `check-links` | Find broken links (`-r` for recursive) |
 | `extract` | Extract data with CSS/XPath selectors |
-| `agent` | AI-powered autonomous browsing |
+| `agent` | Experimental AI-powered autonomous browsing |
 | `serve` | Start REST API server |
 | `migrate` | Apply pending database migrations |
 | `observe` | Print a read-only operator snapshot from PostgreSQL |
@@ -129,7 +129,7 @@ Options:
 ### agent
 
 ```bash
-crawler agent <url> -t "task description"
+crawler agent <url> -t "task description" --experimental-agent
 
 Options:
   -t, --task          Task to perform (required)
@@ -137,7 +137,14 @@ Options:
   -m, --model         Claude model (default: claude-sonnet-4-20250514)
   --headless          Run browser headless (default)
   --headed            Show browser window
+  --experimental-agent
+                      Required acknowledgement for autonomous browser control
 ```
+
+The agent is experimental and is not part of the crawler daemon path. It applies the same
+application-layer egress guard as browser fetching, including navigation and subresource requests,
+but production deployments should still rely on network-layer egress firewalling as the stronger
+containment boundary.
 
 ### extract
 
