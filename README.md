@@ -177,6 +177,8 @@ crawler observe --postgres postgresql://user:pass@host/db
 Options:
   --postgres DSN      Required: PostgreSQL DSN, also read from CRAWLER_POSTGRES_DSN
   --json              Emit the observation as structured JSON
+  --scheduler-invariants
+                      Include live scheduler invariant checks; may be expensive
 ```
 
 ### scheduler-check

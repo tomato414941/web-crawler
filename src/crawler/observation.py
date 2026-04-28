@@ -41,11 +41,17 @@ _URL_WITH_CREDENTIALS_PATTERN = re.compile(
 )
 
 
-def read_operator_observation(storage: Any) -> dict[str, object]:
+def read_operator_observation(
+    storage: Any,
+    *,
+    include_scheduler_invariants: bool = False,
+) -> dict[str, object]:
     """Read a compact, repeatable production observation from Postgres."""
     stats = storage.get_runtime_stats_summary()
     storage_shape = _read_storage_shape(storage.conn)
-    scheduler_invariants = SchedulerInvariantChecker(storage.conn).check(sample_limit=0).to_dict()
+    scheduler_invariants = None
+    if include_scheduler_invariants:
+        scheduler_invariants = SchedulerInvariantChecker(storage.conn).check(sample_limit=0).to_dict()
     return build_operator_observation(stats, storage_shape, scheduler_invariants)
 
 
@@ -64,6 +70,7 @@ def build_operator_observation(
     runtime = _mapping(stats.get("runtime"))
     storage_totals = _mapping(storage_shape.get("totals"))
     invariants = _mapping(scheduler_invariants)
+    invariants_checked = scheduler_invariants is not None
 
     return {
         "crawl": {
@@ -83,7 +90,8 @@ def build_operator_observation(
             "blocked_host_backoff": _int(scheduler.get("blocked_host_backoff")),
             "leased": _int(scheduler.get("leased")),
             "invariants": {
-                "ok": bool(invariants.get("ok", True)),
+                "checked": invariants_checked,
+                "ok": bool(invariants.get("ok", True)) if invariants_checked else None,
                 "violations_total": _int(invariants.get("violations_total")),
                 "duplicate_memberships": _int(invariants.get("duplicate_memberships")),
                 "terminal_in_live_queue": _int(invariants.get("terminal_in_live_queue")),
@@ -181,12 +189,17 @@ def format_operator_observation(observation: Mapping[str, object]) -> str:
         ),
         (
             "  "
-            f"invariants ok={str(bool(invariants.get('ok', True))).lower()} "
-            f"violations={_format_int(invariants.get('violations_total'))} "
-            f"duplicates={_format_int(invariants.get('duplicate_memberships'))} "
-            f"terminal={_format_int(invariants.get('terminal_in_live_queue'))} "
-            f"expired_leases={_format_int(invariants.get('expired_leases'))} "
-            f"orphan_heads={_format_int(invariants.get('orphan_host_heads'))}"
+            "invariants "
+            + (
+                f"ok={str(bool(invariants.get('ok'))).lower()} "
+                f"violations={_format_int(invariants.get('violations_total'))} "
+                f"duplicates={_format_int(invariants.get('duplicate_memberships'))} "
+                f"terminal={_format_int(invariants.get('terminal_in_live_queue'))} "
+                f"expired_leases={_format_int(invariants.get('expired_leases'))} "
+                f"orphan_heads={_format_int(invariants.get('orphan_host_heads'))}"
+                if invariants.get("checked")
+                else "not_checked"
+            )
         ),
         "",
         "Throughput",

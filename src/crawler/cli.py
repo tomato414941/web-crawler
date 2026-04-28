@@ -322,6 +322,11 @@ def observe(
         None, "--postgres", envvar="CRAWLER_POSTGRES_DSN", help="Postgres DSN"
     ),
     json_output: bool = typer.Option(False, "--json", help="Output raw observation JSON"),
+    scheduler_invariants: bool = typer.Option(
+        False,
+        "--scheduler-invariants",
+        help="Include live scheduler invariant checks; may be expensive",
+    ),
 ):
     """Print a read-only production observation snapshot."""
     if not postgres:
@@ -336,7 +341,10 @@ def observe(
     from .storage import PgStorage
 
     with PgStorage(postgres) as storage:
-        observation = read_operator_observation(storage)
+        observation = read_operator_observation(
+            storage,
+            include_scheduler_invariants=scheduler_invariants,
+        )
 
     if json_output:
         typer.echo(serialize_operator_observation(observation))

@@ -104,6 +104,7 @@ def test_build_operator_observation_compacts_runtime_and_storage_shape():
     assert observation["crawl"]["total_pages"] == 10
     assert observation["scheduler"]["runnable"] == 30
     assert observation["scheduler"]["invariants"] == {
+        "checked": True,
         "ok": False,
         "violations_total": 2,
         "duplicate_memberships": 1,
@@ -142,6 +143,7 @@ def test_format_operator_observation_is_stable_and_readable():
                 "retry_quarantine": 2,
                 "leased": 1,
                 "invariants": {
+                    "checked": True,
                     "ok": False,
                     "violations_total": 3,
                     "duplicate_memberships": 1,
@@ -195,6 +197,23 @@ def test_format_operator_observation_is_stable_and_readable():
     assert "rejection_reasons={'score_below_threshold': 10}" in text
     assert "stored_ratio=25.0%" in text
     assert "pages: 4.0 KiB" in text
+
+
+def test_format_operator_observation_marks_unchecked_scheduler_invariants():
+    text = format_operator_observation(
+        {
+            "crawl": {},
+            "scheduler": {"invariants": {"checked": False}},
+            "throughput": {},
+            "backpressure": {},
+            "admission_control": {},
+            "discovery_admission": {},
+            "storage": {},
+            "runtime": {},
+        }
+    )
+
+    assert "invariants not_checked" in text
 
 
 def test_serialize_operator_observation_outputs_structured_json():
