@@ -1,6 +1,6 @@
 # web-crawler
 
-Async web crawler with adaptive rendering, an experimental AI agent, and REST API.
+Async web crawler with adaptive rendering and REST API.
 
 This project targets the broad public web as a whole. It is not a site-specific crawler.
 Current crawl coverage may be biased by implementation limits or temporary seed choices; that
@@ -30,7 +30,6 @@ producing neutral crawl data that downstream systems can trust and use. See
 ## Features
 
 - **Adaptive Fetching** — HTTP first, auto-switches to browser rendering for JS-heavy sites
-- **Experimental AI Agent** — Claude-powered autonomous browsing behind explicit opt-in
 - **Web-scale Discovery** — Seed URLs start the crawl, but discovered external hosts are valid crawl targets
 - **Postgres-backed Scheduler** — Persistent crawl scheduler with URL leasing and retry backoff
 - **Physical Scheduler Queues** — Runnable / scheduled / refresh queues plus retry quarantine
@@ -42,6 +41,12 @@ producing neutral crawl data that downstream systems can trust and use. See
 - **Link Checker** — Detect broken links on any page
 - **Data Extraction** — CSS selectors and XPath
 - **Daemon Mode** — Continuous crawl loop with stale-page requeueing
+
+## Experimental Tools
+
+- **AI Agent** — Claude-powered autonomous browsing for exceptional acquisition tasks. It is not
+  part of the crawler core, daemon path, scheduler frontier, or storage model. See
+  [docs/AGENT_BOUNDARY.md](docs/AGENT_BOUNDARY.md).
 
 ## Install
 
@@ -139,12 +144,17 @@ Options:
   --headed            Show browser window
   --experimental-agent
                       Required acknowledgement for autonomous browser control
+  --allow-agent-external-navigation
+                      Allow navigation away from the starting host
+  --allow-agent-form-input
+                      Allow typing into page fields
 ```
 
 The agent is experimental and is not part of the crawler daemon path. It applies the same
 application-layer egress guard as browser fetching, including navigation and subresource requests,
-but production deployments should still rely on network-layer egress firewalling as the stronger
-containment boundary.
+blocks external main-frame navigation by default, and disables form input by default. Production
+deployments should still rely on network-layer egress firewalling as the stronger containment
+boundary.
 
 ### extract
 
