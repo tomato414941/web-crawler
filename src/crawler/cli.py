@@ -344,6 +344,44 @@ def observe(
         typer.echo(format_operator_observation(observation))
 
 
+@app.command("scheduler-check")
+def scheduler_check(
+    postgres: str = typer.Option(
+        None, "--postgres", envvar="CRAWLER_POSTGRES_DSN", help="Postgres DSN"
+    ),
+    json_output: bool = typer.Option(False, "--json", help="Output raw invariant JSON"),
+    sample_limit: int = typer.Option(5, "--sample-limit", help="Sample URLs per violation type"),
+):
+    """Run read-only scheduler invariant checks."""
+    if not postgres:
+        typer.echo("Error: --postgres or CRAWLER_POSTGRES_DSN is required", err=True)
+        raise typer.Exit(1)
+    if sample_limit < 0:
+        typer.echo("Error: --sample-limit must be 0 or greater", err=True)
+        raise typer.Exit(1)
+
+    from .scheduler_invariants import SchedulerInvariantChecker
+    from .storage import PgStorage
+
+    with PgStorage(postgres) as storage:
+        report = SchedulerInvariantChecker(storage.conn).check(sample_limit=sample_limit).to_dict()
+
+    if json_output:
+        typer.echo(json.dumps(report, indent=2, ensure_ascii=False))
+        return
+
+    typer.echo("Scheduler Invariants")
+    typer.echo(f"  ok={str(bool(report['ok'])).lower()} violations={report['violations_total']}")
+    typer.echo(
+        "  "
+        f"duplicates={report['duplicate_memberships']} "
+        f"terminal={report['terminal_in_live_queue']} "
+        f"expired_leases={report['expired_leases']} "
+        f"orphan_heads={report['orphan_host_heads']} "
+        f"head_mismatches={report['host_head_mismatches']}"
+    )
+
+
 @app.command("observe-watch")
 def observe_watch(
     postgres: str = typer.Option(
