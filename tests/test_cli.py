@@ -108,6 +108,15 @@ def test_observe_command_prints_formatted_observation(monkeypatch):
     assert FakeStorage.dsn == "postgresql://example"
 
 
+def test_agent_command_requires_experimental_acknowledgement():
+    runner = CliRunner()
+
+    result = runner.invoke(app, ["agent", "https://example.com", "-t", "inspect"])
+
+    assert result.exit_code == 2
+    assert "experimental" in result.stderr
+
+
 def test_observe_command_prints_json_observation(monkeypatch):
     runner = CliRunner()
 

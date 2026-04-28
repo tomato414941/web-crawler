@@ -226,8 +226,21 @@ def agent(
     ),
     headless: bool = typer.Option(True, "--headless/--headed", help="Run browser headlessly"),
     verbose: bool = typer.Option(False, "-v", "--verbose", help="Show detailed output"),
+    experimental: bool = typer.Option(
+        False,
+        "--experimental-agent",
+        help="Acknowledge that the autonomous browser agent is experimental",
+    ),
 ):
-    """Run an AI agent to perform tasks on web pages."""
+    """Run an experimental AI agent to perform tasks on web pages."""
+    if not experimental:
+        typer.echo(
+            "The autonomous browser agent is experimental. "
+            "Re-run with --experimental-agent to acknowledge this mode.",
+            err=True,
+        )
+        raise typer.Exit(2)
+
     from .agent import run_agent
 
     result = asyncio.run(
