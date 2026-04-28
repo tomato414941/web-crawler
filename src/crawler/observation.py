@@ -18,6 +18,7 @@ from .url_ledger import (
     URL_LEDGER_TABLE,
 )
 from .scheduler_invariants import SchedulerInvariantChecker
+from .host_ledger import HOST_LEDGER_TABLE
 
 logger = logging.getLogger(__name__)
 
@@ -529,19 +530,23 @@ def _read_storage_shape(conn: Any) -> dict[str, object]:
         url_ledger: dict[str, int] = {}
         if url_ledger_exists:
             cur.execute(
-                f"""SELECT
-                     COUNT(*) AS urls,
-                     COUNT(DISTINCT host) AS hosts,
-                     COUNT(*) FILTER (WHERE terminal_reason IS NOT NULL) AS terminal,
-                     COUNT(*) FILTER (WHERE last_error IS NOT NULL) AS with_errors
-                   FROM public.{URL_LEDGER_TABLE}"""
+                "SELECT GREATEST(COALESCE(reltuples, 0), 0)::bigint FROM pg_class WHERE oid = %s::regclass",
+                (f"public.{URL_LEDGER_TABLE}",),
             )
-            urls, hosts, terminal, with_errors = cur.fetchone()
+            urls = cur.fetchone()[0]
+            cur.execute(f"SELECT to_regclass('public.{HOST_LEDGER_TABLE}')")
+            host_ledger_exists = cur.fetchone()[0] is not None
+            hosts = 0
+            if host_ledger_exists:
+                cur.execute(
+                    "SELECT GREATEST(COALESCE(reltuples, 0), 0)::bigint FROM pg_class WHERE oid = %s::regclass",
+                    (f"public.{HOST_LEDGER_TABLE}",),
+                )
+                hosts = cur.fetchone()[0]
             url_ledger = {
                 "urls": int(urls or 0),
                 "hosts": int(hosts or 0),
-                "terminal": int(terminal or 0),
-                "with_errors": int(with_errors or 0),
+                "estimated": True,
             }
 
         relations = []
