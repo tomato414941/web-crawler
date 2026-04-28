@@ -1207,7 +1207,8 @@ class UrlLedger:
             f"""UPDATE {URL_LEDGER_TABLE} AS ledger
                 SET current_intent = payload.current_intent
                 FROM (VALUES %s) AS payload(url, current_intent)
-                WHERE ledger.url = payload.url""",
+                WHERE ledger.url = payload.url
+                  AND ledger.terminal_reason IS NULL""",
             rows,
             template="(%s, %s)",
             page_size=200,
@@ -1593,10 +1594,13 @@ class UrlLedger:
                            next_fetch_at = LEAST({URL_LEDGER_TABLE}.next_fetch_at, EXCLUDED.next_fetch_at),
                            current_intent = COALESCE(EXCLUDED.current_intent, {URL_LEDGER_TABLE}.current_intent)
                        WHERE
-                           EXCLUDED.discovery_value > {URL_LEDGER_TABLE}.discovery_value
-                           OR ({URL_LEDGER_TABLE}.source_url IS NULL AND EXCLUDED.source_url IS NOT NULL)
-                           OR EXCLUDED.next_fetch_at < {URL_LEDGER_TABLE}.next_fetch_at
-                           OR EXCLUDED.current_intent IS DISTINCT FROM {URL_LEDGER_TABLE}.current_intent
+                           {URL_LEDGER_TABLE}.terminal_reason IS NULL
+                           AND (
+                               EXCLUDED.discovery_value > {URL_LEDGER_TABLE}.discovery_value
+                               OR ({URL_LEDGER_TABLE}.source_url IS NULL AND EXCLUDED.source_url IS NOT NULL)
+                               OR EXCLUDED.next_fetch_at < {URL_LEDGER_TABLE}.next_fetch_at
+                               OR EXCLUDED.current_intent IS DISTINCT FROM {URL_LEDGER_TABLE}.current_intent
+                           )
                        RETURNING url""",
                     rows,
                     template="(%s, %s, %s, %s, %s, %s, %s)",
