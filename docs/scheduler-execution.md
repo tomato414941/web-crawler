@@ -128,7 +128,8 @@ Conceptually:
 The lease path therefore uses a cheap-miss pattern:
 
 - read candidate host heads from `host_runnable_heads`
-- revalidate each candidate against queue membership, active leases, and `host_state`
+- revalidate each candidate against queue membership, terminal ledger state, active leases, and
+  `host_state`
 - delete and host-locally refresh stale read-model candidates after a miss
 - use a bounded queue scan only as a safety fallback when the read model is empty or unavailable
 
