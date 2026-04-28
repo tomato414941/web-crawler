@@ -122,8 +122,27 @@ def test_scheduler_check_command_prints_summary(monkeypatch):
     runner = CliRunner()
 
     class FakeChecker:
+        repaired = False
+
         def __init__(self, conn):
             self.conn = conn
+
+        def repair_terminal_memberships(self):
+            type(self).repaired = True
+            return type(
+                "RepairReport",
+                (),
+                {
+                    "to_dict": lambda self: {
+                        "deleted_total": 3,
+                        "deleted_queue_rows": {"runnable": 2},
+                        "deleted_blocked_rows": 0,
+                        "deleted_leases": 1,
+                        "deleted_host_heads": 0,
+                        "deleted_dirty_hosts": 0,
+                    }
+                },
+            )()
 
         def check(self, sample_limit=5):
             assert sample_limit == 2
@@ -156,6 +175,62 @@ def test_scheduler_check_command_prints_summary(monkeypatch):
     assert "Scheduler Invariants" in result.stdout
     assert "ok=false violations=1" in result.stdout
     assert "duplicates=1 terminal=0 expired_leases=0" in result.stdout
+    assert FakeChecker.repaired is False
+
+
+def test_scheduler_check_repair_terminal_prints_repair_summary(monkeypatch):
+    runner = CliRunner()
+
+    class FakeChecker:
+        def __init__(self, conn):
+            self.conn = conn
+
+        def repair_terminal_memberships(self):
+            return type(
+                "RepairReport",
+                (),
+                {
+                    "to_dict": lambda self: {
+                        "deleted_total": 3,
+                        "deleted_queue_rows": {"runnable": 2},
+                        "deleted_blocked_rows": 0,
+                        "deleted_leases": 1,
+                        "deleted_host_heads": 0,
+                        "deleted_dirty_hosts": 0,
+                    }
+                },
+            )()
+
+        def check(self, sample_limit=5):
+            return type(
+                "Report",
+                (),
+                {
+                    "to_dict": lambda self: {
+                        "ok": True,
+                        "violations_total": 0,
+                        "duplicate_memberships": 0,
+                        "terminal_in_live_queue": 0,
+                        "expired_leases": 0,
+                        "orphan_host_heads": 0,
+                        "host_head_mismatches": 0,
+                        "samples": {},
+                    }
+                },
+            )()
+
+    monkeypatch.setattr("crawler.storage.PgStorage", FakeStorage)
+    monkeypatch.setattr("crawler.scheduler_invariants.SchedulerInvariantChecker", FakeChecker)
+
+    result = runner.invoke(
+        app,
+        ["scheduler-check", "--postgres", "postgresql://example", "--repair-terminal"],
+    )
+
+    assert result.exit_code == 0
+    assert "Scheduler Terminal Repair" in result.stdout
+    assert "deleted_total=3" in result.stdout
+    assert "ok=true violations=0" in result.stdout
 
 
 def test_scheduler_check_requires_postgres():

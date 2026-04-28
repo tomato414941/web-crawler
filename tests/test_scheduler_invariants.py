@@ -133,6 +133,55 @@ def test_scheduler_invariant_checker_detects_terminal_url_in_live_queue(conn):
     ]
 
 
+def test_scheduler_invariant_repair_removes_terminal_memberships_but_keeps_ledger(conn):
+    with conn.cursor() as cur:
+        _insert_ledger(cur, "https://example.com/terminal", terminal_reason="unsafe_egress")
+        _insert_queue(cur, QUEUE_RUNNABLE, "https://example.com/terminal")
+        cur.execute(
+            f"""INSERT INTO {LEASE_TABLE} (
+                    url, host, physical_queue, lease_token, lease_expires_at
+                )
+                VALUES (%s, 'example.com', %s, 'lease-1', 500.0)""",
+            ("https://example.com/terminal", QUEUE_RUNNABLE),
+        )
+        cur.execute(
+            f"""INSERT INTO {HOST_RUNNABLE_HEADS_TABLE} (
+                    physical_queue, host, head_url, head_next_fetch_at, head_added_at,
+                    head_scheduler_score, runnable_url_count, execution_tier,
+                    latency_penalty, runnable_at, refreshed_at
+                )
+                VALUES (
+                    %s, 'example.com', %s, 100.0, 100.0, 1.0, 1, 1, 0, 100.0, 100.0
+                )""",
+            (QUEUE_RUNNABLE, "https://example.com/terminal"),
+        )
+        cur.execute(
+            f"""INSERT INTO {HOST_RUNNABLE_HEAD_DIRTY_HOSTS_TABLE} (
+                    physical_queue, host, marked_at
+                )
+                VALUES (%s, 'example.com', 100.0)""",
+            (QUEUE_RUNNABLE,),
+        )
+    conn.commit()
+
+    checker = SchedulerInvariantChecker(conn)
+    repair = checker.repair_terminal_memberships(now=250.0)
+    report = checker.check(now=250.0)
+
+    assert repair.deleted_total == 4
+    assert repair.deleted_queue_rows[QUEUE_RUNNABLE] == 1
+    assert repair.deleted_leases == 1
+    assert repair.deleted_host_heads == 1
+    assert repair.deleted_dirty_hosts == 1
+    assert report.terminal_in_live_queue == 0
+    with conn.cursor() as cur:
+        cur.execute(
+            f"SELECT terminal_reason FROM {URL_LEDGER_TABLE} WHERE url = %s",
+            ("https://example.com/terminal",),
+        )
+        assert cur.fetchone() == ("unsafe_egress",)
+
+
 def test_scheduler_invariant_checker_detects_expired_lease(conn):
     with conn.cursor() as cur:
         _insert_ledger(cur, "https://example.com/leased")
