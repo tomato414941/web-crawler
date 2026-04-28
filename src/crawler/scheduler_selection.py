@@ -559,6 +559,7 @@ class SchedulerLeaseSelector:
                         {candidate_from}
                         JOIN {self._url_ledger_table} AS ledger ON ledger.url = candidate.url
                         WHERE candidate.url = %s
+                          AND ledger.terminal_reason IS NULL
                           AND {runnable_sql.where}
                         FOR UPDATE OF candidate SKIP LOCKED""",
                     (candidate_url, *runnable_sql.params),
