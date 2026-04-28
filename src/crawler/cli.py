@@ -231,6 +231,16 @@ def agent(
         "--experimental-agent",
         help="Acknowledge that the autonomous browser agent is experimental",
     ),
+    allow_external_navigation: bool = typer.Option(
+        False,
+        "--allow-agent-external-navigation",
+        help="Allow the experimental agent to navigate away from the starting host",
+    ),
+    allow_form_input: bool = typer.Option(
+        False,
+        "--allow-agent-form-input",
+        help="Allow the experimental agent to type into page fields",
+    ),
 ):
     """Run an experimental AI agent to perform tasks on web pages."""
     if not experimental:
@@ -251,6 +261,8 @@ def agent(
             model=model,
             headless=headless,
             verbose=verbose,
+            allow_external_navigation=allow_external_navigation,
+            allow_form_input=allow_form_input,
         )
     )
 
