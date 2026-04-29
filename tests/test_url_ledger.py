@@ -13,6 +13,7 @@ from crawler.host_runnable_heads import (
 )
 from crawler.host_store import HostStore
 from crawler.host_ledger import HOST_LEDGER_TABLE
+from crawler.url_identity import URL_IDENTITY_VERSION, url_identity_hash, url_identity_length
 from crawler.url_ledger import (
     ADMISSION_DIAGNOSTIC_FIELDS,
     BLOCKED_HOST_BACKOFF_TABLE,
@@ -245,6 +246,26 @@ class TestUrlLedger:
         assert record is not None
         assert record.host == "example.com"
         assert record.known_url_count == 1
+
+    def test_add_new_url_writes_url_identity_fields(self, ledger):
+        task = CrawlTask(url="http://example.com/page#fragment")
+
+        assert ledger.place(task) is True
+
+        normalized = "http://example.com/page"
+        with ledger._conn.cursor() as cur:
+            cur.execute(
+                f"""SELECT url_hash, url_length, url_identity_version
+                    FROM {URL_LEDGER_TABLE}
+                    WHERE url = %s""",
+                (normalized,),
+            )
+            row = cur.fetchone()
+        assert row == (
+            url_identity_hash(normalized),
+            url_identity_length(normalized),
+            URL_IDENTITY_VERSION,
+        )
 
     def test_add_duplicate_url_returns_false(self, ledger):
         task1 = CrawlTask(url="http://example.com")
