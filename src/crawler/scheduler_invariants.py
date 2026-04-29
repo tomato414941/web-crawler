@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 import time
 from typing import Any
 
+from .url_identity import MAX_URL_IDENTITY_BYTES, URL_IDENTITY_VERSION
 from .url_ledger import (
     BLOCKED_HOST_BACKOFF_TABLE,
     HOST_RUNNABLE_HEAD_DIRTY_HOSTS_TABLE,
@@ -26,6 +27,11 @@ class SchedulerInvariantReport:
     expired_leases: int = 0
     orphan_host_heads: int = 0
     host_head_mismatches: int = 0
+    url_hash_missing: int = 0
+    url_hash_mismatches: int = 0
+    url_length_mismatches: int = 0
+    url_hash_duplicates: int = 0
+    url_too_long: int = 0
     samples: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
 
     @property
@@ -37,6 +43,11 @@ class SchedulerInvariantReport:
             + self.expired_leases
             + self.orphan_host_heads
             + self.host_head_mismatches
+            + self.url_hash_missing
+            + self.url_hash_mismatches
+            + self.url_length_mismatches
+            + self.url_hash_duplicates
+            + self.url_too_long
         )
 
     @property
@@ -55,6 +66,11 @@ class SchedulerInvariantReport:
             "expired_leases": self.expired_leases,
             "orphan_host_heads": self.orphan_host_heads,
             "host_head_mismatches": self.host_head_mismatches,
+            "url_hash_missing": self.url_hash_missing,
+            "url_hash_mismatches": self.url_hash_mismatches,
+            "url_length_mismatches": self.url_length_mismatches,
+            "url_hash_duplicates": self.url_hash_duplicates,
+            "url_too_long": self.url_too_long,
             "samples": self.samples,
         }
 
@@ -114,12 +130,24 @@ class SchedulerInvariantChecker:
         expired_count, expired_samples = self._expired_leases(now=checked_at, limit=limit)
         orphan_count, orphan_samples = self._orphan_host_heads(limit=limit)
         mismatch_count, mismatch_samples = self._host_head_mismatches(limit=limit)
+        hash_missing_count, hash_missing_samples = self._url_hash_missing(limit=limit)
+        hash_mismatch_count, hash_mismatch_samples = self._url_hash_mismatches(limit=limit)
+        length_mismatch_count, length_mismatch_samples = self._url_length_mismatches(
+            limit=limit
+        )
+        hash_duplicate_count, hash_duplicate_samples = self._url_hash_duplicates(limit=limit)
+        url_too_long_count, url_too_long_samples = self._url_too_long(limit=limit)
         samples = {
             "duplicate_memberships": duplicate_samples,
             "terminal_in_live_queue": terminal_samples,
             "expired_leases": expired_samples,
             "orphan_host_heads": orphan_samples,
             "host_head_mismatches": mismatch_samples,
+            "url_hash_missing": hash_missing_samples,
+            "url_hash_mismatches": hash_mismatch_samples,
+            "url_length_mismatches": length_mismatch_samples,
+            "url_hash_duplicates": hash_duplicate_samples,
+            "url_too_long": url_too_long_samples,
         }
         return SchedulerInvariantReport(
             checked_at=checked_at,
@@ -128,6 +156,11 @@ class SchedulerInvariantChecker:
             expired_leases=expired_count,
             orphan_host_heads=orphan_count,
             host_head_mismatches=mismatch_count,
+            url_hash_missing=hash_missing_count,
+            url_hash_mismatches=hash_mismatch_count,
+            url_length_mismatches=length_mismatch_count,
+            url_hash_duplicates=hash_duplicate_count,
+            url_too_long=url_too_long_count,
             samples=samples,
         )
 
@@ -412,6 +445,172 @@ class SchedulerInvariantChecker:
                         "queue_host": queue_host,
                     }
                     for physical_queue, host, head_url, queue_host in cur.fetchall()
+                ]
+        self._conn.commit()
+        return count, samples
+
+    def _url_hash_missing(self, *, limit: int) -> tuple[int, list[dict[str, Any]]]:
+        with self._conn.cursor() as cur:
+            cur.execute(
+                f"""SELECT COUNT(*)
+                    FROM {URL_LEDGER_TABLE}
+                    WHERE url_hash IS NULL
+                       OR url_hash = ''
+                       OR url_length IS NULL
+                       OR url_identity_version IS DISTINCT FROM %s""",
+                (URL_IDENTITY_VERSION,),
+            )
+            count = int(cur.fetchone()[0] or 0)
+            samples: list[dict[str, Any]] = []
+            if limit:
+                cur.execute(
+                    f"""SELECT url, url_hash, url_length, url_identity_version
+                        FROM {URL_LEDGER_TABLE}
+                        WHERE url_hash IS NULL
+                           OR url_hash = ''
+                           OR url_length IS NULL
+                           OR url_identity_version IS DISTINCT FROM %s
+                        LIMIT %s""",
+                    (URL_IDENTITY_VERSION, limit),
+                )
+                samples = [
+                    {
+                        "url": url,
+                        "url_hash": url_hash,
+                        "url_length": url_length,
+                        "url_identity_version": url_identity_version,
+                    }
+                    for url, url_hash, url_length, url_identity_version in cur.fetchall()
+                ]
+        self._conn.commit()
+        return count, samples
+
+    def _url_hash_mismatches(self, *, limit: int) -> tuple[int, list[dict[str, Any]]]:
+        with self._conn.cursor() as cur:
+            cur.execute(
+                f"""SELECT COUNT(*)
+                    FROM {URL_LEDGER_TABLE}
+                    WHERE url_hash IS NOT NULL
+                      AND url_hash <> md5(url)"""
+            )
+            count = int(cur.fetchone()[0] or 0)
+            samples: list[dict[str, Any]] = []
+            if limit:
+                cur.execute(
+                    f"""SELECT url, url_hash, md5(url) AS expected_url_hash
+                        FROM {URL_LEDGER_TABLE}
+                        WHERE url_hash IS NOT NULL
+                          AND url_hash <> md5(url)
+                        LIMIT %s""",
+                    (limit,),
+                )
+                samples = [
+                    {
+                        "url": url,
+                        "url_hash": url_hash,
+                        "expected_url_hash": expected_url_hash,
+                    }
+                    for url, url_hash, expected_url_hash in cur.fetchall()
+                ]
+        self._conn.commit()
+        return count, samples
+
+    def _url_hash_duplicates(self, *, limit: int) -> tuple[int, list[dict[str, Any]]]:
+        with self._conn.cursor() as cur:
+            cur.execute(
+                f"""WITH duplicate_hashes AS (
+                        SELECT url_hash
+                        FROM {URL_LEDGER_TABLE}
+                        WHERE url_hash IS NOT NULL
+                          AND url_hash <> ''
+                        GROUP BY url_hash
+                        HAVING COUNT(*) > 1
+                    )
+                    SELECT COUNT(*) FROM duplicate_hashes"""
+            )
+            count = int(cur.fetchone()[0] or 0)
+            samples: list[dict[str, Any]] = []
+            if limit:
+                cur.execute(
+                    f"""WITH duplicate_hashes AS (
+                            SELECT url_hash
+                            FROM {URL_LEDGER_TABLE}
+                            WHERE url_hash IS NOT NULL
+                              AND url_hash <> ''
+                            GROUP BY url_hash
+                            HAVING COUNT(*) > 1
+                        )
+                        SELECT hashes.url_hash,
+                               ARRAY(
+                                   SELECT ledger.url
+                                   FROM {URL_LEDGER_TABLE} AS ledger
+                                   WHERE ledger.url_hash = hashes.url_hash
+                                   ORDER BY ledger.url
+                                   LIMIT %s
+                               ) AS urls
+                        FROM duplicate_hashes AS hashes
+                        ORDER BY hashes.url_hash
+                        LIMIT %s""",
+                    (limit, limit),
+                )
+                samples = [
+                    {"url_hash": url_hash, "urls": list(urls)}
+                    for url_hash, urls in cur.fetchall()
+                ]
+        self._conn.commit()
+        return count, samples
+
+    def _url_length_mismatches(self, *, limit: int) -> tuple[int, list[dict[str, Any]]]:
+        with self._conn.cursor() as cur:
+            cur.execute(
+                f"""SELECT COUNT(*)
+                    FROM {URL_LEDGER_TABLE}
+                    WHERE url_length IS NOT NULL
+                      AND url_length <> octet_length(url)"""
+            )
+            count = int(cur.fetchone()[0] or 0)
+            samples: list[dict[str, Any]] = []
+            if limit:
+                cur.execute(
+                    f"""SELECT url, url_length, octet_length(url) AS expected_url_length
+                        FROM {URL_LEDGER_TABLE}
+                        WHERE url_length IS NOT NULL
+                          AND url_length <> octet_length(url)
+                        LIMIT %s""",
+                    (limit,),
+                )
+                samples = [
+                    {
+                        "url": url,
+                        "url_length": url_length,
+                        "expected_url_length": expected_url_length,
+                    }
+                    for url, url_length, expected_url_length in cur.fetchall()
+                ]
+        self._conn.commit()
+        return count, samples
+
+    def _url_too_long(self, *, limit: int) -> tuple[int, list[dict[str, Any]]]:
+        with self._conn.cursor() as cur:
+            cur.execute(
+                f"""SELECT COUNT(*)
+                    FROM {URL_LEDGER_TABLE}
+                    WHERE octet_length(url) > %s""",
+                (MAX_URL_IDENTITY_BYTES,),
+            )
+            count = int(cur.fetchone()[0] or 0)
+            samples: list[dict[str, Any]] = []
+            if limit:
+                cur.execute(
+                    f"""SELECT url, url_length
+                        FROM {URL_LEDGER_TABLE}
+                        WHERE octet_length(url) > %s
+                        LIMIT %s""",
+                    (MAX_URL_IDENTITY_BYTES, limit),
+                )
+                samples = [
+                    {"url": url, "url_length": url_length}
+                    for url, url_length in cur.fetchall()
                 ]
         self._conn.commit()
         return count, samples

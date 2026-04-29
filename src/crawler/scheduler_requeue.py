@@ -9,6 +9,7 @@ from urllib.parse import urlparse
 
 import psycopg2.extras
 
+from .url_identity import URL_IDENTITY_VERSION, url_identity_hash, url_identity_length
 from .urls import normalize_url, url_branch_key
 
 
@@ -247,6 +248,9 @@ class SchedulerRequeueService:
             rows.append(
                 (
                     normalized,
+                    url_identity_hash(normalized),
+                    url_identity_length(normalized),
+                    URL_IDENTITY_VERSION,
                     host,
                     discovery_value,
                     now,
@@ -261,14 +265,18 @@ class SchedulerRequeueService:
                 (normalized_urls,),
             )
             existing_urls = {url for (url,) in cur.fetchall()}
-            new_host_counts = Counter(host for url, host, *_ in rows if url not in existing_urls)
+            new_host_counts = Counter(row[4] for row in rows if row[0] not in existing_urls)
             psycopg2.extras.execute_values(
                 cur,
                 f"""INSERT INTO {self._url_ledger_table} (
-                       url, host, discovery_value, source_url, added_at, next_fetch_at, current_intent
+                       url, url_hash, url_length, url_identity_version, host,
+                       discovery_value, source_url, added_at, next_fetch_at, current_intent
                    )
                    VALUES %s
                    ON CONFLICT (url) DO UPDATE SET
+                       url_hash = EXCLUDED.url_hash,
+                       url_length = EXCLUDED.url_length,
+                       url_identity_version = EXCLUDED.url_identity_version,
                        added_at = EXCLUDED.added_at,
                        next_fetch_at = EXCLUDED.next_fetch_at,
                        current_intent = EXCLUDED.current_intent,
@@ -279,11 +287,11 @@ class SchedulerRequeueService:
                        terminalized_at = NULL
                    RETURNING url, host, discovery_value, next_fetch_at, added_at""",
                 rows,
-                template=f"(%s, %s, %s, NULL, %s, %s, '{self._intent_explore}')",
+                template=f"(%s, %s, %s, %s, %s, %s, NULL, %s, %s, '{self._intent_explore}')",
                 page_size=200,
             )
             ledger_rows = cur.fetchall()
-            seen_hosts = {host for _url, host, *_ in rows if host}
+            seen_hosts = {row[4] for row in rows if row[4]}
             host_counts = Counter({host: 0 for host in seen_hosts})
             host_counts.update(new_host_counts)
             self._ledger._host_ledger.record_discovered_urls_in_tx(
