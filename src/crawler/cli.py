@@ -442,6 +442,14 @@ def scheduler_check(
         f"orphan_heads={report['orphan_host_heads']} "
         f"head_mismatches={report['host_head_mismatches']}"
     )
+    typer.echo(
+        "  "
+        f"url_hash_missing={report['url_hash_missing']} "
+        f"url_hash_mismatches={report['url_hash_mismatches']} "
+        f"url_length_mismatches={report['url_length_mismatches']} "
+        f"url_hash_duplicates={report['url_hash_duplicates']} "
+        f"url_too_long={report['url_too_long']}"
+    )
 
 
 @app.command("observe-watch")

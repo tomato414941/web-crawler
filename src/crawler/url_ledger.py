@@ -51,6 +51,7 @@ from .scheduler_observability import SchedulerObservability, SchedulerReadiness
 from .scheduler_quarantine import SchedulerQuarantine
 from .scheduler_retry_policy import SchedulerRetryPolicy
 from .schema import assert_public_table_columns
+from .url_identity import URL_IDENTITY_VERSION, url_identity_hash, url_identity_length
 from .urls import normalize_url
 
 if TYPE_CHECKING:
@@ -82,6 +83,9 @@ ADMISSION_DIAGNOSTIC_FIELDS = (
 )
 URL_LEDGER_REQUIRED_COLUMNS = {
     "url",
+    "url_hash",
+    "url_length",
+    "url_identity_version",
     "host",
     "discovery_value",
     "source_url",
@@ -1569,6 +1573,9 @@ class UrlLedger:
             rows.append(
                 (
                     task.url,
+                    url_identity_hash(task.url),
+                    url_identity_length(task.url),
+                    URL_IDENTITY_VERSION,
                     host,
                     task.discovery_value,
                     task.source_url,
@@ -1584,10 +1591,14 @@ class UrlLedger:
                 psycopg2.extras.execute_values(
                     cur,
                     f"""INSERT INTO {URL_LEDGER_TABLE} (
-                           url, host, discovery_value, source_url, added_at, next_fetch_at, current_intent
+                           url, url_hash, url_length, url_identity_version, host,
+                           discovery_value, source_url, added_at, next_fetch_at, current_intent
                        )
                        VALUES %s
                        ON CONFLICT (url) DO UPDATE SET
+                           url_hash = EXCLUDED.url_hash,
+                           url_length = EXCLUDED.url_length,
+                           url_identity_version = EXCLUDED.url_identity_version,
                            discovery_value = GREATEST({URL_LEDGER_TABLE}.discovery_value, EXCLUDED.discovery_value),
                            source_url = COALESCE({URL_LEDGER_TABLE}.source_url, EXCLUDED.source_url),
                            added_at = LEAST({URL_LEDGER_TABLE}.added_at, EXCLUDED.added_at),
@@ -1597,13 +1608,16 @@ class UrlLedger:
                            {URL_LEDGER_TABLE}.terminal_reason IS NULL
                            AND (
                                EXCLUDED.discovery_value > {URL_LEDGER_TABLE}.discovery_value
+                               OR EXCLUDED.url_hash IS DISTINCT FROM {URL_LEDGER_TABLE}.url_hash
+                               OR EXCLUDED.url_length IS DISTINCT FROM {URL_LEDGER_TABLE}.url_length
+                               OR EXCLUDED.url_identity_version IS DISTINCT FROM {URL_LEDGER_TABLE}.url_identity_version
                                OR ({URL_LEDGER_TABLE}.source_url IS NULL AND EXCLUDED.source_url IS NOT NULL)
                                OR EXCLUDED.next_fetch_at < {URL_LEDGER_TABLE}.next_fetch_at
                                OR EXCLUDED.current_intent IS DISTINCT FROM {URL_LEDGER_TABLE}.current_intent
                            )
                        RETURNING url""",
                     rows,
-                    template="(%s, %s, %s, %s, %s, %s, %s)",
+                    template="(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
                     page_size=200,
                 )
                 changed_rows = cur.fetchall()

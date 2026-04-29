@@ -99,6 +99,11 @@ def build_operator_observation(
                 "expired_leases": _int(invariants.get("expired_leases")),
                 "orphan_host_heads": _int(invariants.get("orphan_host_heads")),
                 "host_head_mismatches": _int(invariants.get("host_head_mismatches")),
+                "url_hash_missing": _int(invariants.get("url_hash_missing")),
+                "url_hash_mismatches": _int(invariants.get("url_hash_mismatches")),
+                "url_length_mismatches": _int(invariants.get("url_length_mismatches")),
+                "url_hash_duplicates": _int(invariants.get("url_hash_duplicates")),
+                "url_too_long": _int(invariants.get("url_too_long")),
                 "checked_at": invariants.get("checked_at"),
             },
         },
@@ -197,7 +202,10 @@ def format_operator_observation(observation: Mapping[str, object]) -> str:
                 f"duplicates={_format_int(invariants.get('duplicate_memberships'))} "
                 f"terminal={_format_int(invariants.get('terminal_in_live_queue'))} "
                 f"expired_leases={_format_int(invariants.get('expired_leases'))} "
-                f"orphan_heads={_format_int(invariants.get('orphan_host_heads'))}"
+                f"orphan_heads={_format_int(invariants.get('orphan_host_heads'))} "
+                f"url_hash_mismatches={_format_int(invariants.get('url_hash_mismatches'))} "
+                f"url_length_mismatches={_format_int(invariants.get('url_length_mismatches'))} "
+                f"url_too_long={_format_int(invariants.get('url_too_long'))}"
                 if invariants.get("checked")
                 else "not_checked"
             )

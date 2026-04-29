@@ -7,6 +7,7 @@ import pytest
 
 from crawler.migrate import apply_migrations
 from crawler.scheduler_invariants import SchedulerInvariantChecker
+from crawler.url_identity import MAX_URL_IDENTITY_BYTES, url_identity_hash, url_identity_length
 from crawler.url_ledger import (
     BLOCKED_HOST_BACKOFF_TABLE,
     HOST_RUNNABLE_HEAD_DIRTY_HOSTS_TABLE,
@@ -65,12 +66,15 @@ def conn():
 def _insert_ledger(cur, url: str, *, terminal_reason: str | None = None) -> None:
     cur.execute(
         f"""INSERT INTO {URL_LEDGER_TABLE} (
-                url, host, discovery_value, source_url, added_at, next_fetch_at,
-                current_intent, terminal_reason, terminalized_at
+                url, url_hash, url_length, url_identity_version, host, discovery_value,
+                source_url, added_at, next_fetch_at, current_intent, terminal_reason,
+                terminalized_at
             )
-            VALUES (%s, %s, 1.0, NULL, 100.0, 100.0, 'explore', %s, %s)""",
+            VALUES (%s, %s, %s, 1, %s, 1.0, NULL, 100.0, 100.0, 'explore', %s, %s)""",
         (
             url,
+            url_identity_hash(url),
+            url_identity_length(url),
             "example.com",
             terminal_reason,
             101.0 if terminal_reason else None,
@@ -131,6 +135,57 @@ def test_scheduler_invariant_checker_detects_terminal_url_in_live_queue(conn):
             "terminal_reason": "unsafe_egress",
         }
     ]
+
+
+def test_scheduler_invariant_checker_detects_url_identity_violations(conn):
+    long_url = "https://example.com/" + ("a" * MAX_URL_IDENTITY_BYTES)
+    with conn.cursor() as cur:
+        _insert_ledger(cur, "https://example.com/missing")
+        cur.execute(
+            f"""UPDATE {URL_LEDGER_TABLE}
+                SET url_hash = NULL
+                WHERE url = %s""",
+            ("https://example.com/missing",),
+        )
+        _insert_ledger(cur, "https://example.com/mismatch")
+        cur.execute(
+            f"""UPDATE {URL_LEDGER_TABLE}
+                SET url_hash = 'bad-hash'
+                WHERE url = %s""",
+            ("https://example.com/mismatch",),
+        )
+        _insert_ledger(cur, "https://example.com/duplicate-a")
+        _insert_ledger(cur, "https://example.com/duplicate-b")
+        cur.execute(
+            f"""UPDATE {URL_LEDGER_TABLE}
+                SET url_hash = 'duplicate-hash'
+                WHERE url IN (%s, %s)""",
+            ("https://example.com/duplicate-a", "https://example.com/duplicate-b"),
+        )
+        _insert_ledger(cur, long_url)
+        _insert_ledger(cur, "https://example.com/bad-length")
+        cur.execute(
+            f"""UPDATE {URL_LEDGER_TABLE}
+                SET url_length = 1
+                WHERE url = %s""",
+            ("https://example.com/bad-length",),
+        )
+    conn.commit()
+
+    report = SchedulerInvariantChecker(conn).check(now=200.0)
+
+    assert report.url_hash_missing == 1
+    assert report.url_hash_mismatches == 3
+    assert report.url_length_mismatches == 1
+    assert report.url_hash_duplicates == 1
+    assert report.url_too_long == 1
+    assert report.samples["url_hash_missing"][0]["url"] == "https://example.com/missing"
+    assert report.samples["url_hash_mismatches"][0]["url_hash"] != report.samples[
+        "url_hash_mismatches"
+    ][0]["expected_url_hash"]
+    assert report.samples["url_hash_duplicates"][0]["url_hash"] == "duplicate-hash"
+    assert report.samples["url_length_mismatches"][0]["url"] == "https://example.com/bad-length"
+    assert report.samples["url_too_long"][0]["url"] == long_url
 
 
 def test_scheduler_invariant_repair_removes_terminal_memberships_but_keeps_ledger(conn):

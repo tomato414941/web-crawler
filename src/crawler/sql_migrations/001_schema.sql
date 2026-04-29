@@ -1,5 +1,8 @@
 CREATE TABLE public.url_ledger (
     url text NOT NULL,
+    url_hash text,
+    url_length integer,
+    url_identity_version integer DEFAULT 1 NOT NULL,
     host text NOT NULL,
     discovery_value real DEFAULT 1.0 NOT NULL,
     source_url text,
@@ -16,6 +19,12 @@ CREATE TABLE public.url_ledger (
 
 CREATE INDEX idx_url_ledger_host
     ON public.url_ledger(host);
+
+CREATE INDEX idx_url_ledger_url_hash
+    ON public.url_ledger(url_hash);
+
+CREATE INDEX idx_url_ledger_url_length
+    ON public.url_ledger(url_length);
 
 CREATE INDEX idx_url_ledger_current_intent
     ON public.url_ledger(current_intent);

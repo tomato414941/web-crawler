@@ -8,6 +8,7 @@ import pytest
 from crawler.migrate import (
     apply_migrations,
 )
+from crawler.url_identity import URL_IDENTITY_VERSION, url_identity_hash, url_identity_length
 from crawler.url_ledger import (
     BLOCKED_HOST_BACKOFF_TABLE,
     HOST_RUNNABLE_HEAD_DIRTY_HOSTS_TABLE,
@@ -69,6 +70,7 @@ def test_apply_migrations_creates_expected_tables(migrated_dsn):
         "002_host_runnable_head_dirty_hosts.sql",
         "003_host_runnable_head_dirty_hosts_index.sql",
         "004_page_content_storage.sql",
+        "005_url_ledger_identity.sql",
     ]
 
     conn = psycopg2.connect(migrated_dsn)
@@ -95,7 +97,9 @@ def test_apply_migrations_creates_expected_tables(migrated_dsn):
                        to_regclass('public.idx_host_runnable_head_dirty_hosts_queue_marked_at_host'),
                        to_regclass('public.idx_scheduler_queue_runnable_host_head'),
                        to_regclass('public.idx_scheduler_queue_scheduled_host_head'),
-                       to_regclass('public.idx_scheduler_queue_refresh_host_head')
+                       to_regclass('public.idx_scheduler_queue_refresh_host_head'),
+                       to_regclass('public.idx_url_ledger_url_hash'),
+                       to_regclass('public.idx_url_ledger_url_length')
                 """
             )
             assert cur.fetchone() == (
@@ -119,6 +123,8 @@ def test_apply_migrations_creates_expected_tables(migrated_dsn):
                 "idx_scheduler_queue_runnable_host_head",
                 "idx_scheduler_queue_scheduled_host_head",
                 "idx_scheduler_queue_refresh_host_head",
+                "idx_url_ledger_url_hash",
+                "idx_url_ledger_url_length",
             )
     finally:
         conn.close()
@@ -148,6 +154,9 @@ def test_apply_migrations_creates_current_url_ledger_columns(migrated_dsn):
     assert "lease_token" not in columns
     assert "lease_expires_at" not in columns
     assert "priority" not in columns
+    assert "url_hash" in columns
+    assert "url_length" in columns
+    assert "url_identity_version" in columns
     assert "discovery_value" in columns
     assert "current_intent" in columns
 
@@ -243,3 +252,73 @@ def test_apply_migrations_is_idempotent(migrated_dsn):
     applied = apply_migrations(migrated_dsn)
 
     assert applied == []
+
+
+def test_url_ledger_identity_migration_backfills_existing_rows(migrated_dsn):
+    conn = psycopg2.connect(migrated_dsn)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """CREATE TABLE public.schema_migrations (
+                    version TEXT PRIMARY KEY,
+                    applied_at DOUBLE PRECISION NOT NULL
+                )"""
+            )
+            cur.executemany(
+                "INSERT INTO public.schema_migrations (version, applied_at) VALUES (%s, 1.0)",
+                [
+                    ("001_schema.sql",),
+                    ("002_host_runnable_head_dirty_hosts.sql",),
+                    ("003_host_runnable_head_dirty_hosts_index.sql",),
+                    ("004_page_content_storage.sql",),
+                ],
+            )
+            cur.execute(
+                """
+                CREATE TABLE public.url_ledger (
+                    url text PRIMARY KEY,
+                    host text NOT NULL,
+                    discovery_value double precision NOT NULL DEFAULT 0,
+                    source_url text,
+                    added_at double precision NOT NULL,
+                    next_fetch_at double precision NOT NULL,
+                    fetch_count integer NOT NULL DEFAULT 0,
+                    fail_streak integer NOT NULL DEFAULT 0,
+                    last_status integer,
+                    last_error text,
+                    last_fetch_at double precision,
+                    terminal_reason text,
+                    terminalized_at double precision,
+                    current_intent text
+                )
+                """
+            )
+            cur.execute(
+                """INSERT INTO public.url_ledger (
+                       url, host, discovery_value, added_at, next_fetch_at, current_intent
+                   ) VALUES (%s, 'example.com', 1.0, 1.0, 1.0, 'explore')""",
+                ("https://example.com/old",),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+    applied = apply_migrations(migrated_dsn)
+
+    assert applied == ["005_url_ledger_identity.sql"]
+    conn = psycopg2.connect(migrated_dsn)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""SELECT url_hash, url_length, url_identity_version
+                    FROM public.{URL_LEDGER_TABLE}
+                    WHERE url = %s""",
+                ("https://example.com/old",),
+            )
+            assert cur.fetchone() == (
+                url_identity_hash("https://example.com/old"),
+                url_identity_length("https://example.com/old"),
+                URL_IDENTITY_VERSION,
+            )
+    finally:
+        conn.close()

@@ -97,6 +97,11 @@ def test_build_operator_observation_compacts_runtime_and_storage_shape():
             "expired_leases": 0,
             "orphan_host_heads": 0,
             "host_head_mismatches": 0,
+            "url_hash_missing": 0,
+            "url_hash_mismatches": 1,
+            "url_length_mismatches": 0,
+            "url_hash_duplicates": 0,
+            "url_too_long": 0,
             "checked_at": 1710000001.0,
         },
     )
@@ -112,6 +117,11 @@ def test_build_operator_observation_compacts_runtime_and_storage_shape():
         "expired_leases": 0,
         "orphan_host_heads": 0,
         "host_head_mismatches": 0,
+        "url_hash_missing": 0,
+        "url_hash_mismatches": 1,
+        "url_length_mismatches": 0,
+        "url_hash_duplicates": 0,
+        "url_too_long": 0,
         "checked_at": 1710000001.0,
     }
     assert observation["throughput"]["errors"] == {"timeout": 1}
@@ -150,6 +160,12 @@ def test_format_operator_observation_is_stable_and_readable():
                     "terminal_in_live_queue": 0,
                     "expired_leases": 1,
                     "orphan_host_heads": 1,
+                    "host_head_mismatches": 0,
+                    "url_hash_missing": 0,
+                    "url_hash_mismatches": 1,
+                    "url_length_mismatches": 3,
+                    "url_hash_duplicates": 0,
+                    "url_too_long": 2,
                 },
             },
             "throughput": {
@@ -193,6 +209,7 @@ def test_format_operator_observation_is_stable_and_readable():
     assert "pages=10 hosts=3" in text
     assert "pending=50 runnable=30 scheduled=10 retry=2 leased=1" in text
     assert "invariants ok=false violations=3 duplicates=1 terminal=0" in text
+    assert "url_hash_mismatches=1 url_length_mismatches=3 url_too_long=2" in text
     assert "discovery extracted=20 admitted=5 rejected=15 admit_ratio=25.0%" in text
     assert "rejection_reasons={'score_below_threshold': 10}" in text
     assert "stored_ratio=25.0%" in text
