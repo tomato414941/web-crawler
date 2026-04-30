@@ -131,7 +131,11 @@ def fetch(
 def crawl(
     start_url: str = typer.Argument(..., help="Starting URL for crawl"),
     max_pages: int = typer.Option(100, "--max-pages", "-n", help="Maximum pages to crawl"),
-    same_host: bool = typer.Option(True, "--same-host/--any-host", help="Stay on same host"),
+    same_host: bool = typer.Option(
+        True,
+        "--same-host/--any-host",
+        help="Keep this one-shot crawl on the start host",
+    ),
     output: str = typer.Option(None, "-o", "--output", help="Output file path (JSONL)"),
     js: bool = typer.Option(False, "--js", help="Use browser for all pages"),
     delay: float = typer.Option(1.0, "--delay", help="Delay between requests (seconds)"),
@@ -143,7 +147,7 @@ def crawl(
         None, "--postgres", envvar="CRAWLER_POSTGRES_DSN", help="Postgres DSN for storing results"
     ),
 ):
-    """Crawl a website starting from a URL."""
+    """Run a bounded one-shot crawl starting from a URL."""
     from .crawl import run_crawl
 
     asyncio.run(

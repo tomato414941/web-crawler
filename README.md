@@ -1,52 +1,31 @@
 # web-crawler
 
-Async web crawler with adaptive rendering and REST API.
+Async broad-web crawler with adaptive fetching, PostgreSQL scheduler state, operator
+observation, and a REST API.
 
-This project targets the broad public web as a whole. It is not a site-specific crawler.
-Current crawl coverage may be biased by implementation limits or temporary seed choices; that
-bias is an artifact to correct, not the intended scope of the project. Seed URLs are bootstrap
-entry points for discovery, not an allowlist and not a statement of the crawler's target scope.
+`web-crawler` is designed to discover, fetch, classify, and record structured observations from
+the broad public web. Seed URLs are bootstrap inputs, not the crawler's target scope. Detailed
+design principles live in [docs/DESIGN_PRINCIPLES.md](docs/DESIGN_PRINCIPLES.md).
 
-## Design Philosophy
+## Current Status
 
-This project is a broad public web crawler. Seeds are bootstrap entry points, not scope
-boundaries. Unless a run explicitly applies a restrictive policy such as same-host crawling,
-discovered links may lead to other hosts and become valid crawl targets.
+This project is under active development. It has safety guards, persistent scheduling, host
+pacing, migrations, tests, and deployment scripts, but it should still be treated as an
+experimental crawler rather than a production-ready web-scale system.
 
-The crawler core is downstream-neutral. It is designed to produce reliable crawl observations for
-search, LLM-agent, monitoring, archival, and research systems, but it should not become a search
-ranking engine, an LLM memory system, or a domain-specific extractor.
-
-Broad web crawling is controlled contact with an untrusted and unbounded environment. External
-interactions are bounded by limits on time, body size, redirects, extracted links, admitted links,
-retries, rendering work, per-host concurrency, and global backlog. The public web boundary is also
-explicitly enforced: private networks, loopback addresses, metadata endpoints, unsupported schemes,
-and unsafe redirects are outside the intended crawl surface.
-
-In short, the crawler should safely, adaptively, and explainably observe the broad public web,
-producing neutral crawl data that downstream systems can trust and use. See
-[docs/DESIGN_PRINCIPLES.md](docs/DESIGN_PRINCIPLES.md) for the detailed design principles.
+The AI browser agent is experimental and outside the crawler core. See
+[docs/AGENT_BOUNDARY.md](docs/AGENT_BOUNDARY.md).
 
 ## Features
 
-- **Adaptive Fetching** — HTTP first, auto-switches to browser rendering for JS-heavy sites
-- **Web-scale Discovery** — Seed URLs start the crawl, but discovered external hosts are valid crawl targets
-- **Postgres-backed Scheduler** — Persistent crawl scheduler with URL leasing and retry backoff
-- **Physical Scheduler Queues** — Runnable / scheduled / refresh queues plus retry quarantine
-- **Host Scheduling State** — Durable per-host crawl delay and cooldown tracking in PostgreSQL
-- **REST API** — Serve crawled pages via `/pages`, `/stats` endpoints
-- **Operator Observation** — Read-only runtime/storage snapshots via `crawler observe`
-- **JSONL Export** — Optional streaming output alongside Postgres storage
-- **robots.txt** — Per-host rate limiting and access control
-- **Link Checker** — Detect broken links on any page
-- **Data Extraction** — CSS selectors and XPath
-- **Daemon Mode** — Continuous crawl loop with stale-page requeueing
-
-## Experimental Tools
-
-- **AI Agent** — Claude-powered autonomous browsing for exceptional acquisition tasks. It is not
-  part of the crawler core, daemon path, scheduler frontier, or storage model. See
-  [docs/AGENT_BOUNDARY.md](docs/AGENT_BOUNDARY.md).
+- Adaptive HTTP-first fetching with optional browser rendering
+- PostgreSQL-backed URL ledger, physical queues, leases, retries, and refresh scheduling
+- Host-level robots, crawl delay, cooldown, and durable host state
+- Discovery admission controls for broad-web expansion
+- REST API for pages and runtime stats
+- Read-only operator observation and scheduler invariant checks
+- JSONL output for one-shot crawl runs
+- Docker Compose stack for local or private deployment
 
 ## Install
 
@@ -56,21 +35,17 @@ pip install -e .
 # Development / tests
 pip install -e ".[dev]"
 
-# Browser support (optional)
+# Optional extras
 pip install -e ".[browser]"
-
-# API support (optional)
 pip install -e ".[api]"
-
-# Postgres storage support (required for crawl / serve / daemon)
 pip install -e ".[postgres]"
-
-# AI agent (optional)
 pip install -e ".[agent]"
 
 # Everything
 pip install -e ".[all]"
 ```
+
+PostgreSQL support is required for `crawl`, `serve`, and `daemon`.
 
 ## Quick Start
 
@@ -84,15 +59,15 @@ docker compose up -d postgres
 # Apply schema migrations
 crawler migrate --postgres postgresql://crawler:crawler@localhost:5433/crawldb
 
-# Crawl a site (Postgres is required)
+# Run a bounded one-shot crawl. By default this stays on the start host.
 crawler crawl https://example.com -n 100 \
   --postgres postgresql://crawler:crawler@localhost:5433/crawldb
 
-# Also stream results to JSONL
-crawler crawl https://example.com -o results.jsonl \
+# Allow the one-shot crawl to follow links to other hosts.
+crawler crawl https://example.com -n 100 --any-host \
   --postgres postgresql://crawler:crawler@localhost:5433/crawldb
 
-# Serve crawled pages over REST API
+# Serve crawled pages over the REST API
 crawler serve --port 8080 \
   --postgres postgresql://crawler:crawler@localhost:5433/crawldb
 
@@ -100,22 +75,23 @@ crawler serve --port 8080 \
 crawler observe --postgres postgresql://crawler:crawler@localhost:5433/crawldb
 ```
 
-## CLI Commands
+## Common Commands
 
 | Command | Description |
 |---|---|
-| `fetch` | Fetch a single page (`--js` for browser, `--auto` for adaptive) |
-| `crawl` | Crawl a site with persistent scheduler management |
-| `check-links` | Find broken links (`-r` for recursive) |
-| `extract` | Extract data with CSS/XPath selectors |
-| `agent` | Experimental AI-powered autonomous browsing |
-| `serve` | Start REST API server |
+| `fetch` | Fetch one page (`--js` for browser, `--auto` for adaptive fetching) |
+| `crawl` | Run a bounded one-shot crawl with PostgreSQL scheduler state |
+| `daemon` | Run the continuous broad-web crawler loop |
+| `serve` | Start the REST API server |
 | `migrate` | Apply pending database migrations |
-| `observe` | Print a read-only operator snapshot from PostgreSQL |
-| `scheduler-check` | Run read-only scheduler invariant checks |
-| `daemon` | Run the continuous crawler loop |
+| `observe` | Print a read-only operator snapshot |
+| `observe-watch` | Append periodic operator snapshots as JSON Lines |
+| `scheduler-check` | Run read-only scheduler invariant checks and optional repairs |
+| `check-links` | Find broken links from a page |
+| `extract` | Extract content with CSS selectors or XPath |
+| `agent` | Run the experimental AI browser agent for a bounded task |
 
-### crawl
+### `crawl`
 
 ```bash
 crawler crawl <url> [options]
@@ -124,124 +100,33 @@ Options:
   -n, --max-pages     Max pages to crawl (default: 100)
   -c, --concurrency   Concurrent workers (default: 5)
   --delay             Per-host delay in seconds (default: 1.0)
-  --same-host         Stay on the same host (default)
-  --any-host          Follow links to other hosts
+  --same-host         Keep the one-shot crawl on the start host (default)
+  --any-host          Allow the one-shot crawl to follow links to other hosts
   --js                Use browser rendering for all pages
   -o, --output        Stream results to JSONL file
   --postgres DSN      Required: store scheduler state and pages in PostgreSQL
   --no-content        Exclude page content from output
 ```
 
-### agent
-
-```bash
-crawler agent <url> -t "task description" --experimental-agent
-
-Options:
-  -t, --task          Task to perform (required)
-  --max-steps         Step limit (default: 10)
-  -m, --model         Claude model (default: claude-sonnet-4-20250514)
-  --headless          Run browser headless (default)
-  --headed            Show browser window
-  --experimental-agent
-                      Required acknowledgement for autonomous browser control
-  --allow-agent-external-navigation
-                      Allow navigation away from the starting host
-  --allow-agent-form-input
-                      Allow typing into page fields
-```
-
-The agent is experimental and is not part of the crawler daemon path. It applies the same
-application-layer egress guard as browser fetching, including navigation and subresource requests,
-blocks external main-frame navigation by default, and disables form input by default. Production
-deployments should still rely on network-layer egress firewalling as the stronger containment
-boundary.
-
-### extract
-
-```bash
-crawler extract <url> -s "CSS selector"
-
-Options:
-  -s, --selector      CSS selector
-  -x, --xpath         XPath expression
-  -a, --attr          Extract attribute instead of text
-  --js                Use browser rendering
-```
-
-### observe
+### `observe`
 
 ```bash
 crawler observe --postgres postgresql://user:pass@host/db
-
-Options:
-  --postgres DSN      Required: PostgreSQL DSN, also read from CRAWLER_POSTGRES_DSN
-  --json              Emit the observation as structured JSON
-  --scheduler-invariants
-                      Include live scheduler invariant checks; may be expensive
+crawler observe --postgres postgresql://user:pass@host/db --json
 ```
 
-### scheduler-check
+Use `--scheduler-invariants` when you need live invariant checks. It may be expensive on large
+databases.
+
+### `scheduler-check`
 
 ```bash
 crawler scheduler-check --postgres postgresql://user:pass@host/db
-
-Options:
-  --postgres DSN      Required: PostgreSQL DSN, also read from CRAWLER_POSTGRES_DSN
-  --json              Emit the invariant report as structured JSON
-  --sample-limit      Sample URLs per violation type (default: 5)
-  --repair-terminal   Remove terminal URLs from live scheduler membership tables
-  --repair-host-heads N
-                      Repair up to N stale or orphan host-head read-model rows
+crawler scheduler-check --postgres postgresql://user:pass@host/db --json
 ```
 
-`observe` is read-only. It summarizes crawl totals, scheduler readiness, throughput,
-backpressure, storage tiers, outlink admission ratio, URL ledger size, and relation sizes.
-
-For periodic production observation, append JSON Lines records with `observe-watch`:
-
-```bash
-crawler observe-watch \
-  --postgres postgresql://user:pass@host/db \
-  --interval 300 \
-  --output /var/log/web-crawler/observations.jsonl
-
-Options:
-  --postgres DSN      Required: PostgreSQL DSN, also read from CRAWLER_POSTGRES_DSN
-  --interval SECONDS  Seconds between observations, default 300
-  --output PATH       Required: JSONL output file
-  --limit N           Stop after N observations; omit for continuous operation
-  --max-bytes BYTES   Rotate output at this size, default 10485760; 0 disables rotation
-  --max-files N       Number of rotated files to keep, default 7
-  --max-failures N    Exit after N consecutive failures, default 5; 0 disables failure exit
-```
-
-Each line is one timestamped record. Successful records contain `ok=true` and the observation
-payload; failed reads contain `ok=false`, the exception type, and a sanitized error message.
-In Docker Compose production, the `observer` service writes these records to the
-`observer_logs` volume at `/observations/observations.jsonl`. Treat each JSONL file as
-single-writer output; do not run multiple `observe-watch` processes against the same path.
-
-## REST API
-
-```bash
-crawler serve --port 8080 --postgres postgresql://user:pass@localhost/db
-```
-
-| Endpoint | Description |
-|---|---|
-| `GET /health` | Health check |
-| `GET /pages` | List pages (`?since=`, `?limit=`, `?offset=`, `?host=`) |
-| `GET /pages/{url_hash}` | Get page details with content |
-| `GET /stats` | Fast runtime crawl statistics from the persisted daemon snapshot |
-| `GET /stats/diagnostics` | Runtime-only diagnostics surface; live full-queue diagnostics are disabled in production |
-
-Set `CRAWLER_API_TOKEN` to allow either `Authorization: Bearer <token>` or
-`X-API-Token: <token>` for every endpoint except `/health`. If the token is not configured,
-non-health endpoints fail closed. For local-only experiments, set
-`CRAWLER_ALLOW_UNAUTHENTICATED_API=true` to explicitly allow unauthenticated access.
-
-Daemon logs also emit a per-cycle `errors=...` summary using the same categories as `/stats`.
+The checker reports duplicate scheduler memberships, terminal URLs in live queues, expired
+leases, host-head read-model drift, and URL identity issues.
 
 ## Docker
 
@@ -249,10 +134,10 @@ Daemon logs also emit a per-cycle `errors=...` summary using the same categories
 # Start the full stack. CRAWLER_API_TOKEN is required by docker-compose.yml.
 docker compose up -d
 
-# The compose stack runs migrations before api / crawler
+# Check services and migration status
 docker compose ps -a
 
-# Run a one-shot crawl manually
+# Run a manual one-shot crawl
 docker compose run --rm crawler crawler crawl https://example.com -n 100
 
 # Print an operator snapshot using the compose-provided DSN
@@ -260,266 +145,36 @@ docker compose run --rm api crawler observe
 ```
 
 Default compose services:
+
 - `postgres` — persistent crawl data, scheduler state, and host scheduling state
 - `migrate` — one-shot schema migration runner
-- `api` — FastAPI server on port `8080`
+- `api` — FastAPI server on loopback port `8080`
 - `crawler` — continuous daemon worker
+- `observer` — periodic JSONL operator snapshots
 
-## Architecture
+## Documentation
 
-```
-crawler/
-├── cli.py              # Typer CLI
-├── api.py              # FastAPI REST server
-├── crawl.py            # Crawler engine (worker pool)
-├── url_ledger.py       # Scheduler facade and URL ledger state
-├── scheduler_observability.py # Read-only scheduler snapshots
-├── scheduler_quarantine.py    # Retry quarantine state transitions
-├── daemon_policy.py    # Pre-cycle scheduler policy
-├── host_manager.py   # robots.txt, runtime host state
-├── host_ledger.py    # Durable host identity / history
-├── host_store.py     # Persistent host scheduling state
-├── host_state.py     # Runtime / persisted host state models
-├── storage.py          # PostgreSQL storage
-├── output.py           # JSONL streaming output
-├── observation.py      # Read-only operator snapshots
-├── result.py           # Typed crawl success/failure results
-├── extract.py          # CSS/XPath extraction
-├── links.py            # Link checker
-├── agent.py            # Claude AI agent
-├── config.py           # Pydantic settings
-└── core/
-    ├── fetcher.py          # HTTP fetcher (httpx)
-    ├── browser_fetcher.py  # Playwright fetcher
-    ├── adaptive_fetcher.py # Auto HTTP→Browser switch
-    └── protocols.py        # Response dataclass
-```
+- [docs/README.md](docs/README.md) — documentation index
+- [docs/DESIGN_PRINCIPLES.md](docs/DESIGN_PRINCIPLES.md) — product positioning and core principles
+- [docs/system-architecture.md](docs/system-architecture.md) — subsystem boundaries and current gaps
+- [docs/scheduler-state-model.md](docs/scheduler-state-model.md) — scheduler state, source of truth, and invariants
+- [docs/scheduler-execution.md](docs/scheduler-execution.md) — lease path, hot-path constraints, and execution strategy
+- [docs/discovered-representation.md](docs/discovered-representation.md) — discovered URL representation
+- [docs/CONTENT_POLICY.md](docs/CONTENT_POLICY.md) — content handling and metadata-only resources
+- [docs/AGENT_BOUNDARY.md](docs/AGENT_BOUNDARY.md) — experimental AI agent boundary
+- [docs/api.md](docs/api.md) — REST API usage and authentication
+- [docs/operations.md](docs/operations.md) — deployment and production operations
+- [docs/seed-catalog.md](docs/seed-catalog.md) — seed catalog maintenance
 
-### Fetcher Pipeline
-
-```
-URL → AdaptiveFetcher
-      ├─ HTTP (fast path)
-      │   └─ JS detected? → Browser fallback
-      └─ Response
-```
-
-Current runtime note:
-
-- The success path is now split as `lease -> fetch -> parse -> finalize -> persist`.
-- `parse` builds parsed payloads only, `finalize` applies scheduler mutations, and `persist`
-  writes pages/output.
-- `finalize` uses a dedicated connection / executor so scheduler mutations no longer run on the
-  main event loop.
-- The remaining hot-path coupling is mostly on the failure side: runtime error bookkeeping still
-  begins in workers, and latency is still a secondary scheduler signal rather than a primary one.
-
-### Deduplication
-
-Two layers:
-1. **URL normalization** — scheme/host lowering, query sort, fragment removal
-2. **PostgreSQL scheduler state** — `url_ledger` plus queue tables persist scheduler state
-
-### Scheduling
-
-Two persistent schedulers work together:
-1. **URL scheduler** — controls retry timing, leasing, and refresh eligibility
-2. **Host state** — controls per-host crawl delay and cooldown via `host_state`
-
-Current scheduler state is split across explicit physical tables:
-
-- `url_ledger` — URL ledger and crawl result metadata
-- `host_ledger` — durable host identity and host-level history
-- `scheduler_queue_runnable` — work that is already executable when host state allows it
-- `scheduler_queue_scheduled` — scheduled discovery work
-- `scheduler_queue_refresh` — stale-page revisit work
-- `scheduler_queue_retry_quarantine` — retry quarantine for host-cooled URLs
-- `active_leases` — active leases only
-
-Current module boundaries:
-
-- `url_ledger.py` — scheduler-facing facade used by the crawler
-- `scheduler_observability.py` — queue and readiness snapshots
-- `scheduler_quarantine.py` — host-backoff quarantine policy and state transitions
-- `daemon_policy.py` — pre-cycle scheduler maintenance policy
-
-Current runtime queue stages exposed in daemon stats:
-
-- `parse_queue_*` — fetch to parse handoff
-- `finalize_queue_*` — parse to scheduler-mutation handoff
-- `publish_queue_*` — finalize to storage/output handoff
-
-`pending` in `/stats` should be read as "not done yet", not as "immediately runnable".
-For actual scheduler state, prefer `readiness`:
-
-- `runnable` — runnable now
-- `scheduled` — waiting on `next_fetch_at`
-- `blocked_host_next_request` — waiting on per-host request slot timing
-- `blocked_host_backoff` — still in host cooldown while in normal queues
-- `retry_quarantine` — already isolated from normal queues and only restored through retry budget
-
-### Scheduler Design Principles
-
-The scheduler should be judged by a small set of explicit principles:
-
-1. Separate runtime scheduler truth from operator read models.
-2. Keep the crawl hot path as small as possible.
-3. Prefer requeue over in-slot stubborn retry.
-4. Keep host pacing state small and explicit.
-5. Keep planner logic thin; do not let it become the home for product policy,
-   observability, and safety all at once.
-
-These principles are intentionally narrower than any one implementation. They
-are the rules `web-crawler` should preserve even if tables, workers, or queue
-names change later.
-
-In daemon mode, seeds are starting points for graph expansion. The crawler is expected to
-discover and follow links onto other hosts unless a specific crawl run is configured to stay
-on the same host.
-
-Discovery priority is now based on generic URL structure rather than site-specific rules.
-Redirect-like paths, document-like paths, and bulk/listing paths are classified from reusable
-path heuristics so the scheduler does not depend on hard-coded `IANA` / `IETF` / `RFC Editor`
-special cases.
-
-### Content Scope
-
-Content handling policy is documented in [docs/CONTENT_POLICY.md](docs/CONTENT_POLICY.md).
-Use that document as the source of truth for what is stored as page content, what is treated as
-metadata-only, and which content extractors are out of scope for now.
-
-## Deployment
-
-Current deployment shape:
-- Server: Hetzner `cx23`
-- Path: `~/projects/web-crawler`
-- Network: Tailscale preferred
-- Runtime: Docker Compose
-- Exposed API: loopback port `8080`; use Tailscale or a reverse proxy for remote access
-
-### Production deploy
-
-Production deploys from GitHub `main`. The production `origin` remote should be:
+## Development
 
 ```bash
-https://github.com/tomato414941/web-crawler.git
+pytest -q
+ruff check src tests
 ```
 
-Run the deploy from the production server:
-
-```bash
-ssh dev@100.92.121.94
-cd /home/dev/projects/web-crawler
-
-git status --short --branch
-git pull --ff-only origin main
-
-docker compose build migrate api crawler observer
-docker compose run --rm migrate
-docker compose up -d api crawler observer
-
-docker compose ps
-curl -sS http://127.0.0.1:8080/health
-docker compose run --rm api crawler observe
-docker compose logs --tail 20 observer
-```
-
-Rules:
-
-- Stop if `git pull --ff-only` fails; do not deploy from a divergent tree.
-- Do not use `git reset` or bundle transfer for normal deploys.
-- Run `migrate` every deploy as an idempotent schema check.
-- Do not touch the PostgreSQL volume during a normal deploy.
-- Keep `CRAWLER_API_TOKEN` set. Unauthenticated API access requires an explicit local-only
-  override and should not be used in production.
-- The application rejects private, loopback, link-local, multicast, reserved, and unresolved
-  egress targets before fetch. This is a defense-in-depth guard; keep host firewall or network
-  policy controls in place for stronger protection against DNS rebinding.
-
-Recommended production `.env`:
-
-```bash
-CRAWL_SEED_URLS="https://www.iana.org/ https://datatracker.ietf.org/ https://www.rfc-editor.org/"
-CRAWL_CYCLE_PAGES=300
-CRAWL_RECRAWL_TTL=2592000
-CRAWL_CONCURRENCY=6
-CRAWL_DELAY=0.5
-CRAWLER_OBSERVE_INTERVAL=300
-CRAWLER_OBSERVE_MAX_BYTES=10485760
-CRAWLER_OBSERVE_MAX_FILES=7
-CRAWLER_OBSERVE_MAX_FAILURES=5
-CRAWLER_API_TOKEN=<random-long-token>
-```
-
-These defaults avoid `www.icann.org`, which is currently hostile to the crawler, and reduce
-stale-page churn so the daemon does not spend cycles requeueing dead scheduled too aggressively.
-Store them in a local `.env` on the server; do not commit runtime-specific values.
-
-These production seeds are only bootstrap points. They do not define the full crawl scope.
-
-The committed seed catalog lives in `config/seeds.json`. Treat it as the operator-facing source
-of truth for which URLs are seeds and why they exist. Runtime `.env` files should only contain
-the rendered `CRAWL_SEED_URLS` string for the currently enabled subset.
-
-Use the read-only observation command after deploys and during production checks:
-
-```bash
-docker compose run --rm api crawler observe
-docker compose run --rm api crawler observe --json
-```
-
-The command reads the existing `CRAWLER_POSTGRES_DSN` from the compose `api` service and does not
-start a server, restart workers, or mutate crawler state.
-
-Render the current catalog into an env assignment with:
-
-```bash
-PYTHONPATH=src python scripts/render_seed_env.py
-```
-
-Each catalog entry stores:
-- `url` — the seed URL itself
-- `enabled` — whether it should appear in rendered runtime seed lists
-- `tags` — operator metadata such as `tech`, `media`, `culture`, `public-sector`
-- `notes` — short rationale for why the seed exists
-
-Tags are for operator understanding and seed-set maintenance. They are not currently used by
-runtime scheduling policy.
-
-`docker-compose.yml` consumes these `CRAWL_*` variables as CLI flags for `crawler daemon`.
-The application also exposes lower-level `CRAWLER_*` settings for scheduler tuning:
-
-```bash
-CRAWLER_SCHEDULER_LEASE_SECONDS=300
-CRAWLER_SCHEDULER_RETRY_BACKOFF_SECONDS=30
-CRAWLER_SCHEDULER_MAX_RETRY_BACKOFF_SECONDS=1800
-CRAWLER_ROBOTS_CACHE_TTL=3600
-CRAWLER_HOST_BACKOFF_SECONDS=30
-CRAWLER_MAX_HOST_BACKOFF_SECONDS=600
-CRAWLER_DAEMON_KEEP_RUNNABLE_PER_HOST=128
-CRAWLER_DAEMON_KEEP_RUNNABLE_PER_BRANCH=16
-CRAWLER_DAEMON_SCHEDULED_SURFACE_DELAY_SECONDS=1800
-CRAWLER_DAEMON_MIN_RUNNABLE_SLEEP=0.5
-CRAWLER_DAEMON_MIN_RUNNABLE_SUPPLY_COUNT=20
-CRAWLER_DAEMON_MIN_RUNNABLE_SUPPLY_HOSTS=8
-CRAWLER_DAEMON_BLOCKED_RETRY_BUDGET=8
-CRAWLER_DAEMON_BLOCKED_RETRY_PER_HOST=1
-CRAWLER_DAEMON_BLOCKED_RETRY_MAX_CONSECUTIVE_FAILURES=8
-CRAWLER_DAEMON_QUARANTINE_RETIRE_MIN_CONSECUTIVE_FAILURES=64
-CRAWLER_DAEMON_QUARANTINE_RETIRE_AFTER_SECONDS=86400
-CRAWLER_ADMISSION_TARGET_PENDING=500000
-```
-
-Use `CRAWLER_*` only when you need to tune scheduler behavior without changing the daemon CLI
-arguments wired through Compose.
-`CRAWLER_ADMISSION_TARGET_PENDING` is the primary discovery admission knob: the crawler derives
-its admission mode, score threshold, and per-page/per-host caps from the current pending count
-relative to that target.
-
-Before pushing:
-- Run `pytest -q`
-- Run `ruff check src tests`
-- Review `docker-compose.yml` env defaults for seeds and crawl pacing
+Before pushing, also review Docker/daemon defaults when changing crawl pacing, seeds, scheduler
+behavior, migrations, or API authentication.
 
 ## License
 
