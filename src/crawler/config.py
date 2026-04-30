@@ -1,7 +1,9 @@
 """Configuration using pydantic-settings."""
 
+from typing import Annotated, Any
+
 from pydantic import field_validator
-from pydantic_settings import BaseSettings
+from pydantic_settings import BaseSettings, NoDecode
 
 
 class CrawlerSettings(BaseSettings):
@@ -47,6 +49,7 @@ class CrawlerSettings(BaseSettings):
     stored_content_extended_min_discovery_value: float = 1.4
     admission_target_pending: int = 500_000
     allow_private_network_egress: bool = False
+    allowed_egress_ports: Annotated[tuple[int, ...], NoDecode] = (80, 443)
     finalizer_batch_size: int = 16
     finalizer_batch_wait_ms: float = 25.0
     publisher_batch_size: int = 16
@@ -60,6 +63,21 @@ class CrawlerSettings(BaseSettings):
         if value <= 0:
             raise ValueError("admission_target_pending must be positive")
         return value
+
+    @field_validator("allowed_egress_ports", mode="before")
+    @classmethod
+    def _validate_allowed_egress_ports(cls, value: Any) -> tuple[int, ...]:
+        if isinstance(value, str):
+            raw_ports = [part.strip() for part in value.split(",") if part.strip()]
+        else:
+            raw_ports = list(value)
+        ports = tuple(int(port) for port in raw_ports)
+        if not ports:
+            raise ValueError("allowed_egress_ports must not be empty")
+        for port in ports:
+            if port < 1 or port > 65535:
+                raise ValueError("allowed_egress_ports must contain valid TCP ports")
+        return tuple(sorted(set(ports)))
 
 
 settings = CrawlerSettings()

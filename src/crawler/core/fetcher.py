@@ -102,6 +102,7 @@ class HttpFetcher:
             current_url,
             resolver=self.egress_resolver,
             allow_private_network_egress=settings.allow_private_network_egress,
+            allowed_ports=settings.allowed_egress_ports,
         )
         raise_if_blocked(guard)
 
@@ -119,6 +120,7 @@ class HttpFetcher:
                         next_url,
                         resolver=self.egress_resolver,
                         allow_private_network_egress=settings.allow_private_network_egress,
+                        allowed_ports=settings.allowed_egress_ports,
                     )
                     raise_if_blocked(guard)
                     current_url = next_url

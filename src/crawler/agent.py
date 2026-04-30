@@ -290,6 +290,7 @@ class WebAgent:
             await check_url(
                 url,
                 allow_private_network_egress=settings.allow_private_network_egress,
+                allowed_ports=settings.allowed_egress_ports,
             )
         )
 
@@ -427,6 +428,7 @@ Step {self.state.steps + 1}/{self.max_steps}"""
         decision = await check_url(
             route.request.url,
             allow_private_network_egress=settings.allow_private_network_egress,
+            allowed_ports=settings.allowed_egress_ports,
         )
         if not decision.allowed:
             await route.abort()
