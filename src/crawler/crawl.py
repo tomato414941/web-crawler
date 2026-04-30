@@ -587,6 +587,7 @@ class CrawlerEngine:
         return is_url_allowed_without_dns(
             url,
             allow_private_network_egress=settings.allow_private_network_egress,
+            allowed_ports=settings.allowed_egress_ports,
         ).allowed
 
     def _build_seed_task(self, url: str) -> CrawlTask:

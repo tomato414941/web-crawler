@@ -25,9 +25,19 @@ from crawler.egress_guard import (
         ("http://172.16.0.5/admin", "blocked_ip_literal"),
         ("http://192.168.1.10/admin", "blocked_ip_literal"),
         ("http://169.254.169.254/latest/meta-data/", "blocked_ip_literal"),
+        ("http://100.64.0.1/", "blocked_ip_literal"),
+        ("http://198.18.0.1/", "blocked_ip_literal"),
         ("http://[::1]/admin", "blocked_ip_literal"),
         ("http://[fc00::1]/admin", "blocked_ip_literal"),
         ("http://[fe80::1]/admin", "blocked_ip_literal"),
+        ("http://[::ffff:127.0.0.1]/admin", "blocked_ip_literal"),
+        ("http://2130706433/admin", "blocked_legacy_ipv4_literal"),
+        ("http://0177.0.0.1/admin", "blocked_legacy_ipv4_literal"),
+        ("http://0x7f000001/admin", "blocked_legacy_ipv4_literal"),
+        ("http://user@example.com/", "userinfo_not_allowed"),
+        ("http://user:pass@example.com/", "userinfo_not_allowed"),
+        ("http://example.com:22/", "blocked_port"),
+        ("https://example.com:8443/", "blocked_port"),
     ],
 )
 def test_url_shape_guard_blocks_unsupported_and_private_targets(url, reason):
@@ -50,7 +60,21 @@ def test_url_shape_guard_blocks_unsupported_and_private_targets(url, reason):
 def test_url_shape_guard_allows_public_http_targets(url):
     decision = is_url_allowed_without_dns(url)
 
-    assert decision == GuardDecision(True, "allowed", url, decision.hostname)
+    assert decision.allowed is True
+    assert decision.reason == "allowed"
+    assert decision.url == url
+    assert decision.hostname is not None
+    assert decision.port in {80, 443}
+
+
+def test_url_shape_guard_allows_configured_public_port():
+    decision = is_url_allowed_without_dns(
+        "http://example.com:8080/",
+        allowed_ports=(80, 443, 8080),
+    )
+
+    assert decision.allowed is True
+    assert decision.port == 8080
 
 
 async def test_dns_guard_blocks_hostname_that_resolves_to_private_address():
@@ -64,6 +88,7 @@ async def test_dns_guard_blocks_hostname_that_resolves_to_private_address():
     assert decision.allowed is False
     assert decision.reason == "blocked_resolved_ip"
     assert decision.hostname == "public-name.example"
+    assert decision.resolved_addresses == ("10.0.0.8", "93.184.216.34")
 
 
 async def test_dns_guard_allows_hostname_when_all_answers_are_public():

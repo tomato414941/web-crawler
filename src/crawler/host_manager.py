@@ -220,6 +220,7 @@ class HostManager:
                 robots_url,
                 resolver=self.egress_resolver,
                 allow_private_network_egress=settings.allow_private_network_egress,
+                allowed_ports=settings.allowed_egress_ports,
             )
             if not guard.allowed:
                 robots_status = "egress_blocked"

@@ -27,6 +27,7 @@ async def check_url(client: httpx.AsyncClient, url: str) -> CheckedLink:
         guard = await check_egress_url(
             url,
             allow_private_network_egress=settings.allow_private_network_egress,
+            allowed_ports=settings.allowed_egress_ports,
         )
         if not guard.allowed:
             return CheckedLink(url=url, status=0, error="egress_blocked", ok=False)
@@ -39,6 +40,7 @@ async def check_url(client: httpx.AsyncClient, url: str) -> CheckedLink:
             guard = await check_egress_url(
                 next_url,
                 allow_private_network_egress=settings.allow_private_network_egress,
+                allowed_ports=settings.allowed_egress_ports,
             )
             if not guard.allowed:
                 return CheckedLink(
@@ -96,6 +98,7 @@ async def check_page_links(
                 guard = await check_egress_url(
                     current_url,
                     allow_private_network_egress=settings.allow_private_network_egress,
+                    allowed_ports=settings.allowed_egress_ports,
                 )
                 if not guard.allowed:
                     checked_urls.add(current_url)

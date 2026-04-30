@@ -162,6 +162,7 @@ Default compose services:
 - [docs/discovered-representation.md](docs/discovered-representation.md) — discovered URL representation
 - [docs/CONTENT_POLICY.md](docs/CONTENT_POLICY.md) — content handling and metadata-only resources
 - [docs/AGENT_BOUNDARY.md](docs/AGENT_BOUNDARY.md) — experimental AI agent boundary
+- [docs/security/egress.md](docs/security/egress.md) — outbound network policy and containment expectations
 - [docs/api.md](docs/api.md) — REST API usage and authentication
 - [docs/operations.md](docs/operations.md) — deployment and production operations
 - [docs/seed-catalog.md](docs/seed-catalog.md) — seed catalog maintenance
