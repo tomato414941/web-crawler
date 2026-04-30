@@ -99,6 +99,7 @@ class BrowserFetcher:
             await check_url(
                 url,
                 allow_private_network_egress=settings.allow_private_network_egress,
+                allowed_ports=settings.allowed_egress_ports,
             )
         )
         page = await self._pool.acquire()
@@ -116,6 +117,7 @@ class BrowserFetcher:
                 await check_url(
                     final_url,
                     allow_private_network_egress=settings.allow_private_network_egress,
+                    allowed_ports=settings.allowed_egress_ports,
                 )
             )
 
@@ -153,6 +155,7 @@ class BrowserFetcher:
             await check_url(
                 url,
                 allow_private_network_egress=settings.allow_private_network_egress,
+                allowed_ports=settings.allowed_egress_ports,
             )
         )
         page = await self._pool.acquire()
@@ -170,6 +173,7 @@ class BrowserFetcher:
                 await check_url(
                     final_url,
                     allow_private_network_egress=settings.allow_private_network_egress,
+                    allowed_ports=settings.allowed_egress_ports,
                 )
             )
 
@@ -216,6 +220,7 @@ async def _guard_browser_route(route):
     decision = await check_url(
         route.request.url,
         allow_private_network_egress=settings.allow_private_network_egress,
+        allowed_ports=settings.allowed_egress_ports,
     )
     if decision.allowed:
         await route.continue_()

@@ -13,6 +13,7 @@ the primary entry point for project summary, quick start, common commands, and d
 - [operations.md](operations.md) — deployment, runtime environment, scheduler tuning, and observation
 - [seed-catalog.md](seed-catalog.md) — seed catalog maintenance and runtime rendering
 - [AGENT_BOUNDARY.md](AGENT_BOUNDARY.md) — experimental AI browser agent boundary and constraints
+- [security/egress.md](security/egress.md) — outbound network policy and containment expectations
 
 ## Design Documents
 

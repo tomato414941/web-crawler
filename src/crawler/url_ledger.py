@@ -1226,6 +1226,7 @@ class UrlLedger:
             if not is_url_allowed_without_dns(
                 normalized_url,
                 allow_private_network_egress=settings.allow_private_network_egress,
+                allowed_ports=settings.allowed_egress_ports,
             ).allowed:
                 continue
             normalized = self._normalize_task_metadata(task, normalized_url=normalized_url)
