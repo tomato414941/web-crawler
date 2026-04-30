@@ -96,6 +96,12 @@ proxy policy instead of inheriting ambient proxy environment variables. The prox
 denies local, private, link-local, metadata, CGNAT, benchmarking, multicast, reserved, and unsafe
 port destinations.
 
+The direct HTTP path intentionally does not pin `httpx` to the IP address observed by the
+application DNS guard. Unit tests document this time-of-check / time-of-use boundary: the guard can
+approve a public DNS answer while the transport still connects by hostname. Hardened deployments
+therefore must use runtime containment, such as the proxy profile, to enforce the same deny policy
+at connection time.
+
 The current private Docker Compose deployment keeps the HTTP fast path direct and uses a host
 firewall rule in `DOCKER-USER` to block link-local / metadata egress:
 
