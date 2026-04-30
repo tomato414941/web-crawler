@@ -170,6 +170,55 @@ class TestHttpFetcher:
         assert "example.com/new" in response.url
         assert response.status == 200
 
+    async def test_direct_fetch_does_not_pin_guard_resolved_address(self, monkeypatch):
+        """Document the direct-mode DNS TOCTOU boundary.
+
+        The application guard validates DNS answers before the request, but direct
+        httpx transport still connects by URL hostname. Hardened deployments must
+        rely on the proxy/runtime boundary to close that gap.
+        """
+        resolved_hosts: list[tuple[str, int | None]] = []
+        requested_urls: list[str] = []
+
+        async def resolver(hostname: str, port: int | None) -> list[str]:
+            resolved_hosts.append((hostname, port))
+            return ["93.184.216.34"]
+
+        class DummyResponse:
+            url = "http://rebind.test/"
+            status_code = 200
+            headers = {"content-type": "text/html"}
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_args):
+                return None
+
+            async def aiter_bytes(self):
+                yield b"<html></html>"
+
+        class DummyClient:
+            def stream(self, method, url):
+                assert method == "GET"
+                requested_urls.append(url)
+                return DummyResponse()
+
+            async def aclose(self):
+                return None
+
+        monkeypatch.setattr(
+            "crawler.core.fetcher.httpx.AsyncClient",
+            lambda *args, **kwargs: DummyClient(),
+        )
+
+        fetcher = HttpFetcher(timeout=10.0, egress_resolver=resolver)
+        response = await fetcher.fetch("http://rebind.test/")
+
+        assert response.status == 200
+        assert resolved_hosts == [("rebind.test", 80)]
+        assert requested_urls == ["http://rebind.test/"]
+
     async def test_fetch_skips_binary_body_after_headers(self, monkeypatch):
         """Binary response bodies should not be read."""
         body_read = False
