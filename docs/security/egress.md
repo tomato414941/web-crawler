@@ -49,6 +49,19 @@ network policy, cloud security groups, or a controlled egress proxy. The fast HT
 direct for throughput, but private, local, link-local, and metadata destinations should still be
 blocked by the runtime environment.
 
+The current private Docker Compose deployment keeps the HTTP fast path direct and uses a host
+firewall rule in `DOCKER-USER` to block link-local / metadata egress:
+
+```bash
+iptables -C DOCKER-USER -d 169.254.0.0/16 -j REJECT 2>/dev/null \
+  || iptables -I DOCKER-USER 1 -d 169.254.0.0/16 -j REJECT
+```
+
+That rule is intentionally narrow. The application egress guard still rejects private networks
+such as RFC1918, CGNAT, and benchmarking ranges before fetch. A broad network-layer RFC1918 block
+would need service-network exceptions because Docker itself uses private address space for
+PostgreSQL and service-to-service traffic.
+
 ## Network-Layer Smoke Test
 
 Run the smoke test from the crawler container after applying host firewall, cloud security group,
