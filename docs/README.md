@@ -10,10 +10,10 @@ the primary entry point for project summary, quick start, common commands, and d
 - [DESIGN_PRINCIPLES.md](DESIGN_PRINCIPLES.md) — conceptual positioning, core principles, non-goals, and architectural direction
 - [CONTENT_POLICY.md](CONTENT_POLICY.md) — content handling, metadata-only resources, storage tiers, and discovery breadth
 - [api.md](api.md) — REST API usage, authentication, endpoints, and current limitations
-- [operations.md](operations.md) — deployment, runtime environment, scheduler tuning, and observation
+- [operations.md](operations.md) — deployment, hardened runtime expectations, scheduler tuning, and observation
 - [seed-catalog.md](seed-catalog.md) — seed catalog maintenance and runtime rendering
 - [AGENT_BOUNDARY.md](AGENT_BOUNDARY.md) — experimental AI browser agent boundary and constraints
-- [security/egress.md](security/egress.md) — outbound network policy and containment expectations
+- [security/egress.md](security/egress.md) — threat model, outbound network policy, and containment expectations
 
 ## Design Documents
 

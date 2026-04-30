@@ -1,0 +1,79 @@
+services:
+  egress-proxy:
+    image: ubuntu/squid:6.10-24.04_beta
+    volumes:
+      - ./config/egress-proxy/squid.conf:/etc/squid/squid.conf:ro
+    networks:
+      - crawler_internal
+      - proxy_egress
+      - private_test
+    restart: unless-stopped
+
+  api:
+    networks:
+      - crawler_internal
+
+  migrate:
+    networks:
+      - crawler_internal
+
+  observer:
+    networks:
+      - crawler_internal
+
+  postgres:
+    networks:
+      - crawler_internal
+
+  crawler:
+    environment:
+      CRAWLER_EGRESS_PROXY: http://egress-proxy:3128
+      CRAWLER_REQUIRE_EGRESS_PROXY: "true"
+      CRAWLER_DIRECT_EGRESS_ALLOWED: "false"
+      CRAWLER_ALLOW_PRIVATE_NETWORK_EGRESS: "false"
+      CRAWLER_ALLOWED_EGRESS_PORTS: 80,443
+    networks:
+      - crawler_internal
+    depends_on:
+      egress-proxy:
+        condition: service_started
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
+  private-test:
+    image: nginx:1.27-alpine
+    profiles:
+      - egress-smoke
+    networks:
+      - private_test
+
+  egress-smoke:
+    build: .
+    profiles:
+      - egress-smoke
+    command: python scripts/egress_smoke.py
+    environment:
+      HTTP_PROXY: http://egress-proxy:3128
+      HTTPS_PROXY: http://egress-proxy:3128
+      ALL_PROXY: http://egress-proxy:3128
+      NO_PROXY: ""
+      EGRESS_SMOKE_PUBLIC_URL: http://example.com/
+      EGRESS_SMOKE_PRIVATE_URL: http://private-test/
+      EGRESS_SMOKE_PROXY_HOST: egress-proxy
+      EGRESS_SMOKE_PROXY_PORT: 3128
+    depends_on:
+      egress-proxy:
+        condition: service_started
+      private-test:
+        condition: service_started
+    networks:
+      - crawler_internal
+
+networks:
+  crawler_internal:
+    internal: true
+  proxy_egress:
+  private_test:
+    internal: true
