@@ -37,6 +37,7 @@ class HttpFetcher:
         )
         self.body_timeout = settings.fetch_body_timeout if body_timeout is None else body_timeout
         self.egress_resolver = egress_resolver
+        self.httpx_proxy_kwargs = settings.httpx_proxy_kwargs()
         self.limits = httpx.Limits(
             max_connections=max_connections,
             max_keepalive_connections=max_keepalive_connections,
@@ -55,6 +56,7 @@ class HttpFetcher:
                         headers={"User-Agent": self.user_agent},
                         follow_redirects=False,
                         verify=build_ssl_context(),
+                        **self.httpx_proxy_kwargs,
                     )
         return self._client
 
