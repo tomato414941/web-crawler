@@ -127,6 +127,20 @@ The expected result is:
 This confirms the runtime containment boundary without forcing the crawler HTTP fast path through
 a proxy.
 
+Current private deployment status as of 2026-04-30:
+
+- `web-crawler-egress-firewall.service` is enabled and active.
+- The service restores a `DOCKER-USER` reject rule for `169.254.0.0/16`.
+- `scripts/egress_smoke.py` passes from the crawler container.
+- Public `example.com:80` remains reachable directly.
+- `169.254.169.254:80` no longer accepts TCP connections from the crawler container.
+- Other representative private / CGNAT / benchmarking probe targets did not connect in the smoke
+  test.
+
+The current network-layer block is deliberately narrow so Docker's private service network keeps
+working. The application egress policy remains the primary fast-path guard for RFC1918, CGNAT,
+benchmarking, legacy IPv4, blocked ports, and unsafe DNS answers.
+
 For periodic production observation, use `observe-watch`:
 
 ```bash
