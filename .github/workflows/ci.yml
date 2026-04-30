@@ -27,3 +27,56 @@ jobs:
 
       - name: Test
         run: pytest -q
+
+      - name: Validate Docker Compose config
+        env:
+          CRAWLER_API_TOKEN: ci-smoke-token
+        run: docker compose config >/dev/null
+
+      - name: Validate hardened Docker Compose config
+        env:
+          CRAWLER_API_TOKEN: ci-smoke-token
+        run: docker compose -f docker-compose.yml -f docker-compose.hardened.yml config >/dev/null
+
+  postgres-test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: crawler
+          POSTGRES_PASSWORD: crawler
+          POSTGRES_DB: crawldb_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U crawler -d crawldb_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      TEST_POSTGRES_DSN: postgresql://crawler:crawler@localhost:5432/crawldb_test
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install package
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev,postgres]"
+
+      - name: Test Postgres integration
+        run: |
+          pytest -q \
+            tests/test_migrate.py \
+            tests/test_storage.py::test_save_page \
+            tests/test_storage.py::test_skip_error_result \
+            tests/test_storage.py::test_upsert_on_conflict \
+            tests/test_storage.py::test_save_many_persists_multiple_pages \
+            tests/test_storage.py::test_save_many_deletes_metadata_only_content_rows \
+            tests/test_storage.py::test_save_many_deduplicates_same_url_with_last_write_winning

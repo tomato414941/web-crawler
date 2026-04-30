@@ -4,6 +4,7 @@ import ssl
 
 import pytest
 
+from crawler.config import CrawlerSettings
 from crawler.egress_guard import EgressBlockedError
 from crawler.core import HttpFetcher, Response
 from crawler.tls import build_ssl_context
@@ -15,6 +16,14 @@ def fetcher():
 
 
 class TestHttpFetcher:
+    def test_settings_reject_require_proxy_without_proxy(self):
+        with pytest.raises(ValueError, match="CRAWLER_REQUIRE_EGRESS_PROXY"):
+            CrawlerSettings(require_egress_proxy=True, egress_proxy=None)
+
+    def test_settings_reject_direct_disallowed_without_proxy(self):
+        with pytest.raises(ValueError, match="CRAWLER_DIRECT_EGRESS_ALLOWED"):
+            CrawlerSettings(direct_egress_allowed=False, egress_proxy=None)
+
     async def test_fetcher_uses_certifi_bundle(self, monkeypatch):
         """Fetcher should pin the CA bundle for stable TLS verification."""
         captured: dict = {}
@@ -38,6 +47,73 @@ class TestHttpFetcher:
         context = captured["verify"]
         assert isinstance(context, ssl.SSLContext)
         assert context.cert_store_stats() == build_ssl_context().cert_store_stats()
+
+    async def test_fetcher_uses_configured_proxy_policy(self, monkeypatch):
+        """Fetcher should pass the shared explicit proxy policy to httpx."""
+        captured: dict = {}
+
+        class DummyClient:
+            async def aclose(self):
+                return None
+
+        def fake_async_client(*args, **kwargs):
+            captured.update(kwargs)
+            return DummyClient()
+
+        monkeypatch.setattr("crawler.core.fetcher.httpx.AsyncClient", fake_async_client)
+        monkeypatch.setattr("crawler.core.fetcher.settings.egress_proxy", "http://proxy.local:8080")
+        monkeypatch.setattr("crawler.core.fetcher.settings.require_egress_proxy", True)
+        monkeypatch.setattr("crawler.core.fetcher.settings.direct_egress_allowed", False)
+
+        fetcher = HttpFetcher(timeout=10.0)
+        await fetcher._get_client()
+
+        assert captured["proxy"] == "http://proxy.local:8080"
+        assert captured["trust_env"] is False
+
+    def test_fetcher_fails_fast_when_direct_disallowed_without_proxy(self, monkeypatch):
+        monkeypatch.setattr("crawler.core.fetcher.settings.egress_proxy", None)
+        monkeypatch.setattr("crawler.core.fetcher.settings.require_egress_proxy", False)
+        monkeypatch.setattr("crawler.core.fetcher.settings.direct_egress_allowed", False)
+
+        with pytest.raises(ValueError, match="CRAWLER_DIRECT_EGRESS_ALLOWED"):
+            HttpFetcher(timeout=10.0)
+
+    async def test_fetcher_passes_configured_proxy_to_httpx(self, monkeypatch):
+        """Fetcher should route HTTP through the configured egress proxy."""
+        captured: dict = {}
+
+        class DummyClient:
+            async def aclose(self):
+                return None
+
+        def fake_async_client(*args, **kwargs):
+            captured.update(kwargs)
+            return DummyClient()
+
+        monkeypatch.setattr("crawler.core.fetcher.settings.egress_proxy", "http://proxy:3128")
+        monkeypatch.setattr("crawler.core.fetcher.httpx.AsyncClient", fake_async_client)
+
+        fetcher = HttpFetcher(timeout=10.0)
+        await fetcher._get_client()
+
+        assert captured["proxy"] == "http://proxy:3128"
+
+    def test_fetcher_fails_fast_when_proxy_required_without_proxy(self, monkeypatch):
+        """Proxy-required runtime settings should fail before fetching starts."""
+        monkeypatch.setattr("crawler.core.fetcher.settings.egress_proxy", None)
+        monkeypatch.setattr("crawler.core.fetcher.settings.require_egress_proxy", True)
+
+        with pytest.raises(ValueError, match="CRAWLER_REQUIRE_EGRESS_PROXY"):
+            HttpFetcher(timeout=10.0)
+
+    def test_fetcher_fails_fast_when_direct_disabled_without_proxy(self, monkeypatch):
+        """Disabling direct egress requires a configured proxy."""
+        monkeypatch.setattr("crawler.core.fetcher.settings.egress_proxy", None)
+        monkeypatch.setattr("crawler.core.fetcher.settings.direct_egress_allowed", False)
+
+        with pytest.raises(ValueError, match="CRAWLER_DIRECT_EGRESS_ALLOWED"):
+            HttpFetcher(timeout=10.0)
 
     async def test_fetch_returns_response(self, fetcher, httpx_mock):
         """Fetch returns a Response with correct fields."""

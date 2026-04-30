@@ -101,6 +101,7 @@ class HostManager:
             else max_host_backoff_seconds
         )
         self.egress_resolver = egress_resolver
+        self.httpx_proxy_kwargs = settings.httpx_proxy_kwargs()
         self._runtime_states: dict[str, RuntimeHostState] = {}
         self._locks: dict[str, asyncio.Lock] = {}
         self._robots_locks: dict[str, asyncio.Lock] = {}
@@ -134,6 +135,7 @@ class HostManager:
                         timeout=self.robots_fetch_timeout,
                         headers={"User-Agent": self.user_agent},
                         verify=build_ssl_context(),
+                        **self.httpx_proxy_kwargs,
                     )
         return self._client
 

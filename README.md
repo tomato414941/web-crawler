@@ -13,6 +13,11 @@ This project is under active development. It has safety guards, persistent sched
 pacing, migrations, tests, and deployment scripts, but it should still be treated as an
 experimental crawler rather than a production-ready web-scale system.
 
+Production broad-web crawling requires a hardened runtime with network-layer egress containment.
+The standard acquisition path is direct HTTP fetching. Browser rendering and the AI browser agent
+are auxiliary paths and should run only under explicit isolation. See
+[docs/security/egress.md](docs/security/egress.md).
+
 The AI browser agent is experimental and outside the crawler core. See
 [docs/AGENT_BOUNDARY.md](docs/AGENT_BOUNDARY.md).
 
@@ -152,6 +157,18 @@ Default compose services:
 - `crawler` — continuous daemon worker
 - `observer` — periodic JSONL operator snapshots
 
+For proxy-contained deployments, keep `docker-compose.yml` as the development baseline and layer
+the hardened override:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.hardened.yml up -d
+docker compose -f docker-compose.yml -f docker-compose.hardened.yml \
+  --profile egress-smoke run --rm egress-smoke
+```
+
+The hardened override routes crawler HTTP/HTTPS through `egress-proxy` and includes a private
+test service for the egress smoke.
+
 ## Documentation
 
 - [docs/README.md](docs/README.md) — documentation index
@@ -162,7 +179,7 @@ Default compose services:
 - [docs/discovered-representation.md](docs/discovered-representation.md) — discovered URL representation
 - [docs/CONTENT_POLICY.md](docs/CONTENT_POLICY.md) — content handling and metadata-only resources
 - [docs/AGENT_BOUNDARY.md](docs/AGENT_BOUNDARY.md) — experimental AI agent boundary
-- [docs/security/egress.md](docs/security/egress.md) — outbound network policy and containment expectations
+- [docs/security/egress.md](docs/security/egress.md) — threat model, outbound policy, and containment expectations
 - [docs/api.md](docs/api.md) — REST API usage and authentication
 - [docs/operations.md](docs/operations.md) — deployment and production operations
 - [docs/seed-catalog.md](docs/seed-catalog.md) — seed catalog maintenance

@@ -5,6 +5,7 @@ import time
 from dataclasses import replace
 
 import httpx
+import pytest
 
 from crawler.host_manager import HostManager
 from crawler.host_state import PersistedHostState, RuntimeHostState
@@ -142,6 +143,39 @@ class TestHostManagerHostBudget:
 
 
 class TestHostManagerIsAllowed:
+    async def test_robots_fetch_uses_configured_proxy_policy(self, monkeypatch):
+        """Robots HTTP client should use the shared explicit proxy policy."""
+        captured: dict = {}
+
+        class DummyClient:
+            async def aclose(self):
+                return None
+
+        def fake_async_client(*args, **kwargs):
+            captured.update(kwargs)
+            return DummyClient()
+
+        monkeypatch.setattr("crawler.host_manager.httpx.AsyncClient", fake_async_client)
+        monkeypatch.setattr("crawler.host_manager.settings.egress_proxy", "http://proxy.local:8080")
+        monkeypatch.setattr("crawler.host_manager.settings.require_egress_proxy", True)
+        monkeypatch.setattr("crawler.host_manager.settings.direct_egress_allowed", False)
+
+        manager = HostManager(robots_fetch_timeout=1.25)
+        try:
+            await manager._get_client()
+            assert captured["proxy"] == "http://proxy.local:8080"
+            assert captured["trust_env"] is False
+        finally:
+            await manager.close()
+
+    def test_robots_fetch_fails_fast_when_direct_disallowed_without_proxy(self, monkeypatch):
+        monkeypatch.setattr("crawler.host_manager.settings.egress_proxy", None)
+        monkeypatch.setattr("crawler.host_manager.settings.require_egress_proxy", False)
+        monkeypatch.setattr("crawler.host_manager.settings.direct_egress_allowed", False)
+
+        with pytest.raises(ValueError, match="CRAWLER_DIRECT_EGRESS_ALLOWED"):
+            HostManager()
+
     async def test_robots_fetch_uses_configured_timeout(self):
         """Robots HTTP client should use the configured short timeout."""
         manager = HostManager(robots_fetch_timeout=1.25)
@@ -151,6 +185,36 @@ class TestHostManagerIsAllowed:
             assert client.timeout.read == 1.25
         finally:
             await manager.close()
+
+    async def test_robots_fetch_passes_configured_proxy_to_httpx(self, monkeypatch):
+        """Robots fetches should use the same configured egress proxy as page fetches."""
+        captured: dict = {}
+
+        class DummyClient:
+            async def aclose(self):
+                return None
+
+        def fake_async_client(*args, **kwargs):
+            captured.update(kwargs)
+            return DummyClient()
+
+        monkeypatch.setattr("crawler.host_manager.settings.egress_proxy", "http://proxy:3128")
+        monkeypatch.setattr("crawler.host_manager.httpx.AsyncClient", fake_async_client)
+
+        manager = HostManager(robots_fetch_timeout=1.25)
+        try:
+            await manager._get_client()
+            assert captured["proxy"] == "http://proxy:3128"
+        finally:
+            await manager.close()
+
+    def test_robots_fetch_fails_fast_when_proxy_required_without_proxy(self, monkeypatch):
+        """Proxy-required runtime settings should fail before robots fetching starts."""
+        monkeypatch.setattr("crawler.host_manager.settings.egress_proxy", None)
+        monkeypatch.setattr("crawler.host_manager.settings.require_egress_proxy", True)
+
+        with pytest.raises(ValueError, match="CRAWLER_REQUIRE_EGRESS_PROXY"):
+            HostManager()
 
     async def test_is_allowed_without_robots(self, httpx_mock):
         """Should allow all URLs when robots.txt is not available."""

@@ -49,8 +49,11 @@ docker compose logs --tail 20 observer
 - Unauthenticated API access requires an explicit local-only override and should not be used in
   production.
 - The application rejects private, loopback, link-local, multicast, reserved, unresolved, and
-  unsupported egress targets before fetch. This is defense in depth; keep network-layer egress
-  controls in place for stronger containment.
+  unsupported egress targets before fetch. This is defense in depth. Production broad-web crawl
+  requires a hardened runtime with network-layer egress controls.
+- Keep the standard HTTP fast path direct unless an operator intentionally routes it through a
+  controlled proxy. Browser rendering and agent runs are auxiliary paths; do not use them for
+  normal broad-web crawl without separate isolation.
 
 ## Recommended Environment
 
@@ -126,6 +129,44 @@ The expected result is:
 
 This confirms the runtime containment boundary without forcing the crawler HTTP fast path through
 a proxy.
+
+To force crawler HTTP/HTTPS through a controlled proxy, layer the hardened compose override on top
+of the development compose file:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.hardened.yml up -d
+```
+
+Run the hardened egress smoke with its private test service:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.hardened.yml \
+  --profile egress-smoke run --rm egress-smoke
+```
+
+Expected hardened smoke results:
+
+- public HTTP fetch succeeds through `egress-proxy`
+- direct public HTTP from the smoke container fails because the container is on an internal network
+- `http://private-test/` does not fetch through the proxy
+- representative local, private, link-local, metadata, CGNAT, and benchmarking TCP probes do not
+  connect
+
+Direct egress means the crawler container opens outbound HTTP/HTTPS connections itself after the
+application egress guard allows the URL. Proxy egress means outbound HTTP/HTTPS is routed through a
+controlled proxy that must enforce at least the same private, local, link-local, metadata, and
+port restrictions. Either mode still requires the application egress guard; proxy mode is a
+runtime containment choice, not a replacement for URL admission checks.
+
+For the hardened compose profile, validate the merged configuration before deployment:
+
+```bash
+CRAWLER_API_TOKEN=replace-me \
+  docker compose -f docker-compose.yml -f docker-compose.hardened.yml config >/dev/null
+```
+
+The hardened profile sets `CRAWLER_EGRESS_PROXY`, `CRAWLER_REQUIRE_EGRESS_PROXY=true`, and
+`CRAWLER_DIRECT_EGRESS_ALLOWED=false` for the crawler service.
 
 Current private deployment status as of 2026-04-30:
 

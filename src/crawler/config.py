@@ -2,7 +2,7 @@
 
 from typing import Annotated, Any
 
-from pydantic import field_validator
+from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode
 
 
@@ -50,6 +50,9 @@ class CrawlerSettings(BaseSettings):
     admission_target_pending: int = 500_000
     allow_private_network_egress: bool = False
     allowed_egress_ports: Annotated[tuple[int, ...], NoDecode] = (80, 443)
+    egress_proxy: str | None = None
+    require_egress_proxy: bool = False
+    direct_egress_allowed: bool = True
     finalizer_batch_size: int = 16
     finalizer_batch_wait_ms: float = 25.0
     publisher_batch_size: int = 16
@@ -78,6 +81,35 @@ class CrawlerSettings(BaseSettings):
             if port < 1 or port > 65535:
                 raise ValueError("allowed_egress_ports must contain valid TCP ports")
         return tuple(sorted(set(ports)))
+
+    @model_validator(mode="after")
+    def _validate_egress_proxy_policy(self) -> "CrawlerSettings":
+        self.validate_egress_transport()
+        return self
+
+    def httpx_proxy(self) -> str | None:
+        """Return the configured outbound proxy URL, if any."""
+        if self.egress_proxy is None:
+            return None
+        proxy = self.egress_proxy.strip()
+        return proxy or None
+
+    def validate_egress_transport(self) -> None:
+        """Fail fast when runtime egress settings cannot be enforced."""
+        proxy = self.httpx_proxy()
+        if self.require_egress_proxy and proxy is None:
+            raise ValueError("CRAWLER_REQUIRE_EGRESS_PROXY=true requires CRAWLER_EGRESS_PROXY")
+        if not self.direct_egress_allowed and proxy is None:
+            raise ValueError("CRAWLER_DIRECT_EGRESS_ALLOWED=false requires CRAWLER_EGRESS_PROXY")
+
+    def httpx_proxy_kwargs(self) -> dict[str, str | bool]:
+        """Return the shared httpx proxy policy for crawler outbound HTTP."""
+        self.validate_egress_transport()
+        kwargs: dict[str, str | bool] = {"trust_env": False}
+        proxy = self.httpx_proxy()
+        if proxy is not None:
+            kwargs["proxy"] = proxy
+        return kwargs
 
 
 settings = CrawlerSettings()
