@@ -1,14 +1,18 @@
 # Documentation
 
-This directory contains focused design and policy documents. The root README remains the primary
-entry point for install, CLI/API usage, Docker, and deployment notes.
+This directory contains focused design, policy, and operations documents. The root README remains
+the primary entry point for project summary, quick start, common commands, and document routing.
 
 ## Entry Points
 
-- [README.md](../README.md) — project overview, runtime model, CLI/API usage, Docker, and deployment notes
+- [README.md](../README.md) — project overview, quick start, common commands, and document routing
 - [plan.md](../plan.md) — current milestone, recent completed work, and next candidates
 - [DESIGN_PRINCIPLES.md](DESIGN_PRINCIPLES.md) — conceptual positioning, core principles, non-goals, and architectural direction
 - [CONTENT_POLICY.md](CONTENT_POLICY.md) — content handling, metadata-only resources, storage tiers, and discovery breadth
+- [api.md](api.md) — REST API usage, authentication, endpoints, and current limitations
+- [operations.md](operations.md) — deployment, runtime environment, scheduler tuning, and observation
+- [seed-catalog.md](seed-catalog.md) — seed catalog maintenance and runtime rendering
+- [AGENT_BOUNDARY.md](AGENT_BOUNDARY.md) — experimental AI browser agent boundary and constraints
 
 ## Design Documents
 
