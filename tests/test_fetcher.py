@@ -201,6 +201,27 @@ class TestHttpFetcher:
 
         assert exc_info.value.decision.reason == "blocked_ip_literal"
 
+    async def test_fetch_blocks_metadata_endpoint_before_request(self, monkeypatch):
+        """Metadata endpoint targets should be rejected before starting a request."""
+
+        class DummyClient:
+            def stream(self, method, url):
+                raise AssertionError("network request should not be attempted for blocked egress")
+
+            async def aclose(self):
+                return None
+
+        monkeypatch.setattr(
+            "crawler.core.fetcher.httpx.AsyncClient",
+            lambda *args, **kwargs: DummyClient(),
+        )
+
+        fetcher = HttpFetcher(timeout=10.0)
+        with pytest.raises(EgressBlockedError) as exc_info:
+            await fetcher.fetch("http://169.254.169.254/latest/meta-data/")
+
+        assert exc_info.value.decision.reason == "blocked_ip_literal"
+
     async def test_fetch_blocks_private_redirect_before_following(self, httpx_mock):
         """Redirects to private targets should be rejected before following them."""
         httpx_mock.add_response(

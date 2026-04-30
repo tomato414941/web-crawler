@@ -35,6 +35,7 @@ docker compose ps
 curl -sS http://127.0.0.1:8080/health
 docker compose run --rm api crawler observe
 docker compose run --rm api crawler scheduler-check --sample-limit 0
+docker compose run --rm --no-deps crawler python scripts/egress_smoke.py
 docker compose logs --tail 20 observer
 ```
 
@@ -107,6 +108,24 @@ docker compose run --rm api crawler observe
 docker compose run --rm api crawler observe --json
 docker compose run --rm api crawler scheduler-check --sample-limit 0
 ```
+
+## Production Egress Smoke
+
+Run the network-layer smoke after deploying or changing host firewall, cloud security group, or
+container network policy rules:
+
+```bash
+docker compose run --rm --no-deps crawler python scripts/egress_smoke.py
+```
+
+The expected result is:
+
+- public `example.com:80` connects
+- representative local, private, link-local, metadata, CGNAT, and benchmarking targets do not
+  connect
+
+This confirms the runtime containment boundary without forcing the crawler HTTP fast path through
+a proxy.
 
 For periodic production observation, use `observe-watch`:
 
