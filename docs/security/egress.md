@@ -48,3 +48,20 @@ Production deployments should also enforce network-layer containment with host f
 network policy, cloud security groups, or a controlled egress proxy. The fast HTTP path may remain
 direct for throughput, but private, local, link-local, and metadata destinations should still be
 blocked by the runtime environment.
+
+## Network-Layer Smoke Test
+
+Run the smoke test from the crawler container after applying host firewall, cloud security group,
+or container network policy rules:
+
+```bash
+docker compose build crawler
+docker compose run --rm --no-deps crawler python scripts/egress_smoke.py
+```
+
+The smoke test keeps normal HTTP egress direct. It verifies that `example.com:80` remains
+reachable while representative local, private, link-local, metadata, CGNAT, and benchmarking
+targets do not accept TCP connections from the crawler runtime.
+
+This is a deployment smoke test, not an application unit test. If it fails, fix the runtime
+network policy rather than weakening the application egress guard.
