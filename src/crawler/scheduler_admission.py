@@ -57,7 +57,8 @@ class SchedulerAdmissionService:
             f"""SELECT url, host, discovery_value, next_fetch_at, added_at
                 FROM {self._url_ledger_table}
                 WHERE url = ANY(%s)
-                  AND terminal_reason IS NULL""",
+                  AND terminal_reason IS NULL
+                  AND last_success_at IS NULL""",
             (normalized_urls,),
         )
         return list(cur.fetchall())
