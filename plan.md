@@ -128,6 +128,11 @@ Durable throughput accounting follow-up on 2026-05-11:
   instead of only by the explicit refresh path
 - local fix in progress: normal discovery upsert/admission now skips successful ledger rows; refresh
   should continue to use `requeue_refresh_urls`
+- deployed fix on 2026-05-12 as `debf1f6 fix: avoid rediscovering successful urls`; health,
+  `crawler observe`, and `scheduler-check --sample-limit 0` passed after deploy
+- post-deploy existing queue residue: about 17.0k scheduled rows and 6.5k host-head rows still point
+  at previously successful URLs; the code fix prevents new normal-discovery reintroduction, but a
+  separate repair/cleanup decision is needed for existing scheduler membership rows
 
 Interpretation: the throughput/page-growth gap is mostly an accounting and repeated-fetch issue,
 not evidence that the crawler is idle. The immediate fix is to stop normal discovery from
@@ -216,7 +221,8 @@ Inspect:
 - [x] whether `cycle_pages` counts successful fetches rather than net-new stored pages
 - [x] whether current seeds/frontier revisit already stored URLs too often
 - [x] run Postgres-backed regression tests for the successful-URL rescheduling fix
-- [ ] deploy the successful-URL rescheduling fix and observe before/after
+- [x] deploy the successful-URL rescheduling fix and observe before/after
+- [ ] decide whether to repair existing successful URL scheduler memberships
 
 ### 4. Egress runtime posture
 
@@ -289,6 +295,7 @@ Keep README and docs aligned with runtime behavior:
 - [x] Identify top pending hosts/domains and basic URL shape.
 - [x] Explain reported throughput versus durable page growth.
 - [x] Finish and verify the successful-URL rescheduling fix.
+- [ ] Decide whether to clean existing successful URL scheduler memberships.
 - [ ] Decide whether pending drain needs policy tightening or more effective throughput.
 - [ ] If policy tightening is needed, choose one generic growth-control change.
 - [ ] If throughput is the blocker, tune publisher/finalizer only after DB timing confirms it.
