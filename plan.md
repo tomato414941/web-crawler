@@ -130,14 +130,21 @@ Durable throughput accounting follow-up on 2026-05-11:
   should continue to use `requeue_refresh_urls`
 - deployed fix on 2026-05-12 as `debf1f6 fix: avoid rediscovering successful urls`; health,
   `crawler observe`, and `scheduler-check --sample-limit 0` passed after deploy
-- post-deploy existing queue residue: about 17.0k scheduled rows and 6.5k host-head rows still point
-  at previously successful URLs; the code fix prevents new normal-discovery reintroduction, but a
-  separate repair/cleanup decision is needed for existing scheduler membership rows
+- cleaned existing successful-URL scheduler residue on 2026-05-12 with a one-time production SQL
+  cleanup:
+  - removed 16,966 successful URLs from `scheduler_queue_scheduled`
+  - cleared 16,966 stale `url_ledger.current_intent` values
+  - removed 6,478 successful URL rows from `host_runnable_heads`
+  - marked 10,960 affected host/queue pairs dirty for normal host-head refresh
+- post-cleanup verification found 0 successful URLs in normal scheduler queues, 0 successful
+  normal host heads, and `scheduler-check --sample-limit 0` still passed
+- dirty host-head refresh is progressing through the daemon; the dirty-host backlog fell from about
+  11.0k to 8.9k during follow-up observation
 
 Interpretation: the throughput/page-growth gap is mostly an accounting and repeated-fetch issue,
-not evidence that the crawler is idle. The immediate fix is to stop normal discovery from
-rescheduling successful URLs, then redeploy and compare the scheduled-successful count and durable
-page growth before changing discovery thresholds or concurrency.
+not evidence that the crawler is idle. The successful-URL reintroduction path is now fixed and the
+existing residue has been cleaned. The next decision should come from a fresh observation after
+host-head refresh catches up, before changing discovery thresholds or concurrency.
 
 ## Verification baseline
 
@@ -222,7 +229,9 @@ Inspect:
 - [x] whether current seeds/frontier revisit already stored URLs too often
 - [x] run Postgres-backed regression tests for the successful-URL rescheduling fix
 - [x] deploy the successful-URL rescheduling fix and observe before/after
-- [ ] decide whether to repair existing successful URL scheduler memberships
+- [x] decide whether to clean existing successful URL scheduler memberships
+- [x] clean existing successful URL scheduler memberships
+- [ ] repeat observation after dirty host-head refresh catches up
 
 ### 4. Egress runtime posture
 
@@ -295,7 +304,9 @@ Keep README and docs aligned with runtime behavior:
 - [x] Identify top pending hosts/domains and basic URL shape.
 - [x] Explain reported throughput versus durable page growth.
 - [x] Finish and verify the successful-URL rescheduling fix.
-- [ ] Decide whether to clean existing successful URL scheduler memberships.
+- [x] Decide whether to clean existing successful URL scheduler memberships.
+- [x] Clean existing successful URL scheduler memberships.
+- [ ] Repeat observation after dirty host-head refresh catches up.
 - [ ] Decide whether pending drain needs policy tightening or more effective throughput.
 - [ ] If policy tightening is needed, choose one generic growth-control change.
 - [ ] If throughput is the blocker, tune publisher/finalizer only after DB timing confirms it.
