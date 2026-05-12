@@ -140,11 +140,18 @@ Durable throughput accounting follow-up on 2026-05-11:
   normal host heads, and `scheduler-check --sample-limit 0` still passed
 - dirty host-head refresh is progressing through the daemon; the dirty-host backlog fell from about
   11.0k to 8.9k during follow-up observation
+- cleanup follow-up observation on 2026-05-12 after dirty host-head refresh caught up:
+  - `crawler observe`: pages 311,182 across 138,121 hosts; stored content 18.5 GiB from 120.4 GiB raw
+  - scheduler pending 895,374; runnable 895,258; scheduled 16; retry 3; leased 0
+  - `scheduler-check --sample-limit 0`: `ok=true`, zero invariant violations
+  - successful URL residue remained absent: 0 successful rows in normal queues and 0 successful
+    normal host heads
 
 Interpretation: the throughput/page-growth gap is mostly an accounting and repeated-fetch issue,
 not evidence that the crawler is idle. The successful-URL reintroduction path is now fixed and the
-existing residue has been cleaned. The next decision should come from a fresh observation after
-host-head refresh catches up, before changing discovery thresholds or concurrency.
+existing residue has been cleaned. Cleanup did not reveal a scheduler integrity problem; the next
+decision is whether the remaining broad frontier should be drained by tighter generic admission
+policy or by more effective crawl throughput.
 
 ## Verification baseline
 
@@ -231,7 +238,7 @@ Inspect:
 - [x] deploy the successful-URL rescheduling fix and observe before/after
 - [x] decide whether to clean existing successful URL scheduler memberships
 - [x] clean existing successful URL scheduler memberships
-- [ ] repeat observation after dirty host-head refresh catches up
+- [x] repeat observation after dirty host-head refresh catches up
 
 ### 4. Egress runtime posture
 
@@ -306,7 +313,7 @@ Keep README and docs aligned with runtime behavior:
 - [x] Finish and verify the successful-URL rescheduling fix.
 - [x] Decide whether to clean existing successful URL scheduler memberships.
 - [x] Clean existing successful URL scheduler memberships.
-- [ ] Repeat observation after dirty host-head refresh catches up.
+- [x] Repeat observation after dirty host-head refresh catches up.
 - [ ] Decide whether pending drain needs policy tightening or more effective throughput.
 - [ ] If policy tightening is needed, choose one generic growth-control change.
 - [ ] If throughput is the blocker, tune publisher/finalizer only after DB timing confirms it.
