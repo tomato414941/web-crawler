@@ -1607,6 +1607,7 @@ class UrlLedger:
                            current_intent = COALESCE(EXCLUDED.current_intent, {URL_LEDGER_TABLE}.current_intent)
                        WHERE
                            {URL_LEDGER_TABLE}.terminal_reason IS NULL
+                           AND {URL_LEDGER_TABLE}.last_success_at IS NULL
                            AND (
                                EXCLUDED.discovery_value > {URL_LEDGER_TABLE}.discovery_value
                                OR EXCLUDED.url_hash IS DISTINCT FROM {URL_LEDGER_TABLE}.url_hash

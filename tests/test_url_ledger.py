@@ -590,6 +590,36 @@ class TestUrlLedger:
         assert admitted == 0
         assert self._queue_counts(ledger, "http://example.com/done") == (0, 0, 0)
 
+    def test_place_does_not_reschedule_successful_url(self, ledger):
+        ledger.place(
+            CrawlTask(
+                url="http://example.com/done",
+                runnable_surface=SCHEDULER_SURFACE_SCHEDULED,
+                intent=INTENT_EXPLORE,
+            )
+        )
+        leased = ledger.lease_next()
+        assert leased is not None
+        ledger.mark_done(leased.url, lease_token=leased.lease_token)
+
+        placed = ledger.place(
+            CrawlTask(
+                url="http://example.com/done",
+                discovery_value=10.0,
+                runnable_surface=SCHEDULER_SURFACE_SCHEDULED,
+                intent=INTENT_EXPLORE,
+            )
+        )
+        admitted = ledger.admit_urls(
+            ["http://example.com/done"],
+            runnable_surface=SCHEDULER_SURFACE_SCHEDULED,
+            intent=INTENT_EXPLORE,
+        )
+
+        assert placed is False
+        assert admitted == 0
+        assert self._queue_counts(ledger, "http://example.com/done") == (0, 0, 0)
+
     def test_add_preserves_first_seen_source_url_when_discovery_value_improves(self, ledger):
         assert ledger.place(
             CrawlTask(
