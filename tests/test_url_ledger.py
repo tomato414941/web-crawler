@@ -13,7 +13,12 @@ from crawler.host_runnable_heads import (
 )
 from crawler.host_store import HostStore
 from crawler.host_ledger import HOST_LEDGER_TABLE
-from crawler.url_identity import URL_IDENTITY_VERSION, url_identity_hash, url_identity_length
+from crawler.url_identity import (
+    MAX_URL_IDENTITY_BYTES,
+    URL_IDENTITY_VERSION,
+    url_identity_hash,
+    url_identity_length,
+)
 from crawler.url_ledger import (
     ADMISSION_DIAGNOSTIC_FIELDS,
     BLOCKED_HOST_BACKOFF_TABLE,
@@ -291,6 +296,16 @@ class TestUrlLedger:
         ]
         assert ledger.place_many(tasks) == 2
 
+    def test_add_many_skips_urls_over_identity_limit(self, ledger):
+        long_url = "http://example.com/" + ("a" * MAX_URL_IDENTITY_BYTES)
+
+        assert ledger.place_many([CrawlTask(url=long_url)]) == 0
+
+        with ledger._conn.cursor() as cur:
+            cur.execute(f"SELECT COUNT(*) FROM {URL_LEDGER_TABLE}")
+            (ledger_count,) = cur.fetchone()
+        assert ledger_count == 0
+
     def test_discover_keeps_url_out_of_queue_tables(self, ledger):
         task = CrawlTask(url="http://example.com/discovered")
 
@@ -326,6 +341,27 @@ class TestUrlLedger:
         assert runnable_queue_count == 1
         assert scheduled_queue_count == 0
         assert refresh_count == 0
+
+    def test_requeue_urls_skips_urls_over_identity_limit(self, ledger):
+        long_url = "http://example.com/" + ("a" * MAX_URL_IDENTITY_BYTES)
+        with ledger._conn.cursor() as cur:
+            cur.execute(
+                f"""INSERT INTO {URL_LEDGER_TABLE} (
+                        url, url_hash, url_length, url_identity_version, host,
+                        discovery_value, source_url, added_at, next_fetch_at, current_intent
+                    )
+                    VALUES (%s, %s, %s, %s, 'example.com', 1.0, NULL, 1.0, 1.0, NULL)""",
+                (
+                    long_url,
+                    url_identity_hash(long_url),
+                    url_identity_length(long_url),
+                    URL_IDENTITY_VERSION,
+                ),
+            )
+        ledger._conn.commit()
+
+        assert ledger.requeue_urls([long_url]) == 0
+        assert self._queue_counts(ledger, long_url) == (0, 0, 0)
 
     def test_admit_urls_can_schedule_unchanged_ledger_row(self, ledger):
         ledger.discover(CrawlTask(url="http://example.com/discovered"))

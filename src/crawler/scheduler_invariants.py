@@ -591,26 +591,41 @@ class SchedulerInvariantChecker:
         return count, samples
 
     def _url_too_long(self, *, limit: int) -> tuple[int, list[dict[str, Any]]]:
+        union_sql = self._live_membership_union_sql()
+        params = self._live_membership_params()
         with self._conn.cursor() as cur:
             cur.execute(
-                f"""SELECT COUNT(*)
-                    FROM {URL_LEDGER_TABLE}
+                f"""WITH memberships AS (
+                        {union_sql}
+                    )
+                    SELECT COUNT(*)
+                    FROM memberships
                     WHERE octet_length(url) > %s""",
-                (MAX_URL_IDENTITY_BYTES,),
+                (*params, MAX_URL_IDENTITY_BYTES),
             )
             count = int(cur.fetchone()[0] or 0)
             samples: list[dict[str, Any]] = []
             if limit:
                 cur.execute(
-                    f"""SELECT url, url_length
-                        FROM {URL_LEDGER_TABLE}
-                        WHERE octet_length(url) > %s
+                    f"""WITH memberships AS (
+                            {union_sql}
+                        )
+                        SELECT memberships.url, memberships.membership, ledger.url_length
+                        FROM memberships
+                        LEFT JOIN {URL_LEDGER_TABLE} AS ledger
+                          ON ledger.url = memberships.url
+                        WHERE octet_length(memberships.url) > %s
+                        ORDER BY memberships.url, memberships.membership
                         LIMIT %s""",
-                    (MAX_URL_IDENTITY_BYTES, limit),
+                    (*params, MAX_URL_IDENTITY_BYTES, limit),
                 )
                 samples = [
-                    {"url": url, "url_length": url_length}
-                    for url, url_length in cur.fetchall()
+                    {
+                        "url": url,
+                        "membership": membership,
+                        "url_length": url_length,
+                    }
+                    for url, membership, url_length in cur.fetchall()
                 ]
         self._conn.commit()
         return count, samples

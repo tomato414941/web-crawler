@@ -163,6 +163,7 @@ def test_scheduler_invariant_checker_detects_url_identity_violations(conn):
             ("https://example.com/duplicate-a", "https://example.com/duplicate-b"),
         )
         _insert_ledger(cur, long_url)
+        _insert_queue(cur, QUEUE_RUNNABLE, long_url)
         _insert_ledger(cur, "https://example.com/bad-length")
         cur.execute(
             f"""UPDATE {URL_LEDGER_TABLE}
@@ -186,6 +187,18 @@ def test_scheduler_invariant_checker_detects_url_identity_violations(conn):
     assert report.samples["url_hash_duplicates"][0]["url_hash"] == "duplicate-hash"
     assert report.samples["url_length_mismatches"][0]["url"] == "https://example.com/bad-length"
     assert report.samples["url_too_long"][0]["url"] == long_url
+    assert report.samples["url_too_long"][0]["membership"] == QUEUE_RUNNABLE
+
+
+def test_scheduler_invariant_checker_ignores_historical_long_urls(conn):
+    long_url = "https://example.com/" + ("a" * MAX_URL_IDENTITY_BYTES)
+    with conn.cursor() as cur:
+        _insert_ledger(cur, long_url)
+    conn.commit()
+
+    report = SchedulerInvariantChecker(conn).check(now=200.0)
+
+    assert report.url_too_long == 0
 
 
 def test_scheduler_invariant_repair_removes_terminal_memberships_but_keeps_ledger(conn):

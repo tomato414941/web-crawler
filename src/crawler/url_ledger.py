@@ -51,7 +51,12 @@ from .scheduler_observability import SchedulerObservability, SchedulerReadiness
 from .scheduler_quarantine import SchedulerQuarantine
 from .scheduler_retry_policy import SchedulerRetryPolicy
 from .schema import assert_public_table_columns
-from .url_identity import URL_IDENTITY_VERSION, url_identity_hash, url_identity_length
+from .url_identity import (
+    MAX_URL_IDENTITY_BYTES,
+    URL_IDENTITY_VERSION,
+    url_identity_hash,
+    url_identity_length,
+)
 from .urls import normalize_url
 
 if TYPE_CHECKING:
@@ -1223,6 +1228,8 @@ class UrlLedger:
         merged: dict[str, CrawlTask] = {}
         for task in tasks:
             normalized_url = normalize_url(task.url)
+            if url_identity_length(normalized_url) > MAX_URL_IDENTITY_BYTES:
+                continue
             if not is_url_allowed_without_dns(
                 normalized_url,
                 allow_private_network_egress=settings.allow_private_network_egress,
