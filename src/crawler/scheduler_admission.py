@@ -6,6 +6,7 @@ import logging
 import time
 from typing import Any
 
+from .url_identity import MAX_URL_IDENTITY_BYTES, url_identity_length
 from .urls import normalize_url
 
 logger = logging.getLogger(__name__)
@@ -51,6 +52,9 @@ class SchedulerAdmissionService:
     ) -> list[tuple[str, str, float, float, float]]:
         """Load known ledger rows used by scheduler admission."""
         normalized_urls = sorted({task.url for task in tasks if task.url})
+        normalized_urls = [
+            url for url in normalized_urls if url_identity_length(url) <= MAX_URL_IDENTITY_BYTES
+        ]
         if not normalized_urls:
             return []
         cur.execute(
@@ -171,13 +175,14 @@ class SchedulerAdmissionService:
                   AND lease.url IS NULL
                   AND ledger.last_success_at IS NULL
                   AND ledger.terminal_reason IS NULL
+                  AND ledger.url_length <= %s
                 ORDER BY ledger.discovery_value DESC,
                          ledger.next_fetch_at ASC,
                          ledger.added_at ASC,
                          ledger.url ASC
                 LIMIT %s
                 FOR UPDATE OF ledger SKIP LOCKED""",
-            (limit,),
+            (MAX_URL_IDENTITY_BYTES, limit),
         )
         return list(cur.fetchall())
 

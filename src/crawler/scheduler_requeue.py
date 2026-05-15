@@ -9,7 +9,12 @@ from urllib.parse import urlparse
 
 import psycopg2.extras
 
-from .url_identity import URL_IDENTITY_VERSION, url_identity_hash, url_identity_length
+from .url_identity import (
+    MAX_URL_IDENTITY_BYTES,
+    URL_IDENTITY_VERSION,
+    url_identity_hash,
+    url_identity_length,
+)
 from .urls import normalize_url, url_branch_key
 
 
@@ -50,16 +55,18 @@ class SchedulerRequeueService:
         now = time.time() if quarantined_at is None else quarantined_at
         blocked_rows = [
             (
-                normalize_url(url),
+                normalized_url,
                 host,
                 self._ledger._normalize_physical_queue(physical_queue),
                 scheduler_score,
                 next_fetch_at,
                 added_at,
                 now,
-                url_branch_key(normalize_url(url)),
+                url_branch_key(normalized_url),
             )
             for url, host, scheduler_score, next_fetch_at, added_at, physical_queue in rows
+            for normalized_url in [normalize_url(url)]
+            if url_identity_length(normalized_url) <= MAX_URL_IDENTITY_BYTES
         ]
         if not blocked_rows:
             return
@@ -137,7 +144,15 @@ class SchedulerRequeueService:
         current_statuses: list[str] | None = None,
     ) -> int:
         """Move known URLs back into a pending physical queue and synchronize scheduler state."""
-        normalized_urls = sorted({normalize_url(url) for url in urls if url})
+        normalized_urls = sorted(
+            {
+                normalized_url
+                for url in urls
+                if url
+                for normalized_url in [normalize_url(url)]
+                if url_identity_length(normalized_url) <= MAX_URL_IDENTITY_BYTES
+            }
+        )
         if not normalized_urls:
             return 0
 
@@ -244,6 +259,8 @@ class SchedulerRequeueService:
         now = time.time()
         for url in urls:
             normalized = normalize_url(url)
+            if url_identity_length(normalized) > MAX_URL_IDENTITY_BYTES:
+                continue
             host = urlparse(normalized).netloc
             rows.append(
                 (
@@ -257,6 +274,9 @@ class SchedulerRequeueService:
                     now,
                 )
             )
+
+        if not rows:
+            return 0
 
         with self._ledger._conn.cursor() as cur:
             normalized_urls = [row[0] for row in rows]
