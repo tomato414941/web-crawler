@@ -146,12 +146,23 @@ Durable throughput accounting follow-up on 2026-05-11:
   - `scheduler-check --sample-limit 0`: `ok=true`, zero invariant violations
   - successful URL residue remained absent: 0 successful rows in normal queues and 0 successful
     normal host heads
+- production follow-up on 2026-05-15:
+  - pending had fallen to about 759k, so drain mode is reducing the frontier
+  - `scheduler-check` exposed 32,870 `url_too_long` violations from historical overlong URLs
+  - deployed `29d8d62 fix: reject overlong scheduler urls` so discovery/requeue admission skips
+    URLs over the 8,192 byte identity limit and `scheduler-check` only flags live scheduler
+    membership over that limit
+  - cleaned 10 existing overlong rows from `scheduler_queue_scheduled`, cleared 25 stale
+    overlong `current_intent` values, and marked 2 affected host/queue pairs dirty
+  - post-fix `scheduler-check --json` returned `ok=true` with zero violations
+  - latest `crawler observe`: pages 1,053,901 across 138,867 hosts; scheduler pending 758,488,
+    runnable 758,282, scheduled 11, retry 11, leased 0
 
 Interpretation: the throughput/page-growth gap is mostly an accounting and repeated-fetch issue,
 not evidence that the crawler is idle. The successful-URL reintroduction path is now fixed and the
-existing residue has been cleaned. Cleanup did not reveal a scheduler integrity problem; the next
-decision is whether the remaining broad frontier should be drained by tighter generic admission
-policy or by more effective crawl throughput.
+existing residue has been cleaned. Overlong URL admission is now blocked at scheduler boundaries.
+The remaining problem is policy: decide whether the still-large broad frontier should be drained by
+tighter generic admission policy or by more effective crawl throughput.
 
 ## Verification baseline
 
@@ -239,6 +250,8 @@ Inspect:
 - [x] decide whether to clean existing successful URL scheduler memberships
 - [x] clean existing successful URL scheduler memberships
 - [x] repeat observation after dirty host-head refresh catches up
+- [x] prevent overlong URLs from entering scheduler membership
+- [x] clean existing live overlong scheduler memberships
 
 ### 4. Egress runtime posture
 
@@ -314,6 +327,8 @@ Keep README and docs aligned with runtime behavior:
 - [x] Decide whether to clean existing successful URL scheduler memberships.
 - [x] Clean existing successful URL scheduler memberships.
 - [x] Repeat observation after dirty host-head refresh catches up.
+- [x] Prevent overlong URLs from entering scheduler membership.
+- [x] Clean existing live overlong scheduler memberships.
 - [ ] Decide whether pending drain needs policy tightening or more effective throughput.
 - [ ] If policy tightening is needed, choose one generic growth-control change.
 - [ ] If throughput is the blocker, tune publisher/finalizer only after DB timing confirms it.
