@@ -7,14 +7,14 @@ import time
 from typing import Any
 
 from .url_identity import MAX_URL_IDENTITY_BYTES, URL_IDENTITY_VERSION
-from .url_ledger import (
-    BLOCKED_HOST_BACKOFF_TABLE,
+from .host_runnable_heads import (
     HOST_RUNNABLE_HEAD_DIRTY_HOSTS_TABLE,
     HOST_RUNNABLE_HEADS_TABLE,
-    LEASE_TABLE,
-    PHYSICAL_QUEUE_TABLES,
-    URL_LEDGER_TABLE,
 )
+from .scheduler_leases import ACTIVE_LEASES_TABLE
+from .scheduler_membership import PHYSICAL_QUEUE_TABLES
+from .scheduler_quarantine import BLOCKED_HOST_BACKOFF_TABLE
+from .url_ledger import URL_LEDGER_TABLE
 
 
 @dataclass(frozen=True, slots=True)
@@ -193,7 +193,7 @@ class SchedulerInvariantChecker:
             deleted_host_heads = cur.rowcount
 
             cur.execute(
-                f"""DELETE FROM {LEASE_TABLE} AS leases
+                f"""DELETE FROM {ACTIVE_LEASES_TABLE} AS leases
                     USING {URL_LEDGER_TABLE} AS ledger
                     WHERE leases.url = ledger.url
                       AND ledger.terminal_reason IS NOT NULL"""
@@ -235,7 +235,7 @@ class SchedulerInvariantChecker:
         queue_selects.extend(
             [
                 f"SELECT url, physical_queue || ':blocked' AS membership FROM {BLOCKED_HOST_BACKOFF_TABLE}",
-                f"SELECT url, physical_queue || ':leased' AS membership FROM {LEASE_TABLE}",
+                f"SELECT url, physical_queue || ':leased' AS membership FROM {ACTIVE_LEASES_TABLE}",
             ]
         )
         return "\nUNION ALL\n".join(queue_selects)
@@ -329,7 +329,7 @@ class SchedulerInvariantChecker:
     ) -> tuple[int, list[dict[str, Any]]]:
         with self._conn.cursor() as cur:
             cur.execute(
-                f"SELECT COUNT(*) FROM {LEASE_TABLE} WHERE lease_expires_at < %s",
+                f"SELECT COUNT(*) FROM {ACTIVE_LEASES_TABLE} WHERE lease_expires_at < %s",
                 (now,),
             )
             count = int(cur.fetchone()[0] or 0)
@@ -337,7 +337,7 @@ class SchedulerInvariantChecker:
             if limit:
                 cur.execute(
                     f"""SELECT url, physical_queue, lease_expires_at
-                        FROM {LEASE_TABLE}
+                        FROM {ACTIVE_LEASES_TABLE}
                         WHERE lease_expires_at < %s
                         ORDER BY lease_expires_at ASC, url ASC
                         LIMIT %s""",

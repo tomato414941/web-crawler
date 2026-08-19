@@ -18,14 +18,14 @@ from .error_stats import categorize_crawl_error
 from .host_manager import compute_host_budget
 from .r2_content import R2ContentStore
 from .urls import normalize_url
-from .url_ledger import (
-    BLOCKED_HOST_BACKOFF_TABLE,
-    LEASE_TABLE,
+from .scheduler_leases import ACTIVE_LEASES_TABLE
+from .scheduler_membership import (
     PHYSICAL_QUEUE_DEFAULT_SCHEDULER_SURFACE,
     PHYSICAL_QUEUE_ORDER,
     PHYSICAL_QUEUE_TABLES,
-    URL_LEDGER_TABLE,
 )
+from .scheduler_quarantine import BLOCKED_HOST_BACKOFF_TABLE
+from .url_ledger import URL_LEDGER_TABLE
 from .scheduler_observability import SchedulerObservability
 from .config import settings
 from .result import CrawlResult, result_to_dict
@@ -868,7 +868,7 @@ class DiagnosticsReader:
                             physical_queue_order=PHYSICAL_QUEUE_ORDER,
                             physical_queue_default_runnable_surface=PHYSICAL_QUEUE_DEFAULT_SCHEDULER_SURFACE,
                             blocked_queue_table=BLOCKED_HOST_BACKOFF_TABLE,
-                            lease_table=LEASE_TABLE,
+                            lease_table=ACTIVE_LEASES_TABLE,
                         )
 
                         scheduler_status = observability.status_counts()

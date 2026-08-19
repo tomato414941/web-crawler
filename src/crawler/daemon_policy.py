@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
-from .url_ledger import SCHEDULER_SURFACE_SCHEDULED, SCHEDULER_SURFACE_RUNNABLE
+from .scheduler_membership import SCHEDULER_SURFACE_SCHEDULED, SCHEDULER_SURFACE_RUNNABLE
 
 
 class DaemonSchedulerPolicy:

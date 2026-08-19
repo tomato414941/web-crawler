@@ -14,6 +14,8 @@ import psycopg2.extras
 from .config import settings
 from .egress_guard import is_url_allowed_without_dns
 from .host_runnable_heads import (
+    HOST_RUNNABLE_HEADS_TABLE as _HOST_RUNNABLE_HEADS_TABLE,
+    HOST_RUNNABLE_HEAD_DIRTY_HOSTS_TABLE as _HOST_RUNNABLE_HEAD_DIRTY_HOSTS_TABLE,
     HostRunnableHead,
     HostRunnableHeadDirtyRefreshSummary,
     HostRunnableHeadRepairSummary,
@@ -22,19 +24,16 @@ from .host_runnable_heads import (
 from .host_ledger import HostLedgerStore
 from .scheduler_lease_telemetry import HostFirstLeaseTelemetry
 from .scheduler_membership import (
-    PHYSICAL_QUEUE_DEFAULT_SCHEDULER_SURFACE,
-    PHYSICAL_QUEUE_ORDER,
-    PHYSICAL_QUEUE_TABLES,
-    QUEUE_REFRESH,
-    QUEUE_RUNNABLE,
-    QUEUE_SCHEDULED,
+    PHYSICAL_QUEUE_DEFAULT_SCHEDULER_SURFACE as _PHYSICAL_QUEUE_DEFAULT_SCHEDULER_SURFACE,
+    PHYSICAL_QUEUE_ORDER as _PHYSICAL_QUEUE_ORDER,
+    PHYSICAL_QUEUE_TABLES as _PHYSICAL_QUEUE_TABLES,
+    QUEUE_SCHEDULED as _QUEUE_SCHEDULED,
     QUEUE_TABLES,
     HOST_HEAD_UPDATE_DIRTY,
-    SCHEDULER_SURFACE_NORMAL,
     SCHEDULER_SURFACE_URGENCY,
-    SCHEDULER_SURFACE_REFRESH,
-    SCHEDULER_SURFACE_RUNNABLE,
-    SCHEDULER_SURFACE_SCHEDULED,
+    SCHEDULER_SURFACE_REFRESH as _SCHEDULER_SURFACE_REFRESH,
+    SCHEDULER_SURFACE_RUNNABLE as _SCHEDULER_SURFACE_RUNNABLE,
+    SCHEDULER_SURFACE_SCHEDULED as _SCHEDULER_SURFACE_SCHEDULED,
     SchedulerMembershipStore,
     SchedulerQueueRow,
     SchedulerQueueRowInput,
@@ -44,12 +43,28 @@ from .scheduler_leases import (
     LEASE_REQUIRED_COLUMNS,
     ExecutionLeaseStore,
 )
-from .scheduler_admission import SchedulerAdmissionService
+from .scheduler_admission import (
+    ADMISSION_DIAGNOSTIC_FIELDS as _ADMISSION_DIAGNOSTIC_FIELDS,
+    SchedulerAdmissionService,
+)
 from .scheduler_requeue import SchedulerRequeueService
-from .scheduler_selection import SchedulerLeaseSelector
+from .scheduler_selection import (
+    LEASE_STRATEGY_HOST_FIRST as _LEASE_STRATEGY_HOST_FIRST,
+    LEASE_STRATEGY_URL_ORDER as _LEASE_STRATEGY_URL_ORDER,
+    SchedulerLeaseSelector,
+)
 from .scheduler_observability import SchedulerObservability, SchedulerReadiness
-from .scheduler_quarantine import SchedulerQuarantine
+from .scheduler_quarantine import (
+    BLOCKED_HOST_BACKOFF_TABLE as _BLOCKED_HOST_BACKOFF_TABLE,
+    SchedulerQuarantine,
+)
 from .scheduler_retry_policy import SchedulerRetryPolicy
+from .scheduler_task import (
+    CrawlTask as _CrawlTask,
+    INTENT_EXPLORE as _INTENT_EXPLORE,
+    INTENT_REFRESH as _INTENT_REFRESH,
+    INTENT_RETRY as _INTENT_RETRY,
+)
 from .schema import assert_public_table_columns
 from .url_identity import (
     MAX_URL_IDENTITY_BYTES,
@@ -65,27 +80,12 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 URL_LEDGER_TABLE = "url_ledger"
-INTENT_EXPLORE = "explore"
-INTENT_REFRESH = "refresh"
-INTENT_RETRY = "retry"
-LEASE_STRATEGY_URL_ORDER = "url_order"
-LEASE_STRATEGY_HOST_FIRST = "host_first"
-
 DEFAULT_LEASE_SECONDS = 300.0
 DEFAULT_RETRY_BACKOFF_SECONDS = 30.0
 MAX_RETRY_BACKOFF_SECONDS = 1800.0
 LATENCY_BUCKET_FAST_MS = 150.0
 LATENCY_BUCKET_SLOW_MS = 400.0
 LATENCY_BUCKET_VERY_SLOW_MS = 1000.0
-ADMISSION_DIAGNOSTIC_FIELDS = (
-    "admit_update_intents_ms",
-    "admit_fetch_rows_ms",
-    "admit_delete_membership_ms",
-    "admit_insert_membership_ms",
-    "admit_host_heads_ms",
-    "admit_delete_leases_ms",
-    "admit_commit_ms",
-)
 URL_LEDGER_REQUIRED_COLUMNS = {
     "url",
     "url_hash",
@@ -103,7 +103,6 @@ URL_LEDGER_REQUIRED_COLUMNS = {
     "terminal_reason",
     "terminalized_at",
 }
-BLOCKED_HOST_BACKOFF_TABLE = "scheduler_queue_retry_quarantine"
 QUEUE_REQUIRED_COLUMNS = {
     "url",
     "host",
@@ -112,9 +111,7 @@ QUEUE_REQUIRED_COLUMNS = {
     "added_at",
     "branch_key",
 }
-LEASE_TABLE = ACTIVE_LEASES_TABLE
-HOST_RUNNABLE_HEADS_TABLE = "host_runnable_heads"
-HOST_RUNNABLE_HEAD_DIRTY_HOSTS_TABLE = "host_runnable_head_dirty_hosts"
+_LEASE_TABLE = ACTIVE_LEASES_TABLE
 HOST_RUNNABLE_HEADS_REQUIRED_COLUMNS = {
     "physical_queue",
     "host",
@@ -144,91 +141,21 @@ BLOCKED_QUEUE_REQUIRED_COLUMNS = {
     "branch_key",
 }
 LEASE_STRATEGIES = {
-    LEASE_STRATEGY_URL_ORDER,
-    LEASE_STRATEGY_HOST_FIRST,
+    _LEASE_STRATEGY_URL_ORDER,
+    _LEASE_STRATEGY_HOST_FIRST,
 }
 SCHEDULER_SURFACE_DEFAULT_INTENT = {
-    SCHEDULER_SURFACE_RUNNABLE: INTENT_EXPLORE,
-    SCHEDULER_SURFACE_SCHEDULED: INTENT_EXPLORE,
-    SCHEDULER_SURFACE_REFRESH: INTENT_REFRESH,
+    _SCHEDULER_SURFACE_RUNNABLE: _INTENT_EXPLORE,
+    _SCHEDULER_SURFACE_SCHEDULED: _INTENT_EXPLORE,
+    _SCHEDULER_SURFACE_REFRESH: _INTENT_REFRESH,
 }
 INTENT_DEFAULT_SCHEDULER_SURFACE = {
-    INTENT_EXPLORE: SCHEDULER_SURFACE_SCHEDULED,
-    INTENT_REFRESH: SCHEDULER_SURFACE_REFRESH,
-    INTENT_RETRY: SCHEDULER_SURFACE_SCHEDULED,
+    _INTENT_EXPLORE: _SCHEDULER_SURFACE_SCHEDULED,
+    _INTENT_REFRESH: _SCHEDULER_SURFACE_REFRESH,
+    _INTENT_RETRY: _SCHEDULER_SURFACE_SCHEDULED,
 }
 HOST_HEAD_LOOKAHEAD = 32
 HOST_HEAD_READ_MODEL_LOOKAHEAD = HOST_HEAD_LOOKAHEAD * 4
-__all__ = [
-    "BLOCKED_HOST_BACKOFF_TABLE",
-    "CrawlTask",
-    "HOST_RUNNABLE_HEAD_DIRTY_HOSTS_TABLE",
-    "HOST_RUNNABLE_HEADS_TABLE",
-    "INTENT_EXPLORE",
-    "INTENT_REFRESH",
-    "INTENT_RETRY",
-    "LEASE_TABLE",
-    "PHYSICAL_QUEUE_DEFAULT_SCHEDULER_SURFACE",
-    "PHYSICAL_QUEUE_ORDER",
-    "PHYSICAL_QUEUE_TABLES",
-    "QUEUE_REFRESH",
-    "QUEUE_RUNNABLE",
-    "QUEUE_SCHEDULED",
-    "SCHEDULER_SURFACE_NORMAL",
-    "SCHEDULER_SURFACE_REFRESH",
-    "SCHEDULER_SURFACE_RUNNABLE",
-    "SCHEDULER_SURFACE_SCHEDULED",
-    "URL_LEDGER_TABLE",
-    "UrlLedger",
-]
-
-
-@dataclass(init=False)
-class CrawlTask:
-    """A URL to crawl with metadata."""
-
-    url: str
-    discovery_value: float = 1.0
-    scheduler_score: float = 1.0
-    runnable_surface: str | None = None
-    intent: str | None = None
-    source_url: str | None = None
-    added_at: float = 0.0
-    next_fetch_at: float = 0.0
-    lease_token: str | None = None
-    lease_expires_at: float | None = None
-
-    def __init__(
-        self,
-        url: str,
-        discovery_value: float = 1.0,
-        *,
-        scheduler_score: float | None = None,
-        runnable_surface: str | None = None,
-        intent: str | None = None,
-        source_url: str | None = None,
-        added_at: float = 0.0,
-        next_fetch_at: float = 0.0,
-        lease_token: str | None = None,
-        lease_expires_at: float | None = None,
-    ):
-        self.url = url
-        self.discovery_value = discovery_value
-        self.scheduler_score = discovery_value if scheduler_score is None else scheduler_score
-        self.runnable_surface = runnable_surface
-        self.intent = intent
-        self.source_url = source_url
-        self.added_at = added_at
-        self.next_fetch_at = next_fetch_at
-        self.lease_token = lease_token
-        self.lease_expires_at = lease_expires_at
-        self.__post_init__()
-
-    def __post_init__(self):
-        if self.added_at == 0.0:
-            self.added_at = time.time()
-        if self.next_fetch_at == 0.0:
-            self.next_fetch_at = self.added_at
 
 
 @dataclass(frozen=True)
@@ -259,7 +186,7 @@ class _RunnableSql:
 class _HostFirstReadModelResult:
     """Result of one host-head read-model lease attempt."""
 
-    task: CrawlTask | None
+    task: _CrawlTask | None
     read_model: str
     candidates: int = 0
     stale_candidates: int = 0
@@ -316,21 +243,21 @@ class UrlLedgerStore:
     def __init__(self, ledger: "UrlLedger") -> None:
         self._ledger = ledger
 
-    def discover(self, task: CrawlTask) -> bool:
+    def discover(self, task: _CrawlTask) -> bool:
         _prepared, changed = self._ledger._upsert_ledger_tasks([task])
         return changed > 0
 
-    def discover_many(self, tasks: list[CrawlTask]) -> int:
+    def discover_many(self, tasks: list[_CrawlTask]) -> int:
         _prepared, changed = self._ledger._upsert_ledger_tasks(tasks)
         return changed
 
-    def preview_tasks(self, tasks: list[CrawlTask]) -> list[CrawlTask]:
+    def preview_tasks(self, tasks: list[_CrawlTask]) -> list[_CrawlTask]:
         return self._ledger._prepare_tasks(tasks)
 
-    def place(self, task: CrawlTask) -> bool:
+    def place(self, task: _CrawlTask) -> bool:
         return self.place_many([task]) > 0
 
-    def place_many(self, tasks: list[CrawlTask]) -> int:
+    def place_many(self, tasks: list[_CrawlTask]) -> int:
         prepared_tasks, changed = self._ledger._upsert_ledger_tasks(tasks)
         if not prepared_tasks:
             return changed
@@ -367,7 +294,7 @@ class UrlLedgerStore:
         self._ledger._conn.commit()
         return updated
 
-    def mark_done_many(self, tasks: list[CrawlTask]) -> int:
+    def mark_done_many(self, tasks: list[_CrawlTask]) -> int:
         rows_by_url: dict[str, tuple[str, str | None]] = {}
         for task in tasks:
             if task.url:
@@ -400,7 +327,7 @@ class UrlLedgerStore:
                               incoming.lease_token IS NULL
                               OR EXISTS (
                                   SELECT 1
-                                  FROM {LEASE_TABLE} AS active
+                                  FROM {_LEASE_TABLE} AS active
                                   WHERE active.url = ledger.url
                                     AND active.lease_token = incoming.lease_token
                               )
@@ -478,7 +405,7 @@ class UrlLedgerStore:
                     self._ledger._host_ledger.record_failure_in_tx(cur, host, at=now)
                 pending_rows = self._ledger._pending_rows_for_physical_queue(
                     rows,
-                    self._ledger._single_physical_queue_for_surface(SCHEDULER_SURFACE_SCHEDULED),
+                    self._ledger._single_physical_queue_for_surface(_SCHEDULER_SURFACE_SCHEDULED),
                 )
                 self._ledger._membership.replace_pending_rows(cur, pending_rows)
                 self._ledger._leases.delete(cur, self._ledger._membership.row_urls(pending_rows))
@@ -521,10 +448,10 @@ class SchedulerKernel:
     def __init__(self, ledger: "UrlLedger") -> None:
         self._ledger = ledger
 
-    def admit_queue_membership(self, tasks: list[CrawlTask]) -> int:
+    def admit_queue_membership(self, tasks: list[_CrawlTask]) -> int:
         return self._ledger._admission_service().admit_queue_membership(tasks)
 
-    def admit_discovered_tasks(self, tasks: list[CrawlTask]) -> int:
+    def admit_discovered_tasks(self, tasks: list[_CrawlTask]) -> int:
         return self._ledger._admission_service().admit_discovered_tasks(tasks)
 
     def admit_urls(
@@ -562,7 +489,7 @@ class SchedulerKernel:
         exclude_hosts: list[str] | None = None,
         runnable_surface: str | None = None,
         execution_tiers: list[int] | None = None,
-    ) -> CrawlTask | None:
+    ) -> _CrawlTask | None:
         return self._ledger._lease_selector().lease_next(
             host=host,
             lease_seconds=lease_seconds,
@@ -580,7 +507,7 @@ class SchedulerKernel:
         lease_strategy: str | None = None,
         exclude_hosts: list[str] | None = None,
         runnable_surface: str | None = None,
-    ) -> list[CrawlTask]:
+    ) -> list[_CrawlTask]:
         return self._ledger._lease_selector().lease_batch(
             count=count,
             host=host,
@@ -697,15 +624,15 @@ class UrlLedger:
         self._retry_policy = SchedulerRetryPolicy(
             retry_backoff_seconds=self._retry_backoff_seconds,
             max_retry_backoff_seconds=self._max_retry_backoff_seconds,
-            retry_intent=INTENT_RETRY,
+            retry_intent=_INTENT_RETRY,
         )
         self._host_store: HostStore | None = None
         self._host_ledger = HostLedgerStore(conn)
         self._membership = SchedulerMembershipStore(
             conn,
-            blocked_queue_table=BLOCKED_HOST_BACKOFF_TABLE,
-            host_runnable_heads_table=HOST_RUNNABLE_HEADS_TABLE,
-            host_runnable_head_dirty_hosts_table=HOST_RUNNABLE_HEAD_DIRTY_HOSTS_TABLE,
+            blocked_queue_table=_BLOCKED_HOST_BACKOFF_TABLE,
+            host_runnable_heads_table=_HOST_RUNNABLE_HEADS_TABLE,
+            host_runnable_head_dirty_hosts_table=_HOST_RUNNABLE_HEAD_DIRTY_HOSTS_TABLE,
         )
         self._leases = ExecutionLeaseStore(
             conn,
@@ -713,58 +640,58 @@ class UrlLedger:
         )
         self._host_heads = HostRunnableHeadStore(
             conn,
-            table_name=HOST_RUNNABLE_HEADS_TABLE,
+            table_name=_HOST_RUNNABLE_HEADS_TABLE,
             queue_table_sql=self._queue_table_sql,
             normalize_physical_queue=self._normalize_physical_queue,
             normalized_surface_queues=self._normalized_surface_queues,
             latency_penalty_sql=self._latency_penalty_sql,
-            dirty_hosts_table_name=HOST_RUNNABLE_HEAD_DIRTY_HOSTS_TABLE,
+            dirty_hosts_table_name=_HOST_RUNNABLE_HEAD_DIRTY_HOSTS_TABLE,
         )
         self._membership.attach_host_heads(self._host_heads)
         self._lease_telemetry = HostFirstLeaseTelemetry()
         self._selection = SchedulerLeaseSelector(
             self,
-            task_cls=CrawlTask,
+            task_cls=_CrawlTask,
             runnable_host_head_cls=RunnableHostHead,
             url_ledger_table=URL_LEDGER_TABLE,
-            lease_strategy_url_order=LEASE_STRATEGY_URL_ORDER,
-            lease_strategy_host_first=LEASE_STRATEGY_HOST_FIRST,
+            lease_strategy_url_order=_LEASE_STRATEGY_URL_ORDER,
+            lease_strategy_host_first=_LEASE_STRATEGY_HOST_FIRST,
             host_head_lookahead=HOST_HEAD_LOOKAHEAD,
             host_head_read_model_lookahead=HOST_HEAD_READ_MODEL_LOOKAHEAD,
         )
         self._admission = SchedulerAdmissionService(
             self,
-            task_cls=CrawlTask,
+            task_cls=_CrawlTask,
             url_ledger_table=URL_LEDGER_TABLE,
-            blocked_host_backoff_table=BLOCKED_HOST_BACKOFF_TABLE,
-            lease_table=LEASE_TABLE,
+            blocked_host_backoff_table=_BLOCKED_HOST_BACKOFF_TABLE,
+            lease_table=_LEASE_TABLE,
             host_head_update_dirty=HOST_HEAD_UPDATE_DIRTY,
         )
         self._requeue = SchedulerRequeueService(
             self,
             url_ledger_table=URL_LEDGER_TABLE,
-            blocked_host_backoff_table=BLOCKED_HOST_BACKOFF_TABLE,
-            intent_explore=INTENT_EXPLORE,
-            intent_retry=INTENT_RETRY,
-            intent_refresh=INTENT_REFRESH,
-            scheduler_surface_runnable=SCHEDULER_SURFACE_RUNNABLE,
-            scheduler_surface_refresh=SCHEDULER_SURFACE_REFRESH,
-            scheduler_surface_scheduled=SCHEDULER_SURFACE_SCHEDULED,
+            blocked_host_backoff_table=_BLOCKED_HOST_BACKOFF_TABLE,
+            intent_explore=_INTENT_EXPLORE,
+            intent_retry=_INTENT_RETRY,
+            intent_refresh=_INTENT_REFRESH,
+            scheduler_surface_runnable=_SCHEDULER_SURFACE_RUNNABLE,
+            scheduler_surface_refresh=_SCHEDULER_SURFACE_REFRESH,
+            scheduler_surface_scheduled=_SCHEDULER_SURFACE_SCHEDULED,
         )
         self._observability = SchedulerObservability(
             conn,
-            physical_queue_tables=PHYSICAL_QUEUE_TABLES,
-            physical_queue_order=PHYSICAL_QUEUE_ORDER,
-            physical_queue_default_runnable_surface=PHYSICAL_QUEUE_DEFAULT_SCHEDULER_SURFACE,
-            blocked_queue_table=BLOCKED_HOST_BACKOFF_TABLE,
-            lease_table=LEASE_TABLE,
+            physical_queue_tables=_PHYSICAL_QUEUE_TABLES,
+            physical_queue_order=_PHYSICAL_QUEUE_ORDER,
+            physical_queue_default_runnable_surface=_PHYSICAL_QUEUE_DEFAULT_SCHEDULER_SURFACE,
+            blocked_queue_table=_BLOCKED_HOST_BACKOFF_TABLE,
+            lease_table=_LEASE_TABLE,
         )
         self._quarantine = SchedulerQuarantine(
             conn,
-            queue_runnable=self._single_physical_queue_for_surface(SCHEDULER_SURFACE_RUNNABLE),
-            queue_scheduled=self._single_physical_queue_for_surface(SCHEDULER_SURFACE_SCHEDULED),
-            queue_refresh=self._single_physical_queue_for_surface(SCHEDULER_SURFACE_REFRESH),
-            blocked_queue_table=BLOCKED_HOST_BACKOFF_TABLE,
+            queue_runnable=self._single_physical_queue_for_surface(_SCHEDULER_SURFACE_RUNNABLE),
+            queue_scheduled=self._single_physical_queue_for_surface(_SCHEDULER_SURFACE_SCHEDULED),
+            queue_refresh=self._single_physical_queue_for_surface(_SCHEDULER_SURFACE_REFRESH),
+            blocked_queue_table=_BLOCKED_HOST_BACKOFF_TABLE,
             queue_table_sql=self._queue_table_sql,
             delete_queue_entries=self._delete_queue_entries,
             insert_blocked_rows=self._requeue_service().insert_blocked_host_backoff_rows,
@@ -784,7 +711,7 @@ class UrlLedger:
         """Return cycle-local host-first fallback counters."""
         return self._host_first_lease_telemetry().fallback_stats()
 
-    def _record_host_first_fallback(self, task: CrawlTask | None) -> None:
+    def _record_host_first_fallback(self, task: _CrawlTask | None) -> None:
         """Record that host-first leasing fell back to bounded scanning."""
         self._host_first_lease_telemetry().record_fallback(hit=task is not None)
 
@@ -822,7 +749,7 @@ class UrlLedger:
         return self._host_first_lease_telemetry().last_lease_diagnostics()
 
     def _empty_admission_diagnostics(self) -> dict[str, float]:
-        return {field: 0.0 for field in ADMISSION_DIAGNOSTIC_FIELDS}
+        return {field: 0.0 for field in _ADMISSION_DIAGNOSTIC_FIELDS}
 
     def last_admission_diagnostics(self) -> dict[str, float]:
         """Return timing diagnostics for the most recent scheduler admission."""
@@ -857,7 +784,7 @@ class UrlLedger:
                     "_max_retry_backoff_seconds",
                     settings.scheduler_max_retry_backoff_seconds,
                 ),
-                retry_intent=INTENT_RETRY,
+                retry_intent=_INTENT_RETRY,
             )
             self._retry_policy = policy
         return policy
@@ -867,11 +794,11 @@ class UrlLedger:
         if selector is None:
             selector = SchedulerLeaseSelector(
                 self,
-                task_cls=CrawlTask,
+                task_cls=_CrawlTask,
                 runnable_host_head_cls=RunnableHostHead,
                 url_ledger_table=URL_LEDGER_TABLE,
-                lease_strategy_url_order=LEASE_STRATEGY_URL_ORDER,
-                lease_strategy_host_first=LEASE_STRATEGY_HOST_FIRST,
+                lease_strategy_url_order=_LEASE_STRATEGY_URL_ORDER,
+                lease_strategy_host_first=_LEASE_STRATEGY_HOST_FIRST,
                 host_head_lookahead=HOST_HEAD_LOOKAHEAD,
                 host_head_read_model_lookahead=HOST_HEAD_READ_MODEL_LOOKAHEAD,
             )
@@ -883,10 +810,10 @@ class UrlLedger:
         if admission is None:
             admission = SchedulerAdmissionService(
                 self,
-                task_cls=CrawlTask,
+                task_cls=_CrawlTask,
                 url_ledger_table=URL_LEDGER_TABLE,
-                blocked_host_backoff_table=BLOCKED_HOST_BACKOFF_TABLE,
-                lease_table=LEASE_TABLE,
+                blocked_host_backoff_table=_BLOCKED_HOST_BACKOFF_TABLE,
+                lease_table=_LEASE_TABLE,
                 host_head_update_dirty=HOST_HEAD_UPDATE_DIRTY,
             )
             self._admission = admission
@@ -898,13 +825,13 @@ class UrlLedger:
             requeue = SchedulerRequeueService(
                 self,
                 url_ledger_table=URL_LEDGER_TABLE,
-                blocked_host_backoff_table=BLOCKED_HOST_BACKOFF_TABLE,
-                intent_explore=INTENT_EXPLORE,
-                intent_retry=INTENT_RETRY,
-                intent_refresh=INTENT_REFRESH,
-                scheduler_surface_runnable=SCHEDULER_SURFACE_RUNNABLE,
-                scheduler_surface_refresh=SCHEDULER_SURFACE_REFRESH,
-                scheduler_surface_scheduled=SCHEDULER_SURFACE_SCHEDULED,
+                blocked_host_backoff_table=_BLOCKED_HOST_BACKOFF_TABLE,
+                intent_explore=_INTENT_EXPLORE,
+                intent_retry=_INTENT_RETRY,
+                intent_refresh=_INTENT_REFRESH,
+                scheduler_surface_runnable=_SCHEDULER_SURFACE_RUNNABLE,
+                scheduler_surface_refresh=_SCHEDULER_SURFACE_REFRESH,
+                scheduler_surface_scheduled=_SCHEDULER_SURFACE_SCHEDULED,
             )
             self._requeue = requeue
         return requeue
@@ -917,7 +844,7 @@ class UrlLedger:
         """Build LEFT JOIN and absence SQL for physical pending queue membership."""
         physical_queues = self._physical_queues()
         joins = "\n                ".join(
-            f"LEFT JOIN {PHYSICAL_QUEUE_TABLES[physical_queue]} AS {physical_queue} ON {physical_queue}.url = {ledger_alias}.url"
+            f"LEFT JOIN {_PHYSICAL_QUEUE_TABLES[physical_queue]} AS {physical_queue} ON {physical_queue}.url = {ledger_alias}.url"
             for physical_queue in physical_queues
         )
         absence = "\n                  AND ".join(
@@ -929,13 +856,13 @@ class UrlLedger:
         """Return physical queues in stable scheduler order."""
         if not hasattr(self, "_membership"):
             if not physical_queues:
-                return list(PHYSICAL_QUEUE_ORDER)
+                return list(_PHYSICAL_QUEUE_ORDER)
             allowed = {
                 self._normalize_physical_queue(physical_queue) for physical_queue in physical_queues
             }
             return [
                 physical_queue
-                for physical_queue in PHYSICAL_QUEUE_ORDER
+                for physical_queue in _PHYSICAL_QUEUE_ORDER
                 if physical_queue in allowed
             ]
         return self._membership.normalized_physical_queues(physical_queues)
@@ -969,7 +896,7 @@ class UrlLedger:
         if intent is None:
             return None
         normalized = str(intent).strip().lower()
-        if normalized not in {INTENT_EXPLORE, INTENT_REFRESH, INTENT_RETRY}:
+        if normalized not in {_INTENT_EXPLORE, _INTENT_REFRESH, _INTENT_RETRY}:
             raise ValueError(f"Unknown intent: {intent}")
         return normalized
 
@@ -980,11 +907,11 @@ class UrlLedger:
         if physical_queue is None:
             return None
         normalized = self._normalize_physical_queue(physical_queue)
-        return PHYSICAL_QUEUE_DEFAULT_SCHEDULER_SURFACE[normalized]
+        return _PHYSICAL_QUEUE_DEFAULT_SCHEDULER_SURFACE[normalized]
 
     def _default_scheduled_physical_queue(self) -> str:
         """Return the physical queue behind the scheduled runnable surface."""
-        return self._single_physical_queue_for_surface(SCHEDULER_SURFACE_SCHEDULED)
+        return self._single_physical_queue_for_surface(_SCHEDULER_SURFACE_SCHEDULED)
 
     def _resolve_admission_physical_queue(
         self,
@@ -1073,51 +1000,51 @@ class UrlLedger:
                 if cur.fetchone()[0] is None:
                     raise RuntimeError(f"missing scheduler queue table: {table_name}")
                 assert_public_table_columns(self._conn, table_name, QUEUE_REQUIRED_COLUMNS)
-            cur.execute("SELECT to_regclass(%s)", (f"public.{BLOCKED_HOST_BACKOFF_TABLE}",))
+            cur.execute("SELECT to_regclass(%s)", (f"public.{_BLOCKED_HOST_BACKOFF_TABLE}",))
             if cur.fetchone()[0] is None:
                 raise RuntimeError(
-                    f"missing scheduler blocked queue table: {BLOCKED_HOST_BACKOFF_TABLE}"
+                    f"missing scheduler blocked queue table: {_BLOCKED_HOST_BACKOFF_TABLE}"
                 )
             assert_public_table_columns(
                 self._conn,
-                BLOCKED_HOST_BACKOFF_TABLE,
+                _BLOCKED_HOST_BACKOFF_TABLE,
                 BLOCKED_QUEUE_REQUIRED_COLUMNS,
             )
-            cur.execute("SELECT to_regclass(%s)", (f"public.{LEASE_TABLE}",))
+            cur.execute("SELECT to_regclass(%s)", (f"public.{_LEASE_TABLE}",))
             if cur.fetchone()[0] is None:
-                raise RuntimeError(f"missing scheduler lease table: {LEASE_TABLE}")
-            assert_public_table_columns(self._conn, LEASE_TABLE, LEASE_REQUIRED_COLUMNS)
-            cur.execute("SELECT to_regclass(%s)", (f"public.{HOST_RUNNABLE_HEADS_TABLE}",))
+                raise RuntimeError(f"missing scheduler lease table: {_LEASE_TABLE}")
+            assert_public_table_columns(self._conn, _LEASE_TABLE, LEASE_REQUIRED_COLUMNS)
+            cur.execute("SELECT to_regclass(%s)", (f"public.{_HOST_RUNNABLE_HEADS_TABLE}",))
             if cur.fetchone()[0] is None:
                 raise RuntimeError(
-                    f"missing scheduler host runnable-head table: {HOST_RUNNABLE_HEADS_TABLE}"
+                    f"missing scheduler host runnable-head table: {_HOST_RUNNABLE_HEADS_TABLE}"
                 )
             assert_public_table_columns(
                 self._conn,
-                HOST_RUNNABLE_HEADS_TABLE,
+                _HOST_RUNNABLE_HEADS_TABLE,
                 HOST_RUNNABLE_HEADS_REQUIRED_COLUMNS,
             )
             cur.execute(
                 "SELECT to_regclass(%s)",
-                (f"public.{HOST_RUNNABLE_HEAD_DIRTY_HOSTS_TABLE}",),
+                (f"public.{_HOST_RUNNABLE_HEAD_DIRTY_HOSTS_TABLE}",),
             )
             if cur.fetchone()[0] is None:
                 raise RuntimeError(
                     "missing scheduler host runnable-head dirty table: "
-                    f"{HOST_RUNNABLE_HEAD_DIRTY_HOSTS_TABLE}"
+                    f"{_HOST_RUNNABLE_HEAD_DIRTY_HOSTS_TABLE}"
                 )
             assert_public_table_columns(
                 self._conn,
-                HOST_RUNNABLE_HEAD_DIRTY_HOSTS_TABLE,
+                _HOST_RUNNABLE_HEAD_DIRTY_HOSTS_TABLE,
                 HOST_RUNNABLE_HEAD_DIRTY_HOSTS_REQUIRED_COLUMNS,
             )
 
     def _normalize_physical_queue(self, physical_queue: str | None) -> str:
         """Return a supported scheduler physical queue."""
         if not hasattr(self, "_membership"):
-            if physical_queue in PHYSICAL_QUEUE_TABLES:
+            if physical_queue in _PHYSICAL_QUEUE_TABLES:
                 return physical_queue
-            return QUEUE_SCHEDULED
+            return _QUEUE_SCHEDULED
         return self._membership.normalize_physical_queue(physical_queue)
 
     def _physical_queue_for_model(self, *, runnable_surface: str | None, intent: str | None) -> str:
@@ -1135,19 +1062,19 @@ class UrlLedger:
             return normalized_intent
         resolved_surface = runnable_surface
         if resolved_surface is None:
-            resolved_surface = SCHEDULER_SURFACE_SCHEDULED
+            resolved_surface = _SCHEDULER_SURFACE_SCHEDULED
         return SCHEDULER_SURFACE_DEFAULT_INTENT.get(str(resolved_surface).strip().lower())
 
-    def _task_runnable_surface(self, task: CrawlTask) -> str:
+    def _task_runnable_surface(self, task: _CrawlTask) -> str:
         """Resolve one task into a conceptual runnable surface."""
         if task.runnable_surface is not None:
             return str(task.runnable_surface).strip().lower()
         normalized_intent = self._normalize_intent(task.intent)
         if normalized_intent is not None:
             return INTENT_DEFAULT_SCHEDULER_SURFACE[normalized_intent]
-        return SCHEDULER_SURFACE_SCHEDULED
+        return _SCHEDULER_SURFACE_SCHEDULED
 
-    def _merge_runnable_surface(self, current: CrawlTask, candidate: CrawlTask) -> str:
+    def _merge_runnable_surface(self, current: _CrawlTask, candidate: _CrawlTask) -> str:
         """Prefer the more urgent runnable surface when duplicate URLs merge."""
         current_surface = self._task_runnable_surface(current)
         candidate_surface = self._task_runnable_surface(candidate)
@@ -1158,7 +1085,7 @@ class UrlLedger:
             return current_surface
         return candidate_surface
 
-    def _merge_task(self, current: CrawlTask, candidate: CrawlTask) -> CrawlTask:
+    def _merge_task(self, current: _CrawlTask, candidate: _CrawlTask) -> _CrawlTask:
         """Merge duplicate task metadata before bulk upsert."""
         merged_surface = self._merge_runnable_surface(current, candidate)
         merged_intent = (
@@ -1166,7 +1093,7 @@ class UrlLedger:
             or candidate.intent
             or SCHEDULER_SURFACE_DEFAULT_INTENT.get(merged_surface)
         )
-        return CrawlTask(
+        return _CrawlTask(
             url=current.url,
             discovery_value=max(current.discovery_value, candidate.discovery_value),
             scheduler_score=max(current.scheduler_score, candidate.scheduler_score),
@@ -1178,14 +1105,14 @@ class UrlLedger:
         )
 
     def _normalize_task_metadata(
-        self, task: CrawlTask, *, normalized_url: str | None = None
-    ) -> CrawlTask:
+        self, task: _CrawlTask, *, normalized_url: str | None = None
+    ) -> _CrawlTask:
         """Project one task into the surface-and-intent model."""
         resolved_surface = self._task_runnable_surface(task)
         resolved_intent = self._normalize_intent(
             task.intent
         ) or SCHEDULER_SURFACE_DEFAULT_INTENT.get(resolved_surface)
-        return CrawlTask(
+        return _CrawlTask(
             url=normalized_url or task.url,
             discovery_value=task.discovery_value,
             scheduler_score=task.scheduler_score,
@@ -1196,7 +1123,7 @@ class UrlLedger:
             next_fetch_at=task.next_fetch_at,
         )
 
-    def _task_intent_rows(self, tasks: list[CrawlTask]) -> list[tuple[str, str]]:
+    def _task_intent_rows(self, tasks: list[_CrawlTask]) -> list[tuple[str, str]]:
         """Project normalized tasks into url-to-intent rows for bulk ledger updates."""
         rows: list[tuple[str, str]] = []
         for task in tasks:
@@ -1206,7 +1133,7 @@ class UrlLedger:
             rows.append((task.url, normalized_intent))
         return rows
 
-    def _update_task_intents(self, cur, tasks: list[CrawlTask]) -> None:
+    def _update_task_intents(self, cur, tasks: list[_CrawlTask]) -> None:
         """Persist current scheduler intent for the given normalized tasks."""
         rows = self._task_intent_rows(tasks)
         if not rows:
@@ -1223,9 +1150,9 @@ class UrlLedger:
             page_size=200,
         )
 
-    def _prepare_tasks(self, tasks: list[CrawlTask]) -> list[CrawlTask]:
+    def _prepare_tasks(self, tasks: list[_CrawlTask]) -> list[_CrawlTask]:
         """Normalize and deduplicate tasks before writing to Postgres."""
-        merged: dict[str, CrawlTask] = {}
+        merged: dict[str, _CrawlTask] = {}
         for task in tasks:
             normalized_url = normalize_url(task.url)
             if url_identity_length(normalized_url) > MAX_URL_IDENTITY_BYTES:
@@ -1243,10 +1170,10 @@ class UrlLedger:
             else:
                 merged[normalized.url] = self._merge_task(existing, normalized)
 
-        prepared: list[CrawlTask] = []
+        prepared: list[_CrawlTask] = []
         for task in merged.values():
             prepared.append(
-                CrawlTask(
+                _CrawlTask(
                     url=task.url,
                     discovery_value=task.discovery_value,
                     scheduler_score=task.scheduler_score,
@@ -1265,7 +1192,7 @@ class UrlLedger:
     ) -> str:
         """Resolve the named lease strategy."""
         if lease_strategy is None:
-            return LEASE_STRATEGY_URL_ORDER
+            return _LEASE_STRATEGY_URL_ORDER
         normalized = str(lease_strategy).strip().lower()
         if normalized not in LEASE_STRATEGIES:
             raise ValueError(f"Unknown lease strategy: {lease_strategy}")
@@ -1280,7 +1207,7 @@ class UrlLedger:
     ) -> str:
         """Return the ORDER BY clause used for lease selection."""
         latency_penalty = self._latency_penalty_sql(alias, latency_ms_sql=latency_ms_sql)
-        if lease_strategy == LEASE_STRATEGY_HOST_FIRST:
+        if lease_strategy == _LEASE_STRATEGY_HOST_FIRST:
             return (
                 f"{alias}.next_fetch_at ASC, "
                 f"{latency_penalty} ASC, "
@@ -1474,7 +1401,7 @@ class UrlLedger:
     def _queue_table_sql(self, physical_queue: str) -> str:
         """Return the table name for one physical queue."""
         if not hasattr(self, "_membership"):
-            return PHYSICAL_QUEUE_TABLES[self._normalize_physical_queue(physical_queue)]
+            return _PHYSICAL_QUEUE_TABLES[self._normalize_physical_queue(physical_queue)]
         return self._membership.queue_table_sql(physical_queue)
 
     def _delete_queue_entries(self, cur, urls: list[str]) -> None:
@@ -1509,14 +1436,14 @@ class UrlLedger:
 
     def _admission_physical_queue_by_url(
         self,
-        tasks: list[CrawlTask],
+        tasks: list[_CrawlTask],
     ) -> dict[str, str]:
         return self._admission_service().admission_physical_queue_by_url(tasks)
 
     def _fetch_admission_ledger_rows_for_tasks(
         self,
         cur,
-        tasks: list[CrawlTask],
+        tasks: list[_CrawlTask],
     ) -> list[tuple[str, str, float, float, float]]:
         """Load known ledger rows used by scheduler admission."""
         return self._admission_service().fetch_admission_ledger_rows_for_tasks(
@@ -1524,7 +1451,7 @@ class UrlLedger:
             tasks,
         )
 
-    def _new_host_counts_for_tasks(self, cur, tasks: list[CrawlTask]) -> Counter[str]:
+    def _new_host_counts_for_tasks(self, cur, tasks: list[_CrawlTask]) -> Counter[str]:
         """Return per-host counts for task URLs that are not already known."""
         normalized_urls = sorted({task.url for task in tasks if task.url})
         if not normalized_urls:
@@ -1568,7 +1495,7 @@ class UrlLedger:
             current_statuses=current_statuses,
         )
 
-    def _upsert_ledger_tasks(self, tasks: list[CrawlTask]) -> tuple[list[CrawlTask], int]:
+    def _upsert_ledger_tasks(self, tasks: list[_CrawlTask]) -> tuple[list[_CrawlTask], int]:
         """Insert ledger rows and return normalized tasks plus changed-row count."""
         if not tasks:
             return [], 0
@@ -1643,19 +1570,19 @@ class UrlLedger:
         self._conn.commit()
         return prepared_tasks, changed
 
-    def discover(self, task: CrawlTask) -> bool:
+    def discover(self, task: _CrawlTask) -> bool:
         """Insert one discovered URL into the ledger without scheduler membership."""
         return self._store.discover(task)
 
-    def discover_many(self, tasks: list[CrawlTask]) -> int:
+    def discover_many(self, tasks: list[_CrawlTask]) -> int:
         """Insert discovered URLs into the ledger without placing them into queue tables."""
         return self._store.discover_many(tasks)
 
-    def _admit_queue_membership(self, tasks: list[CrawlTask]) -> int:
+    def _admit_queue_membership(self, tasks: list[_CrawlTask]) -> int:
         """Assign scheduler membership for known ledger URLs."""
         return self._kernel.admit_queue_membership(tasks)
 
-    def admit_discovered_tasks(self, tasks: list[CrawlTask]) -> int:
+    def admit_discovered_tasks(self, tasks: list[_CrawlTask]) -> int:
         """Assign scheduler membership to discovered URLs using task admission metadata."""
         return self._kernel.admit_discovered_tasks(tasks)
 
@@ -1692,15 +1619,15 @@ class UrlLedger:
             intent=intent,
         )
 
-    def preview_tasks(self, tasks: list[CrawlTask]) -> list[CrawlTask]:
+    def preview_tasks(self, tasks: list[_CrawlTask]) -> list[_CrawlTask]:
         """Return normalized tasks with physical queues implied without writing them."""
         return self._store.preview_tasks(tasks)
 
-    def place(self, task: CrawlTask) -> bool:
+    def place(self, task: _CrawlTask) -> bool:
         """Place one discovered URL candidate into scheduler storage."""
         return self._store.place(task)
 
-    def place_many(self, tasks: list[CrawlTask]) -> int:
+    def place_many(self, tasks: list[_CrawlTask]) -> int:
         """Place multiple discovered URL candidates into scheduler storage."""
         return self._store.place_many(tasks)
 
@@ -1712,7 +1639,7 @@ class UrlLedger:
         exclude_hosts: list[str] | None = None,
         runnable_surface: str | None = None,
         execution_tiers: list[int] | None = None,
-    ) -> CrawlTask | None:
+    ) -> _CrawlTask | None:
         """Lease the next runnable URL, optionally filtered by host."""
         return self._kernel.lease_next(
             host=host,
@@ -1732,7 +1659,7 @@ class UrlLedger:
         physical_queue: str | None = None,
         physical_queues: list[str] | None = None,
         execution_tiers: list[int] | None = None,
-    ) -> CrawlTask | None:
+    ) -> _CrawlTask | None:
         """Lease from the next selected runnable host head."""
         return self._lease_selector().lease_next_host_first(
             host=host,
@@ -1771,7 +1698,7 @@ class UrlLedger:
         exclude_hosts: list[str] | None,
         physical_queues: list[str],
         now: float,
-    ) -> CrawlTask | None:
+    ) -> _CrawlTask | None:
         """Lease from a bounded queue scan when the host-head cache misses."""
         return self._lease_selector().lease_next_host_first_from_bounded_scan(
             host=host,
@@ -1789,7 +1716,7 @@ class UrlLedger:
         exclude_hosts: list[str] | None,
         physical_queue: str,
         now: float,
-    ) -> CrawlTask | None:
+    ) -> _CrawlTask | None:
         """Lease from one physical queue using a bounded host-first scan."""
         return self._lease_selector().lease_next_host_first_from_bounded_scan_queue(
             host=host,
@@ -1806,7 +1733,7 @@ class UrlLedger:
         lease_seconds: float | None,
         exclude_hosts: list[str] | None,
         physical_queue: str,
-    ) -> CrawlTask | None:
+    ) -> _CrawlTask | None:
         """Lease using URL-order selection from one physical queue."""
         return self._lease_selector().lease_next_url_order(
             host=host,
@@ -1824,7 +1751,7 @@ class UrlLedger:
         host: str | None,
         exclude_hosts: list[str] | None,
         now: float,
-    ) -> CrawlTask | None:
+    ) -> _CrawlTask | None:
         """Lease one concrete candidate URL when it is still runnable and unlocked."""
         return self._lease_selector().lease_candidate_url(
             candidate_url=candidate_url,
@@ -1843,7 +1770,7 @@ class UrlLedger:
         lease_strategy: str | None = None,
         exclude_hosts: list[str] | None = None,
         runnable_surface: str | None = None,
-    ) -> list[CrawlTask]:
+    ) -> list[_CrawlTask]:
         """Lease a batch of runnable URLs."""
         return self._kernel.lease_batch(
             count=count,
@@ -1862,11 +1789,11 @@ class UrlLedger:
         """Mark a URL as successfully crawled."""
         return self._store.mark_done(url, lease_token=lease_token)
 
-    def mark_done_many(self, tasks: list[CrawlTask]) -> int:
+    def mark_done_many(self, tasks: list[_CrawlTask]) -> int:
         """Mark multiple leased URLs as successfully crawled in one transaction."""
         return self._store.mark_done_many(tasks)
 
-    def _mark_done_many_impl(self, tasks: list[CrawlTask]) -> int:
+    def _mark_done_many_impl(self, tasks: list[_CrawlTask]) -> int:
         """Mark multiple leased URLs as successfully crawled in one transaction."""
         return self._store.mark_done_many(tasks)
 
@@ -1995,7 +1922,7 @@ class UrlLedger:
                                 PARTITION BY queue.host, queue.branch_key
                                 ORDER BY queue.scheduler_score DESC, queue.next_fetch_at ASC, queue.added_at ASC, queue.url ASC
                             ) AS branch_rownum
-                        FROM {self._queue_table_sql(self._single_physical_queue_for_surface(SCHEDULER_SURFACE_SCHEDULED))} AS queue
+                        FROM {self._queue_table_sql(self._single_physical_queue_for_surface(_SCHEDULER_SURFACE_SCHEDULED))} AS queue
                         WHERE queue.next_fetch_at <= %s
                     ), scheduled AS (
                         SELECT ranked.url
@@ -2014,7 +1941,7 @@ class UrlLedger:
             rows = cur.fetchall()
             pending_rows = self._pending_rows_for_physical_queue(
                 rows,
-                self._single_physical_queue_for_surface(SCHEDULER_SURFACE_SCHEDULED),
+                self._single_physical_queue_for_surface(_SCHEDULER_SURFACE_SCHEDULED),
             )
             self._membership.replace_pending_rows(cur, pending_rows)
             count = len(rows)
@@ -2032,7 +1959,7 @@ class UrlLedger:
         if target_pending <= 0 or per_host <= 0 or candidate_limit <= 0:
             return 0
 
-        current_runnable = self.pending_count(runnable_surface=SCHEDULER_SURFACE_RUNNABLE)
+        current_runnable = self.pending_count(runnable_surface=_SCHEDULER_SURFACE_RUNNABLE)
         needed = target_pending - current_runnable
         if needed <= 0:
             return 0
@@ -2040,13 +1967,13 @@ class UrlLedger:
         with self._conn.cursor() as cur:
             cur.execute(
                 f"""SELECT DISTINCT host
-                    FROM {self._queue_table_sql(self._single_physical_queue_for_surface(SCHEDULER_SURFACE_RUNNABLE))}"""
+                    FROM {self._queue_table_sql(self._single_physical_queue_for_surface(_SCHEDULER_SURFACE_RUNNABLE))}"""
             )
             existing_hosts = {host for (host,) in cur.fetchall()}
 
             cur.execute(
                 f"""SELECT url, host
-                    FROM {self._queue_table_sql(self._single_physical_queue_for_surface(SCHEDULER_SURFACE_SCHEDULED))}
+                    FROM {self._queue_table_sql(self._single_physical_queue_for_surface(_SCHEDULER_SURFACE_SCHEDULED))}
                     ORDER BY scheduler_score DESC, added_at ASC, url ASC
                     LIMIT %s""",
                 (max(candidate_limit, needed * 20),),
@@ -2071,13 +1998,13 @@ class UrlLedger:
 
             cur.execute(
                 f"""SELECT url, host, scheduler_score, next_fetch_at, added_at
-                    FROM {self._queue_table_sql(self._single_physical_queue_for_surface(SCHEDULER_SURFACE_SCHEDULED))}
+                    FROM {self._queue_table_sql(self._single_physical_queue_for_surface(_SCHEDULER_SURFACE_SCHEDULED))}
                     WHERE url = ANY(%s)""",
                 (promoted_urls,),
             )
             rows = self._pending_rows_for_physical_queue(
                 cur.fetchall(),
-                self._single_physical_queue_for_surface(SCHEDULER_SURFACE_RUNNABLE),
+                self._single_physical_queue_for_surface(_SCHEDULER_SURFACE_RUNNABLE),
             )
             self._membership.delete_queue_entries(cur, self._membership.row_urls(rows))
             self._membership.insert_pending_rows(cur, rows)

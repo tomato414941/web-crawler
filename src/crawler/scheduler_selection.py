@@ -9,6 +9,9 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
+LEASE_STRATEGY_URL_ORDER = "url_order"
+LEASE_STRATEGY_HOST_FIRST = "host_first"
+
 
 @dataclass(frozen=True)
 class HostFirstReadModelResult:
