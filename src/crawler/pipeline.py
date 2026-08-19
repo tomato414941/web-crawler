@@ -11,7 +11,7 @@ from typing import Any
 
 from .core import Response
 from .result import CrawlFailure, CrawlResult, CrawlStageTimings
-from .url_ledger import CrawlTask
+from .scheduler_task import CrawlTask
 
 logger = logging.getLogger(__name__)
 

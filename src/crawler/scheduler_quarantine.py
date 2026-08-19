@@ -5,6 +5,8 @@ from __future__ import annotations
 import time
 from collections.abc import Callable
 
+BLOCKED_HOST_BACKOFF_TABLE = "scheduler_queue_retry_quarantine"
+
 
 class SchedulerQuarantine:
     """State transitions for host-backoff quarantine queues."""

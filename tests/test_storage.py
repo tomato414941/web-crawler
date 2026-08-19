@@ -11,17 +11,19 @@ from crawler.migrate import apply_migrations
 from crawler.host_ledger import HOST_LEDGER_TABLE
 from crawler.result import CrawlResult
 from crawler.storage import _url_hash
-from crawler.url_ledger import (
-    BLOCKED_HOST_BACKOFF_TABLE,
+from crawler.host_runnable_heads import (
     HOST_RUNNABLE_HEAD_DIRTY_HOSTS_TABLE,
     HOST_RUNNABLE_HEADS_TABLE,
-    LEASE_TABLE,
+)
+from crawler.scheduler_leases import ACTIVE_LEASES_TABLE as LEASE_TABLE
+from crawler.scheduler_membership import (
     PHYSICAL_QUEUE_TABLES,
     QUEUE_REFRESH,
     QUEUE_RUNNABLE,
     QUEUE_SCHEDULED,
-    URL_LEDGER_TABLE,
 )
+from crawler.scheduler_quarantine import BLOCKED_HOST_BACKOFF_TABLE
+from crawler.url_ledger import URL_LEDGER_TABLE
 
 # Skip all tests if no Postgres available
 pytestmark = pytest.mark.skipif(

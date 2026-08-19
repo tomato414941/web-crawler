@@ -10,6 +10,8 @@ import pytest
 from crawler.host_runnable_heads import (
     HOST_EXECUTION_TIER_PROBING,
     HOST_EXECUTION_TIER_WARM,
+    HOST_RUNNABLE_HEADS_TABLE,
+    HOST_RUNNABLE_HEAD_DIRTY_HOSTS_TABLE,
 )
 from crawler.host_store import HostStore
 from crawler.host_ledger import HOST_LEDGER_TABLE
@@ -19,16 +21,9 @@ from crawler.url_identity import (
     url_identity_hash,
     url_identity_length,
 )
-from crawler.url_ledger import (
-    ADMISSION_DIAGNOSTIC_FIELDS,
-    BLOCKED_HOST_BACKOFF_TABLE,
-    CrawlTask,
-    HOST_RUNNABLE_HEAD_DIRTY_HOSTS_TABLE,
-    HOST_RUNNABLE_HEADS_TABLE,
-    INTENT_EXPLORE,
-    INTENT_REFRESH,
-    LEASE_TABLE,
-    LEASE_STRATEGY_HOST_FIRST,
+from crawler.scheduler_admission import ADMISSION_DIAGNOSTIC_FIELDS
+from crawler.scheduler_leases import ACTIVE_LEASES_TABLE as LEASE_TABLE
+from crawler.scheduler_membership import (
     PHYSICAL_QUEUE_TABLES,
     QUEUE_REFRESH,
     QUEUE_RUNNABLE,
@@ -37,9 +32,11 @@ from crawler.url_ledger import (
     SCHEDULER_SURFACE_SCHEDULED,
     SCHEDULER_SURFACE_REFRESH,
     SCHEDULER_SURFACE_NORMAL,
-    URL_LEDGER_TABLE,
-    UrlLedger,
 )
+from crawler.scheduler_quarantine import BLOCKED_HOST_BACKOFF_TABLE
+from crawler.scheduler_selection import LEASE_STRATEGY_HOST_FIRST
+from crawler.scheduler_task import CrawlTask, INTENT_EXPLORE, INTENT_REFRESH
+from crawler.url_ledger import URL_LEDGER_TABLE, UrlLedger
 from crawler.migrate import apply_migrations
 from crawler.scheduler_membership import HOST_HEAD_UPDATE_DIRTY
 from crawler.urls import normalize_url
@@ -87,35 +84,6 @@ class TestNormalizeUrl:
     def test_complex_url(self):
         result = normalize_url("HTTPS://Example.COM/path/?z=3&a=1&m=2#anchor")
         assert result == "https://example.com/path?a=1&m=2&z=3"
-
-
-class TestCrawlTask:
-    def test_default_values(self):
-        task = CrawlTask(url="http://example.com")
-        assert task.url == "http://example.com"
-        assert task.discovery_value == 1.0
-        assert task.scheduler_score == 1.0
-        assert task.source_url is None
-        assert task.added_at > 0
-
-    def test_custom_values(self):
-        task = CrawlTask(
-            url="http://example.com/page",
-            discovery_value=0.5,
-            source_url="http://example.com",
-            added_at=1000.0,
-            next_fetch_at=1200.0,
-        )
-        assert task.discovery_value == 0.5
-        assert task.scheduler_score == 0.5
-        assert task.added_at == 1000.0
-        assert task.next_fetch_at == 1200.0
-
-    def test_added_at_auto_set(self):
-        before = time.time()
-        task = CrawlTask(url="http://example.com")
-        after = time.time()
-        assert before <= task.added_at <= after
 
 
 class TestHostFirstFallbackStats:

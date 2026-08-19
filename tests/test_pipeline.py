@@ -25,7 +25,7 @@ from crawler.pipeline import (
     StageLiveness,
 )
 from crawler.result import CrawlFailure, CrawlResult, CrawlStageTimings
-from crawler.url_ledger import CrawlTask
+from crawler.scheduler_task import CrawlTask
 
 
 def _crawl_result(url="https://example.com/"):

@@ -26,7 +26,7 @@ from crawler.telemetry import (
     StorageTelemetry,
     TelemetryAccumulator,
 )
-from crawler.url_ledger import CrawlTask
+from crawler.scheduler_task import CrawlTask
 
 _ADMISSION_DIAGNOSTICS = {
     "admit_update_intents_ms": 0.1,

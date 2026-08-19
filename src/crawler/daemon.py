@@ -16,7 +16,8 @@ from .host_manager import HostManager
 from .host_store import HostStore
 from .discovery import seed_hosts_from_urls
 from .storage import PgStorage
-from .url_ledger import SCHEDULER_SURFACE_RUNNABLE, UrlLedger
+from .scheduler_membership import SCHEDULER_SURFACE_RUNNABLE
+from .url_ledger import UrlLedger
 
 logger = logging.getLogger(__name__)
 

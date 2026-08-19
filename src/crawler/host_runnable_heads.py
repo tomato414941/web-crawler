@@ -11,6 +11,8 @@ import psycopg2.extras
 
 logger = logging.getLogger(__name__)
 
+HOST_RUNNABLE_HEADS_TABLE = "host_runnable_heads"
+HOST_RUNNABLE_HEAD_DIRTY_HOSTS_TABLE = "host_runnable_head_dirty_hosts"
 HOST_EXECUTION_TIER_WARM = 0
 HOST_EXECUTION_TIER_PROBING = 1
 HOST_EXECUTION_TIER_SLOW = 2

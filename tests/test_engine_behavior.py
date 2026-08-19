@@ -8,15 +8,13 @@ from crawler.core import Response
 from crawler.config import settings
 from crawler.crawl import CrawlerEngine
 from crawler.discovery import PageSignals
-from crawler.url_ledger import (
-    CrawlTask,
-    INTENT_EXPLORE,
-    INTENT_REFRESH,
+from crawler.scheduler_membership import (
     SCHEDULER_SURFACE_SCHEDULED,
     SCHEDULER_SURFACE_RUNNABLE,
     SCHEDULER_SURFACE_NORMAL,
     SCHEDULER_SURFACE_REFRESH,
 )
+from crawler.scheduler_task import CrawlTask, INTENT_EXPLORE, INTENT_REFRESH
 
 
 class FakeLedger:

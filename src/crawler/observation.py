@@ -11,12 +11,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .url_ledger import (
-    BLOCKED_HOST_BACKOFF_TABLE,
-    LEASE_TABLE,
-    PHYSICAL_QUEUE_TABLES,
-    URL_LEDGER_TABLE,
-)
+from .scheduler_leases import ACTIVE_LEASES_TABLE
+from .scheduler_membership import PHYSICAL_QUEUE_TABLES
+from .scheduler_quarantine import BLOCKED_HOST_BACKOFF_TABLE
+from .url_ledger import URL_LEDGER_TABLE
 from .scheduler_invariants import SchedulerInvariantChecker
 from .host_ledger import HOST_LEDGER_TABLE
 
@@ -27,7 +25,7 @@ OBSERVED_RELATIONS = (
     URL_LEDGER_TABLE,
     *PHYSICAL_QUEUE_TABLES.values(),
     BLOCKED_HOST_BACKOFF_TABLE,
-    LEASE_TABLE,
+    ACTIVE_LEASES_TABLE,
     "host_runnable_heads",
     "host_runnable_head_dirty_hosts",
     "host_ledger",
