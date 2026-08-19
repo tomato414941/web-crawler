@@ -8,6 +8,7 @@ import json
 import logging
 import re
 import time
+from typing import cast
 from urllib.parse import urlparse
 
 import psycopg2
@@ -15,7 +16,8 @@ import psycopg2.extras
 
 from .error_stats import categorize_crawl_error
 from .host_manager import compute_host_budget
-from .page_storage_policy import prepare_page_content
+from .r2_content import R2ContentStore
+from .urls import normalize_url
 from .url_ledger import (
     BLOCKED_HOST_BACKOFF_TABLE,
     LEASE_TABLE,
@@ -48,11 +50,6 @@ PAGES_REQUIRED_COLUMNS = {
     "stored_outlink_count",
     "crawled_at",
     "created_at",
-}
-PAGE_CONTENT_REQUIRED_COLUMNS = {
-    "url_hash",
-    "content",
-    "updated_at",
 }
 URL_LEDGER_STATS_REQUIRED_COLUMNS = {
     "host",
@@ -90,8 +87,10 @@ class _PreparedPageSave:
     stored_outlink_count: int
     content_type: str
     crawled_at: float
-    content_updated_at: float
-    stored_content: object
+    content_bytes: bytes
+    storage_tier: str
+    storage_reason: str
+    content_truncated: bool
     telemetry: StorageTelemetry
 
 
@@ -100,7 +99,7 @@ def _elapsed_ms(started: float) -> float:
 
 
 def _url_hash(url: str) -> str:
-    return hashlib.blake2b(url.encode(), digest_size=8).hexdigest()
+    return hashlib.sha256(normalize_url(url).encode("utf-8")).hexdigest()
 
 
 def _sanitize_stored_content(content: object) -> str:
@@ -138,23 +137,18 @@ def _prepare_page_save(result: CrawlResult | Mapping[str, object]) -> StorageSav
         outlink_count = len(outlinks)
     stored_outlink_count = len(outlinks)
     content_type = str(data.get("content_type") or "")
-    discovery_value = float(data.get("discovery_value") or 1.0)
-    stored_content = prepare_page_content(
-        content=content,
-        content_type=content_type,
-        discovery_value=discovery_value,
-        summary_bytes=settings.stored_content_summary_bytes,
-        standard_bytes=settings.stored_content_standard_bytes,
-        extended_bytes=settings.stored_content_extended_bytes,
-        standard_min_discovery_value=settings.stored_content_standard_min_discovery_value,
-        extended_min_discovery_value=settings.stored_content_extended_min_discovery_value,
-    )
+    content_bytes = result.content_bytes if isinstance(result, CrawlResult) else b""
+    if not content_bytes and content:
+        content_bytes = content.encode("utf-8")
+    storage_tier = "body" if content_bytes else "metadata_only"
+    storage_reason = "text_content_type" if content_bytes else "no_text_body"
+    content_truncated = bool(data.get("body_truncated", False))
     crawled_at = data.get("timestamp", time.time())
     telemetry = StorageTelemetry(
         prepare_ms=_elapsed_ms(prepare_started),
-        stored_content_bytes=stored_content.stored_content_bytes,
-        storage_tier=stored_content.storage_tier,
-        content_truncated=stored_content.content_truncated,
+        stored_content_bytes=len(content_bytes),
+        storage_tier=storage_tier,
+        content_truncated=content_truncated,
     )
     return _PreparedPageSave(
         data=data,
@@ -167,8 +161,10 @@ def _prepare_page_save(result: CrawlResult | Mapping[str, object]) -> StorageSav
         stored_outlink_count=stored_outlink_count,
         content_type=content_type,
         crawled_at=crawled_at,
-        content_updated_at=time.time(),
-        stored_content=stored_content,
+        content_bytes=content_bytes,
+        storage_tier=storage_tier,
+        storage_reason=storage_reason,
+        content_truncated=content_truncated,
         telemetry=telemetry,
     )
 
@@ -501,32 +497,30 @@ class PageWriteStore:
                 prepared.content_type,
                 prepared.data.get("source_url"),
                 prepared.outlinks,
-                prepared.stored_content.storage_tier,
-                prepared.stored_content.storage_reason,
-                prepared.stored_content.stored_content_bytes,
-                prepared.stored_content.content_truncated,
+                prepared.storage_tier,
+                prepared.storage_reason,
+                len(prepared.content_bytes),
+                prepared.content_truncated,
                 prepared.outlink_count,
                 prepared.stored_outlink_count,
                 prepared.crawled_at,
             )
             for prepared in batch_pages
         ]
-        content_rows = [
-            (
-                prepared.url_hash,
-                prepared.stored_content.content,
-                prepared.content_updated_at,
-            )
-            for prepared in batch_pages
-            if prepared.stored_content.content
-        ]
-        delete_hashes = [
-            prepared.url_hash
-            for prepared in batch_pages
-            if not prepared.stored_content.content
-        ]
-
         try:
+            content_started = time.perf_counter()
+            content_store = self._storage._get_content_store()
+            for prepared in batch_pages:
+                if prepared.content_bytes:
+                    content_store.put(
+                        prepared.url_hash,
+                        prepared.content_bytes,
+                        prepared.content_type,
+                    )
+                else:
+                    content_store.delete(prepared.url_hash)
+            content_store_ms = _elapsed_ms(content_started)
+
             with self._storage._conn.cursor() as cur:
                 pages_started = time.perf_counter()
                 psycopg2.extras.execute_values(
@@ -556,24 +550,6 @@ class PageWriteStore:
                     page_size=200,
                 )
                 pages_upsert_ms = _elapsed_ms(pages_started)
-                content_started = time.perf_counter()
-                if content_rows:
-                    psycopg2.extras.execute_values(
-                        cur,
-                        """INSERT INTO page_content (url_hash, content, updated_at)
-                           VALUES %s
-                           ON CONFLICT (url_hash) DO UPDATE SET
-                               content = EXCLUDED.content,
-                               updated_at = EXCLUDED.updated_at""",
-                        content_rows,
-                        page_size=200,
-                    )
-                if delete_hashes:
-                    cur.execute(
-                        "DELETE FROM page_content WHERE url_hash = ANY(%s)",
-                        (delete_hashes,),
-                    )
-                page_content_ms = _elapsed_ms(content_started)
             commit_started = time.perf_counter()
             self._storage._conn.commit()
             commit_ms = _elapsed_ms(commit_started)
@@ -587,7 +563,7 @@ class PageWriteStore:
                     continue
                 page = next(prepared_iter)
                 page.telemetry.pages_upsert_ms = pages_upsert_ms
-                page.telemetry.page_content_ms = page_content_ms
+                page.telemetry.content_store_ms = content_store_ms
                 page.telemetry.commit_ms = commit_ms
                 page.telemetry.total_ms = total_ms
                 save_results.append(StorageSaveResult(saved=True, telemetry=page.telemetry))
@@ -653,20 +629,26 @@ class PageQueryStore:
             ) as cur:
                 cur.execute(
                     """SELECT pages.url_hash, pages.url, pages.host, pages.title,
-                              COALESCE(page_content.content, '') AS content,
                               pages.status, pages.content_length, pages.content_type,
                               pages.source_url, pages.outlinks, pages.storage_tier,
                               pages.storage_reason, pages.stored_content_bytes,
                               pages.content_truncated, pages.outlink_count,
                               pages.stored_outlink_count, pages.crawled_at
                        FROM pages
-                       LEFT JOIN page_content ON page_content.url_hash = pages.url_hash
                        WHERE pages.url_hash = %s""",
                     (url_hash,),
                 )
                 row = cur.fetchone()
             self._storage._finish_read()
-            return dict(row) if row else None
+            if not row:
+                return None
+            page = dict(row)
+            if page["stored_content_bytes"]:
+                body = self._storage._get_content_store().get(url_hash)
+                page["content"] = body.decode("utf-8", errors="replace")
+            else:
+                page["content"] = ""
+            return page
         except Exception:
             self._storage._conn.rollback()
             raise
@@ -1222,20 +1204,28 @@ class DiagnosticsReader:
         }
 
 
+_DEFAULT_CONTENT_STORE = object()
+
+
 class PgStorage:
     """Store crawl results in Postgres."""
 
-    def __init__(self, dsn: str):
+    def __init__(self, dsn: str, content_store: object = _DEFAULT_CONTENT_STORE):
         self._dsn = dsn
         self._conn = psycopg2.connect(dsn)
         self._conn.autocommit = False
         assert_public_table_columns(self._conn, "pages", PAGES_REQUIRED_COLUMNS)
-        assert_public_table_columns(self._conn, "page_content", PAGE_CONTENT_REQUIRED_COLUMNS)
+        self._content_store = content_store
         self._count = 0
         self.page_writes = PageWriteStore(self)
         self.page_queries = PageQueryStore(self)
         self.runtime_stats = RuntimeStatsStore(self)
         self.diagnostics = DiagnosticsReader(self)
+
+    def _get_content_store(self) -> R2ContentStore:
+        if self._content_store is _DEFAULT_CONTENT_STORE:
+            self._content_store = R2ContentStore.from_settings()
+        return cast(R2ContentStore, self._content_store)
 
     def _finish_read(self) -> None:
         """Close read-only transactions so API requests do not hold relation locks."""

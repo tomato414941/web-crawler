@@ -1012,19 +1012,17 @@ class CrawlerEngine:
         self,
         task: CrawlTask,
         response: Response,
-    ) -> tuple[str, list[str], list[CrawlTask], int, dict[str, int]]:
+    ) -> tuple[str, bytes, list[str], list[CrawlTask], int, dict[str, int]]:
         """Prepare parsed content and discovered tasks away from the event loop."""
         if getattr(response, "metadata_only", False):
-            return "", [], [], 0, {}
+            return "", b"", [], [], 0, {}
 
-        content = (
-            response.text
-            if should_store_text_content(
-                _response_header(response, "content-type"),
-                response.content,
-            )
-            else ""
+        stores_text = should_store_text_content(
+            _response_header(response, "content-type"),
+            response.content,
         )
+        content = response.text if stores_text else ""
+        content_bytes = response.content if stores_text else b""
         outlinks: list[str] = []
         new_tasks: list[CrawlTask] = []
         admission_counts: dict[str, int] = {}
@@ -1045,7 +1043,7 @@ class CrawlerEngine:
         else:
             outlink_count = 0
 
-        return content, outlinks, new_tasks, outlink_count, admission_counts
+        return content, content_bytes, outlinks, new_tasks, outlink_count, admission_counts
 
     async def _parse_fetched_page(self, fetched: _FetchedPage) -> _ParsedPage:
         """Parse fetched content into a publishable payload outside fetch workers."""
@@ -1054,11 +1052,14 @@ class CrawlerEngine:
         timings = fetched.timings
 
         parse_started = time.perf_counter()
-        content, outlinks, new_tasks, outlink_count, admission_counts = await asyncio.to_thread(
-            self._prepare_parsed_payload,
-            task,
-            response,
-        )
+        (
+            content,
+            content_bytes,
+            outlinks,
+            new_tasks,
+            outlink_count,
+            admission_counts,
+        ) = await asyncio.to_thread(self._prepare_parsed_payload, task, response)
         if admission_counts:
             self._timing_summary.record_discovery_admission(admission_counts)
         timings.parse_ms = _elapsed_ms(parse_started)
@@ -1079,6 +1080,8 @@ class CrawlerEngine:
                 content_type=_response_header(response, "content-type"),
                 discovery_value=task.discovery_value,
                 outlink_count=outlink_count,
+                content_bytes=content_bytes,
+                body_truncated=bool(getattr(response, "body_truncated", False)),
             ),
         )
 

@@ -65,10 +65,13 @@ class CrawlResult:
     content_type: str = ""
     discovery_value: float = 1.0
     outlink_count: int | None = None
+    content_bytes: bytes = b""
+    body_truncated: bool = False
 
     def to_dict(self, include_content: bool = True) -> dict[str, Any]:
         """Convert result to a plain dict."""
         data = asdict(self)
+        data.pop("content_bytes", None)
         if not include_content:
             data.pop("content", None)
         return data

@@ -31,11 +31,19 @@ jobs:
       - name: Validate Docker Compose config
         env:
           CRAWLER_API_TOKEN: ci-smoke-token
+          CRAWLER_R2_ENDPOINT_URL: https://example.r2.cloudflarestorage.com
+          CRAWLER_R2_BUCKET: web-crawler-content
+          CRAWLER_R2_ACCESS_KEY_ID: ci-access-key
+          CRAWLER_R2_SECRET_ACCESS_KEY: ci-secret-key
         run: docker compose config >/dev/null
 
       - name: Validate hardened Docker Compose config
         env:
           CRAWLER_API_TOKEN: ci-smoke-token
+          CRAWLER_R2_ENDPOINT_URL: https://example.r2.cloudflarestorage.com
+          CRAWLER_R2_BUCKET: web-crawler-content
+          CRAWLER_R2_ACCESS_KEY_ID: ci-access-key
+          CRAWLER_R2_SECRET_ACCESS_KEY: ci-secret-key
         run: docker compose -f docker-compose.yml -f docker-compose.hardened.yml config >/dev/null
 
   postgres-test:

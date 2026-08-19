@@ -2,7 +2,7 @@
 
 ## Current milestone: production observation and bounded growth
 
-The crawler is now running with bounded page-content storage, bounded discovery admission,
+The crawler uses Cloudflare R2 for fetched text bodies, bounded discovery admission,
 Postgres-backed scheduler queues, host runnable-head read models, split crawl pipeline stages, and
 application egress guards backed by a documented runtime containment path. The current milestone is
 to keep production behavior understandable while deciding the next speed, growth-control, and
@@ -11,7 +11,7 @@ egress-runtime work from repeatable observations rather than one-off manual insp
 Current priorities:
 
 - keep the crawler scoped to broad public-web discovery, not a site-specific corpus
-- keep `pages` as a lightweight page index and `page_content` as bounded text storage
+- keep `pages` as a lightweight page index and store text response bodies in Cloudflare R2
 - keep extracted outlinks separate from admitted scheduler outlinks
 - keep scheduler queue membership as the live URL source of truth
 - keep `host_runnable_heads` as a derived execution read model, not durable URL state
@@ -34,7 +34,7 @@ Responsibilities:
 - `parse` extracts content and discovered links.
 - `finalize` applies scheduler mutations, discovery admission, host success/failure state, and URL
   completion/failure transitions.
-- `persist` writes page metadata/content and optional JSONL output.
+- `persist` writes page metadata to PostgreSQL, response bodies to R2, and optional JSONL output.
 
 Primary operator surfaces:
 
@@ -46,7 +46,7 @@ Primary operator surfaces:
 
 ## Recently completed
 
-- Added bounded page-content storage through `page_content` and storage tiers.
+- Replaced PostgreSQL page-content storage with unmodified response-body storage in Cloudflare R2.
 - Added discovery admission caps and telemetry for extracted/admitted/rejected outlinks.
 - Added batched success finalization and batched page persistence.
 - Split pipeline queue/liveness/timing ownership into runtime and service boundaries.
@@ -277,7 +277,7 @@ Use `crawler observe`, `/stats`, and timing summaries to decide whether to:
 - [ ] decide whether publisher pressure is actually the next bottleneck
 - [ ] increase publisher worker count if supported by DB write latency and queue depth
 - [ ] tune publisher batch size / wait time if queue wait remains high
-- [ ] reduce `page_content` write cost for large bodies if storage timing dominates
+- [ ] inspect R2 write latency if storage timing dominates
 - [ ] adjust queue maxsize together with publisher lane count
 
 Do not tune publisher concurrency without checking database write latency and publish queue depth

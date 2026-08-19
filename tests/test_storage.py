@@ -9,6 +9,8 @@ from psycopg2.extensions import TRANSACTION_STATUS_IDLE
 
 from crawler.migrate import apply_migrations
 from crawler.host_ledger import HOST_LEDGER_TABLE
+from crawler.result import CrawlResult
+from crawler.storage import _url_hash
 from crawler.url_ledger import (
     BLOCKED_HOST_BACKOFF_TABLE,
     HOST_RUNNABLE_HEAD_DIRTY_HOSTS_TABLE,
@@ -26,6 +28,23 @@ pytestmark = pytest.mark.skipif(
     not os.environ.get("TEST_POSTGRES_DSN"),
     reason="TEST_POSTGRES_DSN not set",
 )
+
+
+class FakeContentStore:
+    def __init__(self):
+        self.bodies: dict[str, bytes] = {}
+        self.content_types: dict[str, str] = {}
+
+    def put(self, key: str, body: bytes, content_type: str) -> None:
+        self.bodies[key] = body
+        self.content_types[key] = content_type
+
+    def get(self, key: str) -> bytes:
+        return self.bodies[key]
+
+    def delete(self, key: str) -> None:
+        self.bodies.pop(key, None)
+        self.content_types.pop(key, None)
 
 
 def _reset_schema(dsn: str) -> None:
@@ -62,7 +81,7 @@ def pg_storage():
     dsn = os.environ["TEST_POSTGRES_DSN"]
     _reset_schema(dsn)
     apply_migrations(dsn)
-    storage = PgStorage(dsn)
+    storage = PgStorage(dsn, content_store=FakeContentStore())
     yield storage
     # Cleanup
     storage._conn.rollback()
@@ -85,10 +104,10 @@ def test_save_page(pg_storage):
     assert save_result.telemetry is not None
     assert save_result.telemetry.prepare_ms >= 0
     assert save_result.telemetry.pages_upsert_ms >= 0
-    assert save_result.telemetry.page_content_ms >= 0
+    assert save_result.telemetry.content_store_ms >= 0
     assert save_result.telemetry.commit_ms >= 0
     assert save_result.telemetry.total_ms >= 0
-    assert save_result.telemetry.storage_tier == "standard"
+    assert save_result.telemetry.storage_tier == "body"
     assert save_result.telemetry.stored_content_bytes > 0
     assert pg_storage.count == 1
 
@@ -153,8 +172,7 @@ def test_save_many_persists_multiple_pages(pg_storage):
     with pg_storage._conn.cursor() as cur:
         cur.execute("SELECT count(*) FROM pages")
         assert cur.fetchone()[0] == 2
-        cur.execute("SELECT count(*) FROM page_content")
-        assert cur.fetchone()[0] == 2
+    assert len(pg_storage._content_store.bodies) == 2
 
 
 def test_save_many_deletes_metadata_only_content_rows(pg_storage):
@@ -183,15 +201,7 @@ def test_save_many_deletes_metadata_only_content_rows(pg_storage):
     assert save_results[0].telemetry is not None
     assert save_results[0].telemetry.storage_tier == "metadata_only"
 
-    with pg_storage._conn.cursor() as cur:
-        cur.execute(
-            """SELECT count(*)
-               FROM page_content
-               JOIN pages USING (url_hash)
-               WHERE pages.url = %s""",
-            ("https://example.com/page1",),
-        )
-        assert cur.fetchone()[0] == 0
+    assert _url_hash("https://example.com/page1") not in pg_storage._content_store.bodies
 
 
 def test_save_many_deduplicates_same_url_with_last_write_winning(pg_storage):
@@ -217,16 +227,36 @@ def test_save_many_deduplicates_same_url_with_last_write_winning(pg_storage):
     assert [save_result.saved for save_result in save_results] == [True, True]
 
     with pg_storage._conn.cursor() as cur:
-        cur.execute(
-            """
-            SELECT p.title, pc.content
-            FROM pages p
-            JOIN page_content pc USING (url_hash)
-            WHERE p.url = %s
-            """,
-            ("https://example.com/dup",),
-        )
-        assert cur.fetchone() == ("Second", "<html><title>Second</title><body>Two</body></html>")
+        cur.execute("SELECT title FROM pages WHERE url = %s", ("https://example.com/dup",))
+        assert cur.fetchone() == ("Second",)
+    assert pg_storage._content_store.bodies[_url_hash("https://example.com/dup")] == (
+        b"<html><title>Second</title><body>Two</body></html>"
+    )
+
+
+def test_save_preserves_response_bytes(pg_storage):
+    result = CrawlResult(
+        url="https://example.com/raw",
+        status=200,
+        content_length=4,
+        source_url=None,
+        timestamp=1710000000.0,
+        content="\ufffdPNG",
+        content_bytes=b"\x89PNG",
+        content_type="text/plain",
+        outlinks=[],
+    )
+
+    pg_storage.save(result)
+
+    assert pg_storage._content_store.bodies[_url_hash(result.url)] == b"\x89PNG"
+
+
+def test_url_hash_is_sha256_of_normalized_url():
+    assert _url_hash("HTTPS://Example.COM/path/?b=2&a=1#fragment") == _url_hash(
+        "https://example.com/path?a=1&b=2"
+    )
+    assert len(_url_hash("https://example.com/")) == 64
 
 
 def test_save_drops_nul_content_to_metadata_only(pg_storage):
