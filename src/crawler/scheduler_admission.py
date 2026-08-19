@@ -6,7 +6,15 @@ import logging
 import time
 from typing import Any
 
+from .scheduler_leases import ExecutionLeaseStore
+from .scheduler_membership import (
+    HOST_HEAD_UPDATE_DIRTY,
+    SchedulerMembershipStore,
+)
+from .scheduler_queue_policy import SchedulerQueuePolicy
+from .scheduler_task import CrawlTask
 from .url_identity import MAX_URL_IDENTITY_BYTES, url_identity_length
+from .url_ledger_store import UrlLedgerStore
 from .urls import normalize_url
 
 logger = logging.getLogger(__name__)
@@ -31,24 +39,36 @@ class SchedulerAdmissionService:
 
     def __init__(
         self,
-        ledger: Any,
+        conn,
         *,
-        task_cls: type,
+        ledger_store: UrlLedgerStore,
+        membership: SchedulerMembershipStore,
+        leases: ExecutionLeaseStore,
+        queue_policy: SchedulerQueuePolicy,
         url_ledger_table: str,
         blocked_host_backoff_table: str,
         lease_table: str,
-        host_head_update_dirty: str,
     ) -> None:
-        self._ledger = ledger
-        self._task_cls = task_cls
+        self._conn = conn
+        self._ledger_store = ledger_store
+        self._membership = membership
+        self._leases = leases
+        self._queue_policy = queue_policy
         self._url_ledger_table = url_ledger_table
         self._blocked_host_backoff_table = blocked_host_backoff_table
         self._lease_table = lease_table
-        self._host_head_update_dirty = host_head_update_dirty
+        self._last_diagnostics = self._empty_diagnostics()
+
+    @staticmethod
+    def _empty_diagnostics() -> dict[str, float]:
+        return {field: 0.0 for field in ADMISSION_DIAGNOSTIC_FIELDS}
+
+    def last_diagnostics(self) -> dict[str, float]:
+        return dict(self._last_diagnostics)
 
     def admission_physical_queue_by_url(self, tasks: list[Any]) -> dict[str, str]:
         return {
-            task.url: self._ledger._physical_queue_for_model(
+            task.url: self._queue_policy.physical_queue_for_model(
                 runnable_surface=task.runnable_surface,
                 intent=task.intent,
             )
@@ -79,30 +99,30 @@ class SchedulerAdmissionService:
 
     def admit_queue_membership(self, tasks: list[Any]) -> int:
         """Assign scheduler membership for known ledger URLs."""
-        diagnostics = self._ledger._empty_admission_diagnostics()
+        diagnostics = self._empty_diagnostics()
         if not tasks:
-            self._ledger._last_admission_diagnostics = diagnostics
+            self._last_diagnostics = diagnostics
             return 0
 
-        prepared_tasks = self._ledger._prepare_tasks(tasks)
+        prepared_tasks = self._ledger_store.prepare_tasks(tasks)
         try:
-            with self._ledger._conn.cursor() as cur:
+            with self._conn.cursor() as cur:
                 started = time.perf_counter()
-                self._ledger._update_task_intents(cur, prepared_tasks)
+                self._ledger_store.update_task_intents(cur, prepared_tasks)
                 diagnostics["admit_update_intents_ms"] = _elapsed_ms(started)
 
                 started = time.perf_counter()
                 ledger_rows = self.fetch_admission_ledger_rows_for_tasks(cur, prepared_tasks)
                 diagnostics["admit_fetch_rows_ms"] = _elapsed_ms(started)
-                pending_rows = self._ledger._membership.rows_for_ledger_rows(
+                pending_rows = self._membership.rows_for_ledger_rows(
                     ledger_rows,
                     physical_queue_by_url=self.admission_physical_queue_by_url(prepared_tasks),
-                    default_physical_queue=self._ledger._default_scheduled_physical_queue(),
+                    default_physical_queue=self._queue_policy.default_scheduled_physical_queue(),
                 )
-                membership_timings = self._ledger._membership.replace_pending_rows(
+                membership_timings = self._membership.replace_pending_rows(
                     cur,
                     pending_rows,
-                    host_head_update=self._host_head_update_dirty,
+                    host_head_update=HOST_HEAD_UPDATE_DIRTY,
                 )
                 diagnostics["admit_delete_membership_ms"] = membership_timings.get(
                     "delete_membership_ms",
@@ -117,19 +137,19 @@ class SchedulerAdmissionService:
                     0.0,
                 )
                 started = time.perf_counter()
-                self._ledger._leases.delete(cur, self._ledger._membership.row_urls(pending_rows))
+                self._leases.delete(cur, self._membership.row_urls(pending_rows))
                 diagnostics["admit_delete_leases_ms"] = _elapsed_ms(started)
                 count = len(pending_rows)
         except Exception:
-            self._ledger._conn.rollback()
-            self._ledger._last_admission_diagnostics = diagnostics
+            self._conn.rollback()
+            self._last_diagnostics = diagnostics
             logger.exception("Failed to admit %d URLs", len(tasks))
             return 0
 
         started = time.perf_counter()
-        self._ledger._conn.commit()
+        self._conn.commit()
         diagnostics["admit_commit_ms"] = _elapsed_ms(started)
-        self._ledger._last_admission_diagnostics = diagnostics
+        self._last_diagnostics = diagnostics
         return count
 
     def admit_discovered_tasks(self, tasks: list[Any]) -> int:
@@ -149,7 +169,7 @@ class SchedulerAdmissionService:
             return 0
 
         admission_tasks = [
-            self._task_cls(
+            CrawlTask(
                 url=url,
                 runnable_surface=runnable_surface,
                 intent=intent,
@@ -165,7 +185,7 @@ class SchedulerAdmissionService:
         limit: int,
     ) -> list[tuple[str, str, float, float, float]]:
         """Return ledger rows that are known but lack current scheduler membership."""
-        queue_joins, queue_absence = self._ledger._queue_membership_join_sql(
+        queue_joins, queue_absence = self._queue_policy.queue_membership_join_sql(
             ledger_alias="ledger"
         )
         cur.execute(
@@ -207,17 +227,17 @@ class SchedulerAdmissionService:
         if limit <= 0:
             return 0
 
-        normalized_physical_queue = self._ledger._physical_queue_for_model(
+        normalized_physical_queue = self._queue_policy.physical_queue_for_model(
             runnable_surface=runnable_surface,
             intent=intent,
         )
-        resolved_intent = self._ledger._intent_for_model(
+        resolved_intent = self._queue_policy.intent_for_model(
             runnable_surface=runnable_surface,
             intent=intent,
         )
 
         try:
-            with self._ledger._conn.cursor() as cur:
+            with self._conn.cursor() as cur:
                 candidate_rows = self.select_admission_candidate_rows(cur, limit=limit)
                 if resolved_intent is not None and candidate_rows:
                     cur.execute(
@@ -226,20 +246,20 @@ class SchedulerAdmissionService:
                             WHERE url = ANY(%s)""",
                         (resolved_intent, [row[0] for row in candidate_rows]),
                     )
-                pending_rows = self._ledger._membership.rows_for_physical_queue(
+                pending_rows = self._membership.rows_for_physical_queue(
                     candidate_rows,
                     normalized_physical_queue,
                 )
-                self._ledger._membership.replace_pending_rows(
+                self._membership.replace_pending_rows(
                     cur,
                     pending_rows,
                     host_head_update=self._host_head_update_dirty,
                 )
                 count = len(pending_rows)
         except Exception:
-            self._ledger._conn.rollback()
+            self._conn.rollback()
             logger.exception("Failed to admit discovered URLs (limit=%d)", limit)
             return 0
 
-        self._ledger._conn.commit()
+        self._conn.commit()
         return count

@@ -387,7 +387,7 @@ def scheduler_check(
 
     from .scheduler_invariants import SchedulerInvariantChecker
     from .storage import PgStorage
-    from .url_ledger import UrlLedger
+    from .scheduler import Scheduler
 
     with PgStorage(postgres) as storage:
         checker = SchedulerInvariantChecker(storage.conn)
@@ -396,9 +396,11 @@ def scheduler_check(
         if repair_terminal:
             repair_report = checker.repair_terminal_memberships().to_dict()
         if repair_host_heads:
-            host_head_repair_report = UrlLedger(storage.conn).repair_host_runnable_heads(
-                limit=repair_host_heads
-            ).as_dict()
+            host_head_repair_report = (
+                Scheduler(storage.conn)
+                .repair_host_runnable_heads(limit=repair_host_heads)
+                .as_dict()
+            )
         report = checker.check(sample_limit=sample_limit).to_dict()
 
     if json_output:
@@ -409,7 +411,9 @@ def scheduler_check(
             output["repair_host_heads"] = host_head_repair_report
         typer.echo(
             json.dumps(
-                output if repair_report is not None or host_head_repair_report is not None else report,
+                output
+                if repair_report is not None or host_head_repair_report is not None
+                else report,
                 indent=2,
                 ensure_ascii=False,
             )

@@ -21,7 +21,7 @@ from crawler.scheduler_membership import (
     QUEUE_REFRESH,
 )
 from crawler.scheduler_quarantine import BLOCKED_HOST_BACKOFF_TABLE
-from crawler.url_ledger import URL_LEDGER_TABLE
+from crawler.url_ledger_store import URL_LEDGER_TABLE
 
 pytestmark = pytest.mark.skipif(
     not os.environ.get("TEST_POSTGRES_DSN"),

@@ -18,7 +18,8 @@ from crawler.scheduler_membership import (
 )
 from crawler.scheduler_quarantine import BLOCKED_HOST_BACKOFF_TABLE
 from crawler.scheduler_task import CrawlTask
-from crawler.url_ledger import URL_LEDGER_TABLE, UrlLedger
+from crawler.scheduler import Scheduler
+from crawler.url_ledger_store import URL_LEDGER_TABLE
 from crawler.migrate import apply_migrations
 from crawler.storage import PgStorage
 from crawler.host_ledger import HOST_LEDGER_TABLE
@@ -74,7 +75,7 @@ def pg_resources():
     apply_migrations(dsn)
 
     storage = PgStorage(dsn, content_store=_FakeContentStore())
-    ledger = UrlLedger(storage.conn)
+    ledger = Scheduler(storage.conn)
 
     yield dsn, storage, ledger
 

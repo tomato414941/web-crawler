@@ -63,9 +63,9 @@ from .scheduler_membership import (
     SCHEDULER_SURFACE_NORMAL,
     SCHEDULER_SURFACE_REFRESH,
 )
-from .scheduler_selection import LEASE_STRATEGY_HOST_FIRST, LEASE_STRATEGY_URL_ORDER
+from .scheduler_queue_policy import LEASE_STRATEGY_HOST_FIRST, LEASE_STRATEGY_URL_ORDER
 from .scheduler_task import CrawlTask, INTENT_EXPLORE, INTENT_REFRESH
-from .url_ledger import UrlLedger
+from .scheduler import Scheduler
 from .output import StreamingOutputWriter
 from .result import CrawlFailure, CrawlResult, CrawlStageTimings
 from .runtime import CrawlerRuntime, CycleSnapshotBuilder
@@ -202,6 +202,7 @@ class _LeaseLane:
     intent: str | None = None
     execution_tiers: tuple[int, ...] | None = None
 
+
 class CrawlerEngine:
     """Async crawler engine with concurrent processing."""
 
@@ -215,7 +216,7 @@ class CrawlerEngine:
         concurrency: int = 5,
         output_writer: StreamingOutputWriter | None = None,
         pg_storage: "PgStorage | None" = None,
-        url_ledger: UrlLedger | None = None,
+        scheduler: Scheduler | None = None,
         host_manager: HostManager | None = None,
         host_store: HostStore | None = None,
         seed_urls: list[str] | None = None,
@@ -234,24 +235,21 @@ class CrawlerEngine:
             self.normal_workers,
             settings.execution_probing_worker_ratio,
         )
-        # Compatibility fields for older runtime consumers; execution uses normal_workers.
-        self.runnable_workers = self.normal_workers
-        self.scheduled_workers = 0
         self._publisher_executor: concurrent.futures.ThreadPoolExecutor | None = None
         self._publisher_storage = None
         self._finalizer_executor: concurrent.futures.ThreadPoolExecutor | None = None
         self._finalizer_storage = None
-        self._finalizer_scheduler: UrlLedger | None = None
+        self._finalizer_scheduler: Scheduler | None = None
         self._finalizer_host_store: HostStore | None = None
 
         self.start_host = urlparse(start_url).netloc if start_url else ""
         self.seed_hosts = seed_hosts_from_urls(seed_urls or [])
         if self.start_host:
             self.seed_hosts.add(self.start_host.lower())
-        if url_ledger:
-            self.scheduler = url_ledger
+        if scheduler:
+            self.scheduler = scheduler
         elif pg_storage:
-            self.scheduler = UrlLedger(pg_storage.conn)
+            self.scheduler = Scheduler(pg_storage.conn)
         else:
             raise ValueError("Postgres connection required for scheduler state")
 
@@ -260,7 +258,7 @@ class CrawlerEngine:
         self.host_store = host_store
         if self.host_store is not None:
             self.scheduler.attach_host_store(self.host_store)
-        self.host_ledger_store = getattr(self.scheduler, "host_ledger_store", None)
+        self.host_ledger_store = self.scheduler.host_ledger_store
 
         if host_manager:
             self.host_manager = host_manager
@@ -301,8 +299,6 @@ class CrawlerEngine:
             normal_workers=self.normal_workers,
             warm_workers=self.warm_workers,
             probing_workers=self.probing_workers,
-            runnable_workers=self.runnable_workers,
-            scheduled_workers=self.scheduled_workers,
             refresh_workers=self.refresh_workers,
             host_first_fallback_stats=self._host_first_fallback_stats,
         )
@@ -420,18 +416,7 @@ class CrawlerEngine:
         self._runtime.timing_summary = value
 
     def _host_first_fallback_stats(self) -> dict[str, int]:
-        stats_fn = getattr(self.scheduler, "host_first_fallback_stats", None)
-        if not callable(stats_fn):
-            return {
-                "attempts": 0,
-                "hits": 0,
-                "misses": 0,
-                "read_model_hits": 0,
-                "read_model_stale": 0,
-                "read_model_misses": 0,
-                "read_model_errors": 0,
-            }
-        raw = stats_fn()
+        raw = self.scheduler.host_first_fallback_stats()
         return {
             "attempts": int(raw.get("attempts", 0)),
             "hits": int(raw.get("hits", 0)),
@@ -653,8 +638,7 @@ class CrawlerEngine:
         )
         selected = result.tasks
         admission_counts = result.counts
-        if hasattr(self.scheduler, "preview_tasks"):
-            selected = self.scheduler.preview_tasks(selected)
+        selected = self.scheduler.preview_tasks(selected)
         admission_counts["admitted"] = len(selected)
         return selected, dict(admission_counts)
 
@@ -670,12 +654,8 @@ class CrawlerEngine:
         cached_at, pending = self._frontier_pending_cache
         if now - cached_at < 30.0:
             return pending
-        pending_count = getattr(self.scheduler, "pending_count", None)
-        if not callable(pending_count):
-            self._frontier_pending_cache = (now, 0)
-            return 0
         try:
-            pending = int(pending_count() or 0)
+            pending = int(self.scheduler.pending_count() or 0)
         except Exception:
             logger.debug("Failed to read pending count for admission pressure", exc_info=True)
             pending = 0
@@ -1229,14 +1209,10 @@ class CrawlerEngine:
             read_model = "unknown"
             fallback = "none"
             if lease_lane.lease_strategy == LEASE_STRATEGY_HOST_FIRST:
-                diagnostics_fn = getattr(self.scheduler, "last_lease_diagnostics", None)
-                if callable(diagnostics_fn):
-                    diagnostics = diagnostics_fn()
-                    read_model = str(diagnostics.get("read_model", "unknown"))
-                    fallback = str(diagnostics.get("fallback", "none"))
-                    execution_tier = str(diagnostics.get("execution_tier", "unknown"))
-                else:
-                    execution_tier = "unknown"
+                diagnostics = self.scheduler.last_lease_diagnostics()
+                read_model = str(diagnostics.get("read_model", "unknown"))
+                fallback = str(diagnostics.get("fallback", "none"))
+                execution_tier = str(diagnostics.get("execution_tier", "unknown"))
             else:
                 execution_tier = "unknown"
             lease = LeaseTelemetry(
@@ -1256,9 +1232,7 @@ class CrawlerEngine:
         self._runtime.reset_cycle()
         self._running = True
         self.failure_breakdown = {}
-        reset_fallback_stats = getattr(self.scheduler, "reset_host_first_fallback_stats", None)
-        if callable(reset_fallback_stats):
-            reset_fallback_stats()
+        self.scheduler.reset_host_first_fallback_stats()
 
         if (
             self.start_url
@@ -1279,7 +1253,7 @@ class CrawlerEngine:
 
             self._publisher_storage = PgStorage(publisher_dsn)
             self._finalizer_storage = PgStorage(publisher_dsn)
-            self._finalizer_scheduler = UrlLedger(self._finalizer_storage.conn)
+            self._finalizer_scheduler = Scheduler(self._finalizer_storage.conn)
             self._finalizer_host_store = HostStore(
                 self._finalizer_storage.conn,
                 default_delay=self.host_manager.default_delay,
