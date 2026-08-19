@@ -71,6 +71,7 @@ def test_apply_migrations_creates_expected_tables(migrated_dsn):
         "003_host_runnable_head_dirty_hosts_index.sql",
         "004_page_content_storage.sql",
         "005_url_ledger_identity.sql",
+        "006_drop_page_content.sql",
     ]
 
     conn = psycopg2.connect(migrated_dsn)
@@ -104,7 +105,7 @@ def test_apply_migrations_creates_expected_tables(migrated_dsn):
             )
             assert cur.fetchone() == (
                 "pages",
-                "page_content",
+                None,
                 "url_ledger",
                 "host_ledger",
                 "host_state",
@@ -200,7 +201,7 @@ def test_apply_migrations_creates_current_url_ledger_columns(migrated_dsn):
     finally:
         conn.close()
 
-    assert page_content_columns == ["url_hash", "content", "updated_at"]
+    assert page_content_columns == []
 
     conn = psycopg2.connect(migrated_dsn)
     try:
@@ -305,7 +306,7 @@ def test_url_ledger_identity_migration_backfills_existing_rows(migrated_dsn):
 
     applied = apply_migrations(migrated_dsn)
 
-    assert applied == ["005_url_ledger_identity.sql"]
+    assert applied == ["005_url_ledger_identity.sql", "006_drop_page_content.sql"]
     conn = psycopg2.connect(migrated_dsn)
     try:
         with conn.cursor() as cur:

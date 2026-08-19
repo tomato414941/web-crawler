@@ -1,7 +1,7 @@
 # web-crawler
 
-Async broad-web crawler with adaptive fetching, PostgreSQL scheduler state, operator
-observation, and a REST API.
+Async broad-web crawler with adaptive fetching, PostgreSQL scheduler state, Cloudflare R2 page
+content, operator observation, and a REST API.
 
 `web-crawler` is designed to discover, fetch, classify, and record structured observations from
 the broad public web. Seed URLs are bootstrap inputs, not the crawler's target scope. Detailed
@@ -25,6 +25,7 @@ The AI browser agent is experimental and outside the crawler core. See
 
 - Adaptive HTTP-first fetching with optional browser rendering
 - PostgreSQL-backed URL ledger, physical queues, leases, retries, and refresh scheduling
+- Unmodified fetched text bodies stored in Cloudflare R2 by normalized URL hash
 - Host-level robots, crawl delay, cooldown, and durable host state
 - Discovery admission controls for broad-web expansion
 - REST API for pages and runtime stats
@@ -50,7 +51,7 @@ pip install -e ".[agent]"
 pip install -e ".[all]"
 ```
 
-PostgreSQL support is required for `crawl`, `serve`, and `daemon`.
+PostgreSQL and Cloudflare R2 are required for `crawl`, `serve`, and `daemon`.
 
 ## Quick Start
 
@@ -156,6 +157,10 @@ Default compose services:
 - `api` — FastAPI server on loopback port `8080`
 - `crawler` — continuous daemon worker
 - `observer` — periodic JSONL operator snapshots
+
+The `api` and `crawler` services require `CRAWLER_R2_ENDPOINT_URL`, `CRAWLER_R2_BUCKET`,
+`CRAWLER_R2_ACCESS_KEY_ID`, and `CRAWLER_R2_SECRET_ACCESS_KEY`. Keep these values outside the
+repository.
 
 For proxy-contained deployments, keep `docker-compose.yml` as the development baseline and layer
 the hardened override:

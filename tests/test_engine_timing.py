@@ -119,7 +119,7 @@ class _FakeStorage:
             telemetry=StorageTelemetry(
                 prepare_ms=1.0,
                 pages_upsert_ms=2.0,
-                page_content_ms=3.0,
+                content_store_ms=3.0,
                 commit_ms=4.0,
                 total_ms=10.0,
                 stored_content_bytes=128,
@@ -196,7 +196,7 @@ def test_timing_accumulator_summarizes_stage_percentiles():
             storage=StorageTelemetry(
                 prepare_ms=1.0,
                 pages_upsert_ms=2.0,
-                page_content_ms=3.0,
+                content_store_ms=3.0,
                 commit_ms=4.0,
                 total_ms=10.0,
                 stored_content_bytes=128,
@@ -242,7 +242,7 @@ def test_timing_accumulator_summarizes_stage_percentiles():
     assert summary["counts"]["finalizer_batch_size"]["count"] == 1
     assert summary["counts"]["finalizer_batch_size"]["avg"] == 2.0
     assert summary["counts"]["finalizer_batch_size"]["max"] == 2.0
-    assert summary["storage"]["page_content_ms"]["p95"] == 3.0
+    assert summary["storage"]["content_store_ms"]["p95"] == 3.0
     assert summary["storage"]["commit_ms"]["p95"] == 4.0
     assert summary["storage"]["total_ms"]["p95"] == 10.0
     assert summary["publisher"]["save_dispatch_wait_ms"]["p95"] == 5.0
@@ -728,7 +728,7 @@ async def test_crawler_engine_records_stage_timings():
     assert result.timings.finalizer.mark_done_ms >= 0
     assert result.timings.finalizer.total_ms >= 0
     assert result.timings.storage is not None
-    assert result.timings.storage.page_content_ms == 3.0
+    assert result.timings.storage.content_store_ms == 3.0
     assert result.timings.storage.storage_tier == "summary"
     assert result.timings.publisher is not None
     assert result.timings.publisher.save_dispatch_wait_ms >= 0
@@ -769,7 +769,7 @@ async def test_crawler_engine_records_stage_timings():
     assert timing_summary["finalizer"]["admit_host_heads_ms"]["count"] == 1
     assert timing_summary["finalizer"]["admit_host_heads_ms"]["p95"] == 0.5
     assert timing_summary["storage"]["total_ms"]["count"] == 1
-    assert timing_summary["storage"]["page_content_ms"]["p95"] == 3.0
+    assert timing_summary["storage"]["content_store_ms"]["p95"] == 3.0
     assert timing_summary["publisher"]["total_ms"]["count"] == 1
     assert timing_summary["publisher"]["save_run_ms"]["count"] == 1
     assert timing_summary["counts"]["storage_tiers"] == {"summary": 1}

@@ -42,11 +42,6 @@ class CrawlerSettings(BaseSettings):
     daemon_host_head_repair_limit: int = 64
     daemon_host_head_dirty_refresh_limit: int = 2048
     execution_probing_worker_ratio: float = 0.2
-    stored_content_summary_bytes: int = 32_768
-    stored_content_standard_bytes: int = 262_144
-    stored_content_extended_bytes: int = 1_048_576
-    stored_content_standard_min_discovery_value: float = 1.0
-    stored_content_extended_min_discovery_value: float = 1.4
     admission_target_pending: int = 500_000
     allow_private_network_egress: bool = False
     allowed_egress_ports: Annotated[tuple[int, ...], NoDecode] = (80, 443)
@@ -57,6 +52,10 @@ class CrawlerSettings(BaseSettings):
     finalizer_batch_wait_ms: float = 25.0
     publisher_batch_size: int = 16
     publisher_batch_wait_ms: float = 25.0
+    r2_endpoint_url: str | None = None
+    r2_bucket: str | None = None
+    r2_access_key_id: str | None = None
+    r2_secret_access_key: str | None = None
 
     model_config = {"env_prefix": "CRAWLER_"}
 
@@ -93,6 +92,26 @@ class CrawlerSettings(BaseSettings):
             return None
         proxy = self.egress_proxy.strip()
         return proxy or None
+
+    def r2_config(self) -> tuple[str, str, str, str]:
+        """Return required Cloudflare R2 connection settings."""
+        endpoint_url = self.r2_endpoint_url
+        bucket = self.r2_bucket
+        access_key_id = self.r2_access_key_id
+        secret_access_key = self.r2_secret_access_key
+        values = (endpoint_url, bucket, access_key_id, secret_access_key)
+        if any(not value or not value.strip() for value in values):
+            raise ValueError(
+                "CRAWLER_R2_ENDPOINT_URL, CRAWLER_R2_BUCKET, "
+                "CRAWLER_R2_ACCESS_KEY_ID, and CRAWLER_R2_SECRET_ACCESS_KEY are required"
+            )
+        assert endpoint_url and bucket and access_key_id and secret_access_key
+        return (
+            endpoint_url.strip(),
+            bucket.strip(),
+            access_key_id.strip(),
+            secret_access_key.strip(),
+        )
 
     def validate_egress_transport(self) -> None:
         """Fail fast when runtime egress settings cannot be enforced."""

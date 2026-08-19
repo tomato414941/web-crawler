@@ -24,7 +24,6 @@ logger = logging.getLogger(__name__)
 
 OBSERVED_RELATIONS = (
     "pages",
-    "page_content",
     URL_LEDGER_TABLE,
     *PHYSICAL_QUEUE_TABLES.values(),
     BLOCKED_HOST_BACKOFF_TABLE,

@@ -9,6 +9,9 @@ statistics. It is not currently designed as a public internet-facing API.
 crawler serve --port 8080 --postgres postgresql://user:pass@localhost/db
 ```
 
+The API also requires the four `CRAWLER_R2_*` settings documented in
+[operations.md](operations.md) to load page content.
+
 ## Authentication
 
 Set `CRAWLER_API_TOKEN` to require either:
@@ -28,7 +31,7 @@ unauthenticated access.
 |---|---|
 | `GET /health` | Health check |
 | `GET /pages` | List pages with `?since=`, `?limit=`, `?offset=`, and `?host=` filters |
-| `GET /pages/{url_hash}` | Get page details with content |
+| `GET /pages/{url_hash}` | Get page details with content loaded from R2 |
 | `GET /stats` | Fast runtime crawl statistics from the persisted daemon snapshot |
 | `GET /stats/diagnostics` | Runtime diagnostics surface; live full-queue diagnostics are disabled in production |
 

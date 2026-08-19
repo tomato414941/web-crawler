@@ -5,7 +5,7 @@ This document defines how `web-crawler` handles fetched resources today.
 ## Current scope
 
 - HTML pages are first-class crawl targets.
-- HTML pages are fetched, stored through tiered page content storage, and used for link extraction.
+- HTML pages are fetched, stored as response bytes in Cloudflare R2, and used for link extraction.
 - Text-like resources may also be stored when they can be represented safely as text.
 - Binary documents remain valid crawl targets, but they are not first-class stored content yet.
 
@@ -50,17 +50,13 @@ done, not counted as a fetch error.
 
 ## Page content storage
 
-`pages` is the lightweight page index. Stored text content lives in `page_content` and is limited by
-storage tier:
-
-- `metadata_only`: no stored text body
-- `summary`: small sample for low-value or oversized text
-- `standard`: normal page text budget
-- `extended`: larger budget for high-discovery-value text
+`pages` is the lightweight PostgreSQL page index. Text-like response bodies are stored unchanged in
+a private Cloudflare R2 bucket. The object key is the SHA-256 hash of the normalized URL, which is
+also the `pages.url_hash` value. A recrawl replaces the existing object for that URL.
 
 `content_length` records the original response size when known. `stored_content_bytes` records the
-actual bytes persisted. `content_truncated` tells operators whether the stored text is only a
-sample. This keeps the crawler from becoming an unbounded page-body archive.
+bytes written to R2. `content_truncated` indicates that the fetcher's response-size limit was
+reached. Binary resources remain metadata-only and have no R2 object.
 
 ## Discovery breadth
 

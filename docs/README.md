@@ -8,7 +8,7 @@ the primary entry point for project summary, quick start, common commands, and d
 - [README.md](../README.md) — project overview, quick start, common commands, and document routing
 - [plan.md](../plan.md) — current milestone, recent completed work, and next candidates
 - [DESIGN_PRINCIPLES.md](DESIGN_PRINCIPLES.md) — conceptual positioning, core principles, non-goals, and architectural direction
-- [CONTENT_POLICY.md](CONTENT_POLICY.md) — content handling, metadata-only resources, storage tiers, and discovery breadth
+- [CONTENT_POLICY.md](CONTENT_POLICY.md) — content handling, R2 body storage, metadata-only resources, and discovery breadth
 - [api.md](api.md) — REST API usage, authentication, endpoints, and current limitations
 - [operations.md](operations.md) — deployment, hardened runtime expectations, scheduler tuning, and observation
 - [seed-catalog.md](seed-catalog.md) — seed catalog maintenance and runtime rendering

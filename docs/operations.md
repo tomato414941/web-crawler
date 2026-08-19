@@ -68,9 +68,16 @@ CRAWLER_OBSERVE_MAX_BYTES=10485760
 CRAWLER_OBSERVE_MAX_FILES=7
 CRAWLER_OBSERVE_MAX_FAILURES=5
 CRAWLER_API_TOKEN=<random-long-token>
+CRAWLER_R2_ENDPOINT_URL=https://<account-id>.r2.cloudflarestorage.com
+CRAWLER_R2_BUCKET=web-crawler-content
+CRAWLER_R2_ACCESS_KEY_ID=<access-key-id>
+CRAWLER_R2_SECRET_ACCESS_KEY=<secret-access-key>
 ```
 
 Store runtime-specific values in a local `.env` on the server. Do not commit them.
+
+The R2 bucket is private. Each text-like response body is stored under the SHA-256 hash of its
+normalized URL. PostgreSQL stores the same hash and page metadata; it does not store the body.
 
 ## Scheduler Tuning
 
@@ -162,6 +169,10 @@ For the hardened compose profile, validate the merged configuration before deplo
 
 ```bash
 CRAWLER_API_TOKEN=replace-me \
+  CRAWLER_R2_ENDPOINT_URL=https://example.r2.cloudflarestorage.com \
+  CRAWLER_R2_BUCKET=web-crawler-content \
+  CRAWLER_R2_ACCESS_KEY_ID=replace-me \
+  CRAWLER_R2_SECRET_ACCESS_KEY=replace-me \
   docker compose -f docker-compose.yml -f docker-compose.hardened.yml config >/dev/null
 ```
 
