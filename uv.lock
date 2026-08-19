@@ -953,7 +953,7 @@ requires-dist = [
     { name = "pytest-asyncio", marker = "extra == 'dev'" },
     { name = "pytest-httpx", marker = "extra == 'dev'" },
     { name = "robotexclusionrulesparser", specifier = ">=1.7" },
-    { name = "ruff", marker = "extra == 'dev'" },
+    { name = "ruff", marker = "extra == 'dev'", specifier = "==0.15.10" },
     { name = "selectolax", specifier = ">=0.3" },
     { name = "typer", specifier = ">=0.12" },
     { name = "uvicorn", marker = "extra == 'all'", specifier = ">=0.34" },
