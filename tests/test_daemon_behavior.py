@@ -8,18 +8,17 @@ import psycopg2
 import pytest
 
 from crawler.daemon import CrawlDaemon, _format_error_breakdown
-from crawler.url_ledger import (
-    BLOCKED_HOST_BACKOFF_TABLE,
-    CrawlTask,
-    HOST_RUNNABLE_HEAD_DIRTY_HOSTS_TABLE,
-    LEASE_TABLE,
+from crawler.host_runnable_heads import HOST_RUNNABLE_HEAD_DIRTY_HOSTS_TABLE
+from crawler.scheduler_leases import ACTIVE_LEASES_TABLE as LEASE_TABLE
+from crawler.scheduler_membership import (
     PHYSICAL_QUEUE_TABLES,
     QUEUE_REFRESH,
     QUEUE_RUNNABLE,
     QUEUE_SCHEDULED,
-    URL_LEDGER_TABLE,
-    UrlLedger,
 )
+from crawler.scheduler_quarantine import BLOCKED_HOST_BACKOFF_TABLE
+from crawler.scheduler_task import CrawlTask
+from crawler.url_ledger import URL_LEDGER_TABLE, UrlLedger
 from crawler.migrate import apply_migrations
 from crawler.storage import PgStorage
 from crawler.host_ledger import HOST_LEDGER_TABLE

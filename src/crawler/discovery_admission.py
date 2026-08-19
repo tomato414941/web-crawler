@@ -17,11 +17,8 @@ from .discovery import (
     rank_discovered_url,
 )
 from .egress_guard import is_url_allowed_without_dns
-from .url_ledger import (
-    CrawlTask,
-    INTENT_EXPLORE,
-    SCHEDULER_SURFACE_SCHEDULED,
-)
+from .scheduler_membership import SCHEDULER_SURFACE_SCHEDULED
+from .scheduler_task import CrawlTask, INTENT_EXPLORE
 
 ADMISSION_REASON_CANDIDATE = "candidate"
 ADMISSION_REASON_SCORE_BELOW_THRESHOLD = "score_below_threshold"

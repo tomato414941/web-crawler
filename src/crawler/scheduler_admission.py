@@ -11,6 +11,16 @@ from .urls import normalize_url
 
 logger = logging.getLogger(__name__)
 
+ADMISSION_DIAGNOSTIC_FIELDS = (
+    "admit_update_intents_ms",
+    "admit_fetch_rows_ms",
+    "admit_delete_membership_ms",
+    "admit_insert_membership_ms",
+    "admit_host_heads_ms",
+    "admit_delete_leases_ms",
+    "admit_commit_ms",
+)
+
 
 def _elapsed_ms(started_at: float) -> float:
     return round((time.perf_counter() - started_at) * 1000, 1)
