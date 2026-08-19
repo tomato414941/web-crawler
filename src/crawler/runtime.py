@@ -79,8 +79,6 @@ class CycleSnapshotBuilder:
     normal_workers: int
     warm_workers: int
     probing_workers: int
-    runnable_workers: int
-    scheduled_workers: int
     refresh_workers: int
     host_first_fallback_stats: Callable[[], dict[str, int]]
 
@@ -97,8 +95,6 @@ class CycleSnapshotBuilder:
             "normal_workers": self.normal_workers,
             "warm_workers": self.warm_workers,
             "probing_workers": self.probing_workers,
-            "runnable_workers": self.runnable_workers,
-            "scheduled_workers": self.scheduled_workers,
             "refresh_workers": self.refresh_workers,
             "execution_workers": {
                 "warm": self.warm_workers,

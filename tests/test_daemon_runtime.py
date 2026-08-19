@@ -4,6 +4,7 @@ import threading
 import time
 
 from crawler.daemon import CrawlDaemon
+from crawler.host_runnable_heads import HostRunnableHeadDirtyRefreshSummary
 
 
 class _FakeStorage:
@@ -124,15 +125,15 @@ def test_runtime_payload_includes_host_head_dirty_refresh():
 
 
 def test_refresh_dirty_host_runnable_heads_records_summary():
-    class FakeLedger:
+    class FakeScheduler:
         def refresh_dirty_host_runnable_heads(self, limit):
             assert limit == 11
-            return {
-                "selected_hosts": 4,
-                "refreshed_hosts": 3,
-                "remaining_hosts": 2,
-                "elapsed_ms": 9.8,
-            }
+            return HostRunnableHeadDirtyRefreshSummary(
+                selected_hosts=4,
+                refreshed_hosts=3,
+                remaining_hosts=2,
+                elapsed_ms=9.8,
+            )
 
     daemon = CrawlDaemon(
         seeds=["https://example.com/"],
@@ -140,7 +141,7 @@ def test_refresh_dirty_host_runnable_heads_records_summary():
     )
     daemon._host_head_dirty_refresh_limit = 11
 
-    daemon._refresh_dirty_host_runnable_heads(FakeLedger())
+    daemon._refresh_dirty_host_runnable_heads(FakeScheduler())
 
     assert daemon._last_host_head_dirty_refresh == {
         "selected_hosts": 4,

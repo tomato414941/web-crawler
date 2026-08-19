@@ -14,7 +14,7 @@ from .host_runnable_heads import (
 from .scheduler_leases import ACTIVE_LEASES_TABLE
 from .scheduler_membership import PHYSICAL_QUEUE_TABLES
 from .scheduler_quarantine import BLOCKED_HOST_BACKOFF_TABLE
-from .url_ledger import URL_LEDGER_TABLE
+from .url_ledger_store import URL_LEDGER_TABLE
 
 
 @dataclass(frozen=True, slots=True)
@@ -132,9 +132,7 @@ class SchedulerInvariantChecker:
         mismatch_count, mismatch_samples = self._host_head_mismatches(limit=limit)
         hash_missing_count, hash_missing_samples = self._url_hash_missing(limit=limit)
         hash_mismatch_count, hash_mismatch_samples = self._url_hash_mismatches(limit=limit)
-        length_mismatch_count, length_mismatch_samples = self._url_length_mismatches(
-            limit=limit
-        )
+        length_mismatch_count, length_mismatch_samples = self._url_length_mismatches(limit=limit)
         hash_duplicate_count, hash_duplicate_samples = self._url_hash_duplicates(limit=limit)
         url_too_long_count, url_too_long_samples = self._url_too_long(limit=limit)
         samples = {
@@ -554,8 +552,7 @@ class SchedulerInvariantChecker:
                     (limit, limit),
                 )
                 samples = [
-                    {"url_hash": url_hash, "urls": list(urls)}
-                    for url_hash, urls in cur.fetchall()
+                    {"url_hash": url_hash, "urls": list(urls)} for url_hash, urls in cur.fetchall()
                 ]
         self._conn.commit()
         return count, samples

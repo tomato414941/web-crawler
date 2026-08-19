@@ -25,7 +25,7 @@ from .scheduler_membership import (
     PHYSICAL_QUEUE_TABLES,
 )
 from .scheduler_quarantine import BLOCKED_HOST_BACKOFF_TABLE
-from .url_ledger import URL_LEDGER_TABLE
+from .url_ledger_store import URL_LEDGER_TABLE
 from .scheduler_observability import SchedulerObservability
 from .config import settings
 from .result import CrawlResult, result_to_dict
@@ -111,7 +111,9 @@ def _sanitize_stored_content(content: object) -> str:
     return content
 
 
-def _prepare_page_save(result: CrawlResult | Mapping[str, object]) -> StorageSaveResult | _PreparedPageSave:
+def _prepare_page_save(
+    result: CrawlResult | Mapping[str, object],
+) -> StorageSaveResult | _PreparedPageSave:
     """Prepare one page payload for storage mutation."""
     prepare_started = time.perf_counter()
     data = result_to_dict(result)
@@ -223,17 +225,13 @@ def _discovery_admission_summary(
         admission_counts = {}
 
     normalized = {
-        str(key): int(value or 0)
-        for key, value in admission_counts.items()
-        if int(value or 0) > 0
+        str(key): int(value or 0) for key, value in admission_counts.items() if int(value or 0) > 0
     }
     extracted = int(normalized.get("extracted", 0))
     admitted = int(normalized.get("admitted", 0))
     non_rejection_keys = {"extracted", "admitted", "external_generic"}
     rejection_reasons = {
-        key: value
-        for key, value in sorted(normalized.items())
-        if key not in non_rejection_keys
+        key: value for key, value in sorted(normalized.items()) if key not in non_rejection_keys
     }
     rejected = sum(rejection_reasons.values())
     return {
@@ -469,9 +467,7 @@ class PageWriteStore:
         total_started = time.perf_counter()
         prepared_results = [_prepare_page_save(result) for result in results]
         prepared_pages = [
-            prepared
-            for prepared in prepared_results
-            if isinstance(prepared, _PreparedPageSave)
+            prepared for prepared in prepared_results if isinstance(prepared, _PreparedPageSave)
         ]
         if not prepared_pages:
             return [
@@ -602,9 +598,7 @@ class PageQueryStore:
         params.extend([limit, offset])
 
         try:
-            with self._storage._conn.cursor(
-                cursor_factory=psycopg2.extras.RealDictCursor
-            ) as cur:
+            with self._storage._conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
                 cur.execute(
                     f"""SELECT url_hash, url, host, title, status, content_length,
                                content_type, outlinks, storage_tier, storage_reason,
@@ -624,9 +618,7 @@ class PageQueryStore:
 
     def get_page(self, url_hash: str) -> dict | None:
         try:
-            with self._storage._conn.cursor(
-                cursor_factory=psycopg2.extras.RealDictCursor
-            ) as cur:
+            with self._storage._conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
                 cur.execute(
                     """SELECT pages.url_hash, pages.url, pages.host, pages.title,
                               pages.status, pages.content_length, pages.content_type,
@@ -678,9 +670,7 @@ class RuntimeStatsStore:
 
     def get(self, component: str | None = None) -> dict[str, object]:
         try:
-            with self._storage._conn.cursor(
-                cursor_factory=psycopg2.extras.RealDictCursor
-            ) as cur:
+            with self._storage._conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
                 cur.execute("SELECT to_regclass('public.crawler_runtime_stats') AS table_name")
                 exists = cur.fetchone()["table_name"] is not None
                 if not exists:

@@ -8,7 +8,7 @@ from collections.abc import Callable
 BLOCKED_HOST_BACKOFF_TABLE = "scheduler_queue_retry_quarantine"
 
 
-class SchedulerQuarantine:
+class SchedulerQuarantineService:
     """State transitions for host-backoff quarantine queues."""
 
     def __init__(
