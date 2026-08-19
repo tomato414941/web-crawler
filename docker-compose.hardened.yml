@@ -10,8 +10,17 @@ services:
     restart: unless-stopped
 
   api:
+    environment:
+      CRAWLER_EGRESS_PROXY: http://egress-proxy:3128
     networks:
       - crawler_internal
+    depends_on:
+      egress-proxy:
+        condition: service_started
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
 
   migrate:
     networks:

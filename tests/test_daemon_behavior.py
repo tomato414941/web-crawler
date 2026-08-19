@@ -24,6 +24,21 @@ from crawler.migrate import apply_migrations
 from crawler.storage import PgStorage
 from crawler.host_ledger import HOST_LEDGER_TABLE
 
+
+class _FakeContentStore:
+    def __init__(self):
+        self.bodies = {}
+
+    def put(self, key, body, content_type):
+        self.bodies[key] = body
+
+    def get(self, key):
+        return self.bodies[key]
+
+    def delete(self, key):
+        self.bodies.pop(key, None)
+
+
 pytestmark = pytest.mark.skipif(
     not os.environ.get("TEST_POSTGRES_DSN"),
     reason="TEST_POSTGRES_DSN not set",
@@ -59,7 +74,7 @@ def pg_resources():
     _reset_schema(dsn)
     apply_migrations(dsn)
 
-    storage = PgStorage(dsn)
+    storage = PgStorage(dsn, content_store=_FakeContentStore())
     ledger = UrlLedger(storage.conn)
 
     yield dsn, storage, ledger

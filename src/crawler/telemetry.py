@@ -48,7 +48,7 @@ FINALIZER_TIMING_FIELDS = (
 STORAGE_TIMING_FIELDS = (
     "prepare_ms",
     "pages_upsert_ms",
-    "page_content_ms",
+    "content_store_ms",
     "commit_ms",
     "total_ms",
 )
@@ -167,7 +167,7 @@ class StorageTelemetry:
 
     prepare_ms: float = 0.0
     pages_upsert_ms: float = 0.0
-    page_content_ms: float = 0.0
+    content_store_ms: float = 0.0
     commit_ms: float = 0.0
     total_ms: float = 0.0
     stored_content_bytes: int = 0

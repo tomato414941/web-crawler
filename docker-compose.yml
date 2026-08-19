@@ -21,6 +21,10 @@ services:
     environment:
       CRAWLER_POSTGRES_DSN: postgresql://crawler:crawler@postgres/crawldb
       CRAWLER_API_TOKEN: ${CRAWLER_API_TOKEN:?required}
+      CRAWLER_R2_ENDPOINT_URL: ${CRAWLER_R2_ENDPOINT_URL:?required}
+      CRAWLER_R2_BUCKET: ${CRAWLER_R2_BUCKET:?required}
+      CRAWLER_R2_ACCESS_KEY_ID: ${CRAWLER_R2_ACCESS_KEY_ID:?required}
+      CRAWLER_R2_SECRET_ACCESS_KEY: ${CRAWLER_R2_SECRET_ACCESS_KEY:?required}
     depends_on:
       postgres:
         condition: service_healthy
@@ -40,6 +44,10 @@ services:
     build: .
     environment:
       CRAWLER_ADMISSION_TARGET_PENDING: ${CRAWLER_ADMISSION_TARGET_PENDING:-500000}
+      CRAWLER_R2_ENDPOINT_URL: ${CRAWLER_R2_ENDPOINT_URL:?required}
+      CRAWLER_R2_BUCKET: ${CRAWLER_R2_BUCKET:?required}
+      CRAWLER_R2_ACCESS_KEY_ID: ${CRAWLER_R2_ACCESS_KEY_ID:?required}
+      CRAWLER_R2_SECRET_ACCESS_KEY: ${CRAWLER_R2_SECRET_ACCESS_KEY:?required}
     command: >
       crawler daemon
         ${CRAWL_SEED_URLS:-https://example.com}

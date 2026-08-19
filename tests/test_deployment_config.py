@@ -12,6 +12,18 @@ def test_compose_requires_api_token():
     assert "CRAWLER_API_TOKEN: ${CRAWLER_API_TOKEN:?required}" in compose
 
 
+def test_compose_requires_r2_credentials_for_content_services():
+    compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
+
+    for variable in (
+        "CRAWLER_R2_ENDPOINT_URL",
+        "CRAWLER_R2_BUCKET",
+        "CRAWLER_R2_ACCESS_KEY_ID",
+        "CRAWLER_R2_SECRET_ACCESS_KEY",
+    ):
+        assert compose.count(f"{variable}: ${{{variable}:?required}}") == 2
+
+
 def test_compose_binds_public_services_to_loopback():
     compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
 
