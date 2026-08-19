@@ -7,10 +7,16 @@ import logging
 import time
 from typing import Any
 
-logger = logging.getLogger(__name__)
+from .host_runnable_heads import HostRunnableHeadStore
+from .scheduler_lease_telemetry import HostFirstLeaseTelemetry
+from .scheduler_leases import ExecutionLeaseStore
+from .scheduler_membership import SchedulerMembershipStore
+from .scheduler_queue_policy import (
+    SchedulerQueuePolicy,
+)
+from .scheduler_requeue import SchedulerRequeueService
 
-LEASE_STRATEGY_URL_ORDER = "url_order"
-LEASE_STRATEGY_HOST_FIRST = "host_first"
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -24,13 +30,20 @@ class HostFirstReadModelResult:
     execution_tier: int | None = None
 
 
-class SchedulerLeaseSelector:
-    """Owns scheduler lease selection strategies."""
+class SchedulerLeaseService:
+    """Select runnable work and create its execution lease."""
 
     def __init__(
         self,
-        ledger: Any,
+        conn,
         *,
+        membership: SchedulerMembershipStore,
+        leases: ExecutionLeaseStore,
+        host_heads: HostRunnableHeadStore,
+        requeue: SchedulerRequeueService,
+        telemetry: HostFirstLeaseTelemetry,
+        queue_policy: SchedulerQueuePolicy,
+        lease_seconds: float,
         task_cls: type,
         runnable_host_head_cls: type,
         url_ledger_table: str,
@@ -39,7 +52,14 @@ class SchedulerLeaseSelector:
         host_head_lookahead: int,
         host_head_read_model_lookahead: int,
     ) -> None:
-        self._ledger = ledger
+        self._conn = conn
+        self._membership = membership
+        self._leases = leases
+        self._host_heads = host_heads
+        self._requeue = requeue
+        self._telemetry = telemetry
+        self._queue_policy = queue_policy
+        self._lease_seconds = lease_seconds
         self._task_cls = task_cls
         self._runnable_host_head_cls = runnable_host_head_cls
         self._url_ledger_table = url_ledger_table
@@ -48,12 +68,9 @@ class SchedulerLeaseSelector:
         self._host_head_lookahead = host_head_lookahead
         self._host_head_read_model_lookahead = host_head_read_model_lookahead
 
-    def host_head_order_by_sql(
-        self, alias: str, *, latency_ms_sql: str | None = None
-    ) -> str:
+    def host_head_order_by_sql(self, alias: str, *, latency_ms_sql: str | None = None) -> str:
         """Return ORDER BY used to compare the best runnable URL for each host."""
-        latency_penalty = self._ledger._latency_penalty_sql(
-            alias,
+        latency_penalty = self._queue_policy.latency_penalty_sql(
             latency_ms_sql=latency_ms_sql,
         )
         return (
@@ -71,13 +88,12 @@ class SchedulerLeaseSelector:
         runnable_sql: Any,
     ) -> tuple[str, tuple[object, ...]]:
         """Return SQL that derives one ready head URL per host."""
-        table_name = self._ledger._queue_table_sql(physical_queue)
+        table_name = self._membership.queue_table_sql(physical_queue)
         host_head_order = self.host_head_order_by_sql(
             "candidate",
             latency_ms_sql=runnable_sql.latency_ms_sql,
         )
-        latency_penalty = self._ledger._latency_penalty_sql(
-            "candidate",
+        latency_penalty = self._queue_policy.latency_penalty_sql(
             latency_ms_sql=runnable_sql.latency_ms_sql,
         )
         sql = f"""SELECT selected.host,
@@ -110,9 +126,7 @@ class SchedulerLeaseSelector:
                       selected.url ASC"""
         return sql, runnable_sql.params
 
-    def runnable_host_head_sort_key(
-        self, head: Any
-    ) -> tuple[int, int, float, float, float, str]:
+    def runnable_host_head_sort_key(self, head: Any) -> tuple[int, int, float, float, float, str]:
         """Return the canonical host-first comparison key for runnable host heads."""
         return (
             head.host_pending_count,
@@ -138,15 +152,15 @@ class SchedulerLeaseSelector:
             return []
 
         runnable_at = time.time() if now is None else now
-        normalized_physical_queues = self._ledger._normalized_surface_queues(
+        normalized_physical_queues = self._queue_policy.normalized_surface_queues(
             runnable_surface=runnable_surface,
             physical_queues=physical_queues,
         )
         heads: list[Any] = []
 
-        with self._ledger._conn.cursor() as cur:
+        with self._conn.cursor() as cur:
             for physical_queue in normalized_physical_queues:
-                runnable_sql = self._ledger._queue_runnable_sql(
+                runnable_sql = self._queue_policy.queue_runnable_sql(
                     alias="candidate",
                     now=runnable_at,
                     host=host,
@@ -214,11 +228,11 @@ class SchedulerLeaseSelector:
         execution_tiers: list[int] | None = None,
     ) -> Any | None:
         """Lease the next runnable URL, optionally filtered by host."""
-        normalized_physical_queues = self._ledger._normalized_surface_queues(
+        normalized_physical_queues = self._queue_policy.normalized_surface_queues(
             runnable_surface=runnable_surface,
             physical_queues=None,
         )
-        normalized_lease_strategy = self._ledger._normalize_lease_strategy(lease_strategy)
+        normalized_lease_strategy = self._queue_policy.normalize_lease_strategy(lease_strategy)
         if len(normalized_physical_queues) != 1:
             if normalized_lease_strategy == self._lease_strategy_host_first:
                 return self.lease_next_host_first(
@@ -270,14 +284,14 @@ class SchedulerLeaseSelector:
         """Lease from the next selected runnable host head."""
         if physical_queues is None:
             if physical_queue is None:
-                physical_queues = [self._ledger._default_scheduled_physical_queue()]
+                physical_queues = [self._queue_policy.default_scheduled_physical_queue()]
             else:
                 physical_queues = [physical_queue]
-        normalized_physical_queues = self._ledger._normalized_physical_queues(physical_queues)
+        normalized_physical_queues = self._queue_policy.normalized_physical_queues(physical_queues)
 
         now = time.time()
-        self._ledger._recover_leased_locked(now, expired_only=True)
-        self._ledger._conn.commit()
+        self._requeue.recover_leased_locked(now, expired_only=True)
+        self._conn.commit()
 
         try:
             read_model_result = self.lease_next_host_first_from_read_model(
@@ -289,7 +303,7 @@ class SchedulerLeaseSelector:
                 now=now,
             )
         except Exception:
-            self._ledger._conn.rollback()
+            self._conn.rollback()
             logger.debug(
                 "Failed to lease from host runnable-head read model; using bounded fallback",
                 exc_info=True,
@@ -299,9 +313,9 @@ class SchedulerLeaseSelector:
                 read_model="error",
             )
 
-        self._ledger._record_host_first_read_model(read_model_result.read_model)
+        self._telemetry.record_read_model(read_model_result.read_model)
         if read_model_result.task is not None:
-            self._ledger._set_last_lease_diagnostics(
+            self._telemetry.set_last_lease_diagnostics(
                 read_model=read_model_result.read_model,
                 fallback="none",
                 read_model_candidates=read_model_result.candidates,
@@ -311,7 +325,7 @@ class SchedulerLeaseSelector:
             return read_model_result.task
 
         if execution_tiers:
-            self._ledger._set_last_lease_diagnostics(
+            self._telemetry.set_last_lease_diagnostics(
                 read_model=read_model_result.read_model,
                 fallback="tier_filtered",
                 read_model_candidates=read_model_result.candidates,
@@ -327,9 +341,9 @@ class SchedulerLeaseSelector:
             physical_queues=normalized_physical_queues,
             now=now,
         )
-        self._ledger._record_host_first_fallback(fallback_task)
+        self._telemetry.record_fallback(hit=fallback_task is not None)
         fallback = "hit" if fallback_task is not None else "miss"
-        self._ledger._set_last_lease_diagnostics(
+        self._telemetry.set_last_lease_diagnostics(
             read_model=read_model_result.read_model,
             fallback=fallback,
             read_model_candidates=read_model_result.candidates,
@@ -349,7 +363,7 @@ class SchedulerLeaseSelector:
         now: float,
     ) -> HostFirstReadModelResult:
         """Lease host-first candidates from the loose read model first."""
-        candidate_heads = self._ledger.host_runnable_heads_from_read_model(
+        candidate_heads = self._host_heads.read(
             limit=self._host_head_read_model_lookahead,
             host=host,
             exclude_hosts=exclude_hosts,
@@ -376,7 +390,7 @@ class SchedulerLeaseSelector:
                     execution_tier=head.execution_tier,
                 )
             stale_candidates += 1
-            self._ledger._delete_host_runnable_head_candidate(
+            self._host_heads.delete_candidate(
                 physical_queue=head.physical_queue,
                 url=head.url,
             )
@@ -421,23 +435,23 @@ class SchedulerLeaseSelector:
     ) -> Any | None:
         """Lease from one physical queue using a bounded host-first scan."""
         started_at = time.perf_counter()
-        runnable_sql = self._ledger._queue_runnable_sql(
+        runnable_sql = self._queue_policy.queue_runnable_sql(
             alias="candidate",
             now=now,
             host=host,
             exclude_hosts=exclude_hosts,
         )
-        order_by = self._ledger._lease_order_by_sql(
+        order_by = self._queue_policy.lease_order_by_sql(
             "candidate",
             self._lease_strategy_host_first,
             latency_ms_sql=runnable_sql.latency_ms_sql,
         )
         candidate_from = (
-            f"FROM {self._ledger._queue_table_sql(physical_queue)} AS candidate "
+            f"FROM {self._membership.queue_table_sql(physical_queue)} AS candidate "
             f"{runnable_sql.join_sql}"
         )
         try:
-            with self._ledger._conn.cursor() as cur:
+            with self._conn.cursor() as cur:
                 cur.execute(
                     f"""SELECT candidate.url
                         {candidate_from}
@@ -447,9 +461,9 @@ class SchedulerLeaseSelector:
                     (*runnable_sql.params, self._host_head_lookahead),
                 )
                 candidate_urls = [url for (url,) in cur.fetchall()]
-            self._ledger._conn.commit()
+            self._conn.commit()
         except Exception:
-            self._ledger._conn.rollback()
+            self._conn.rollback()
             logger.debug("Failed bounded host-first fallback scan", exc_info=True)
             return None
         logger.debug(
@@ -481,22 +495,22 @@ class SchedulerLeaseSelector:
     ) -> Any | None:
         """Lease using URL-order selection from one physical queue."""
         now = time.time()
-        runnable_sql = self._ledger._queue_runnable_sql(
+        runnable_sql = self._queue_policy.queue_runnable_sql(
             alias="candidate",
             now=now,
             host=host,
             exclude_hosts=exclude_hosts,
         )
         candidate_from = (
-            f"FROM {self._ledger._queue_table_sql(physical_queue)} AS candidate "
+            f"FROM {self._membership.queue_table_sql(physical_queue)} AS candidate "
             f"{runnable_sql.join_sql}"
         )
-        order_by = self._ledger._lease_order_by_sql(
+        order_by = self._queue_policy.lease_order_by_sql(
             "candidate",
             self._lease_strategy_url_order,
             latency_ms_sql=runnable_sql.latency_ms_sql,
         )
-        with self._ledger._conn.cursor() as cur:
+        with self._conn.cursor() as cur:
             cur.execute(
                 f"""SELECT candidate.url
                     {candidate_from}
@@ -512,7 +526,7 @@ class SchedulerLeaseSelector:
             )
             row = cur.fetchone()
         if row is None:
-            self._ledger._conn.commit()
+            self._conn.commit()
             return None
         return self.lease_candidate_url(
             candidate_url=row[0],
@@ -534,22 +548,22 @@ class SchedulerLeaseSelector:
         now: float,
     ) -> Any | None:
         """Lease one concrete candidate URL when it is still runnable and unlocked."""
-        lease_token = self._ledger._leases.new_token()
-        duration = self._ledger._lease_seconds if lease_seconds is None else lease_seconds
+        lease_token = self._leases.new_token()
+        duration = self._lease_seconds if lease_seconds is None else lease_seconds
         lease_expires_at = now + duration
-        runnable_sql = self._ledger._queue_runnable_sql(
+        runnable_sql = self._queue_policy.queue_runnable_sql(
             alias="candidate",
             now=now,
             host=host,
             exclude_hosts=exclude_hosts,
         )
         candidate_from = (
-            f"FROM {self._ledger._queue_table_sql(physical_queue)} AS candidate "
+            f"FROM {self._membership.queue_table_sql(physical_queue)} AS candidate "
             f"{runnable_sql.join_sql}"
         )
 
         try:
-            with self._ledger._conn.cursor() as cur:
+            with self._conn.cursor() as cur:
                 cur.execute(
                     f"""SELECT
                             candidate.url,
@@ -569,14 +583,14 @@ class SchedulerLeaseSelector:
                 )
                 row = cur.fetchone()
                 if row:
-                    self._ledger._delete_queue_entries(cur, [row[0]])
-                    self._ledger._leases.upsert(
+                    self._membership.delete_queue_entries(cur, [row[0]])
+                    self._leases.upsert(
                         cur,
                         [(row[0], row[6], physical_queue, lease_token, lease_expires_at)],
                     )
-            self._ledger._conn.commit()
+            self._conn.commit()
         except Exception:
-            self._ledger._conn.rollback()
+            self._conn.rollback()
             logger.exception("Failed to lease next URL")
             return None
 
@@ -606,11 +620,11 @@ class SchedulerLeaseSelector:
         runnable_surface: str | None = None,
     ) -> list[Any]:
         """Lease a batch of runnable URLs."""
-        normalized_physical_queues = self._ledger._normalized_surface_queues(
+        normalized_physical_queues = self._queue_policy.normalized_surface_queues(
             runnable_surface=runnable_surface,
             physical_queues=None,
         )
-        normalized_lease_strategy = self._ledger._normalize_lease_strategy(lease_strategy)
+        normalized_lease_strategy = self._queue_policy.normalize_lease_strategy(lease_strategy)
         if len(normalized_physical_queues) != 1:
             tasks: list[Any] = []
             while len(tasks) < count:
@@ -642,20 +656,20 @@ class SchedulerLeaseSelector:
             return tasks
 
         now = time.time()
-        lease_token = self._ledger._leases.new_token()
-        duration = self._ledger._lease_seconds if lease_seconds is None else lease_seconds
+        lease_token = self._leases.new_token()
+        duration = self._lease_seconds if lease_seconds is None else lease_seconds
         lease_expires_at = now + duration
-        runnable_sql = self._ledger._queue_runnable_sql(
+        runnable_sql = self._queue_policy.queue_runnable_sql(
             alias="candidate",
             now=now,
             host=host,
             exclude_hosts=exclude_hosts,
         )
         candidate_from = (
-            f"FROM {self._ledger._queue_table_sql(normalized_physical_queues[0])} AS candidate "
+            f"FROM {self._membership.queue_table_sql(normalized_physical_queues[0])} AS candidate "
             f"{runnable_sql.join_sql}"
         )
-        order_by = self._ledger._lease_order_by_sql(
+        order_by = self._queue_policy.lease_order_by_sql(
             "candidate",
             normalized_lease_strategy,
             latency_ms_sql=runnable_sql.latency_ms_sql,
@@ -663,8 +677,8 @@ class SchedulerLeaseSelector:
         params: list[object] = [*runnable_sql.params, count]
 
         try:
-            self._ledger._recover_leased_locked(now, expired_only=True)
-            with self._ledger._conn.cursor() as cur:
+            self._requeue.recover_leased_locked(now, expired_only=True)
+            with self._conn.cursor() as cur:
                 cur.execute(
                     f"""SELECT
                             candidate.url,
@@ -690,8 +704,8 @@ class SchedulerLeaseSelector:
                 )
                 rows = cur.fetchall()
                 if rows:
-                    self._ledger._delete_queue_entries(cur, [row[0] for row in rows])
-                    self._ledger._leases.upsert(
+                    self._membership.delete_queue_entries(cur, [row[0] for row in rows])
+                    self._leases.upsert(
                         cur,
                         [
                             (
@@ -704,9 +718,9 @@ class SchedulerLeaseSelector:
                             for row in rows
                         ],
                     )
-            self._ledger._conn.commit()
+            self._conn.commit()
         except Exception:
-            self._ledger._conn.rollback()
+            self._conn.rollback()
             logger.exception("Failed to lease batch of URLs")
             return []
 

@@ -1,6 +1,18 @@
 from crawler.scheduler_retry_policy import SchedulerRetryPolicy
 
 
+def test_compute_backoff_uses_configured_limits():
+    policy = SchedulerRetryPolicy(
+        retry_backoff_seconds=5.0,
+        max_retry_backoff_seconds=12.0,
+        retry_intent="retry",
+    )
+
+    assert policy.compute_backoff(1) == 5.0
+    assert policy.compute_backoff(2) == 10.0
+    assert policy.compute_backoff(3) == 12.0
+
+
 def test_retry_transition_uses_exponential_backoff_and_retry_intent():
     policy = SchedulerRetryPolicy(
         retry_backoff_seconds=5.0,

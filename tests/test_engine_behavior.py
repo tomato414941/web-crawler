@@ -1,6 +1,7 @@
 """Behavior tests for crawler engine edge cases."""
 
 import asyncio
+from types import SimpleNamespace
 
 import pytest
 
@@ -17,7 +18,7 @@ from crawler.scheduler_membership import (
 from crawler.scheduler_task import CrawlTask, INTENT_EXPLORE, INTENT_REFRESH
 
 
-class FakeLedger:
+class FakeScheduler:
     def __init__(
         self,
         tasks: list[CrawlTask],
@@ -32,6 +33,16 @@ class FakeLedger:
         self.added_batches: list[list[CrawlTask]] = []
         self.lease_calls: list[dict[str, object]] = []
         self.rebuild_calls: list[dict[str, object]] = []
+        self.host_ledger_store = SimpleNamespace(get_many=lambda _hosts: {})
+
+    def reset_host_first_fallback_stats(self):
+        return None
+
+    def host_first_fallback_stats(self):
+        return {}
+
+    def last_lease_diagnostics(self):
+        return {}
 
     def lease_next(
         self,
@@ -53,14 +64,10 @@ class FakeLedger:
             if host in exclude_hosts:
                 continue
             effective_surface = task.runnable_surface or SCHEDULER_SURFACE_RUNNABLE
-            if (
-                runnable_surface == SCHEDULER_SURFACE_NORMAL
-                and effective_surface
-                not in {
-                    SCHEDULER_SURFACE_RUNNABLE,
-                    SCHEDULER_SURFACE_SCHEDULED,
-                }
-            ):
+            if runnable_surface == SCHEDULER_SURFACE_NORMAL and effective_surface not in {
+                SCHEDULER_SURFACE_RUNNABLE,
+                SCHEDULER_SURFACE_SCHEDULED,
+            }:
                 continue
             if (
                 runnable_surface is not None
@@ -122,6 +129,11 @@ class FakeLedger:
     def mark_done(self, url: str, lease_token: str | None = None):
         self.done.append(url)
         return True
+
+    def mark_done_many(self, tasks: list[CrawlTask]):
+        for task in tasks:
+            self.mark_done(task.url, lease_token=task.lease_token)
+        return len(tasks)
 
     def mark_failed(
         self,
@@ -214,19 +226,16 @@ class FakeFetcher:
 
 def test_discovered_tasks_are_capped_by_value_total_and_target_host(monkeypatch):
     monkeypatch.setattr(settings, "admission_target_pending", 50)
-    ledger = FakeLedger([], pending_count=50)
+    ledger = FakeScheduler([], pending_count=50)
     engine = CrawlerEngine(
         start_url="https://seed.example/",
         same_host=False,
-        url_ledger=ledger,
+        scheduler=ledger,
         host_manager=FakeHostManager(),
     )
 
     links = [f"https://a.example/docs/{i}" for i in range(7)]
-    links.extend(
-        f"https://b{i:03d}.example/docs/1"
-        for i in range(159)
-    )
+    links.extend(f"https://b{i:03d}.example/docs/1" for i in range(159))
     links.append("https://low.example/redirect/1")
 
     tasks, admission_counts = engine._build_discovered_tasks_with_admission_counts(
@@ -235,9 +244,7 @@ def test_discovered_tasks_are_capped_by_value_total_and_target_host(monkeypatch)
     )
 
     assert len(tasks) == 160
-    assert [task.url for task in tasks[:6]] == [
-        f"https://a.example/docs/{i}" for i in range(6)
-    ]
+    assert [task.url for task in tasks[:6]] == [f"https://a.example/docs/{i}" for i in range(6)]
     assert all(task.discovery_value >= 0.8 for task in tasks)
     assert admission_counts["extracted"] == 167
     assert admission_counts["admitted"] == 160
@@ -251,7 +258,7 @@ def test_discovered_tasks_explain_low_value_rejections():
     engine = CrawlerEngine(
         start_url="https://seed.example/",
         same_host=False,
-        url_ledger=FakeLedger([]),
+        scheduler=FakeScheduler([]),
         host_manager=FakeHostManager(),
     )
 
@@ -280,7 +287,7 @@ def test_discovered_tasks_limit_external_generic_links_under_target_pressure(mon
     engine = CrawlerEngine(
         start_url="https://seed.example/",
         same_host=False,
-        url_ledger=FakeLedger([], pending_count=866_000),
+        scheduler=FakeScheduler([], pending_count=866_000),
         host_manager=FakeHostManager(),
     )
 
@@ -306,7 +313,7 @@ def test_discovered_tasks_reduce_external_documents_before_new_host_growth(monke
     engine = CrawlerEngine(
         start_url="https://seed.example/",
         same_host=False,
-        url_ledger=FakeLedger([], pending_count=866_000),
+        scheduler=FakeScheduler([], pending_count=866_000),
         host_manager=FakeHostManager(),
     )
 
@@ -329,11 +336,11 @@ def test_discovered_tasks_reduce_external_documents_before_new_host_growth(monke
 
 def test_discovered_tasks_penalize_known_bad_hosts(monkeypatch):
     monkeypatch.setattr(settings, "admission_target_pending", 500_000)
-    ledger = FakeLedger([])
+    ledger = FakeScheduler([])
     engine = CrawlerEngine(
         start_url="https://seed.example/",
         same_host=False,
-        url_ledger=ledger,
+        scheduler=ledger,
         host_manager=FakeHostManager(),
     )
     engine.host_ledger_store = FakeHostLedgerStore(
@@ -357,7 +364,7 @@ def test_discovered_tasks_penalize_known_bad_hosts(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_crawler_marks_client_errors_done_without_saving():
-    ledger = FakeLedger([CrawlTask(url="https://example.com/missing")])
+    ledger = FakeScheduler([CrawlTask(url="https://example.com/missing")])
     host_manager = FakeHostManager()
     fetcher = FakeFetcher(
         [
@@ -372,7 +379,7 @@ async def test_crawler_marks_client_errors_done_without_saving():
 
     async with CrawlerEngine(
         max_pages=10,
-        url_ledger=ledger,
+        scheduler=ledger,
         host_manager=host_manager,
     ) as engine:
         engine.fetcher = fetcher
@@ -386,12 +393,12 @@ async def test_crawler_marks_client_errors_done_without_saving():
 
 @pytest.mark.asyncio
 async def test_crawler_finalizes_robots_denied_without_counting_failure():
-    ledger = FakeLedger([CrawlTask(url="https://example.com/private")])
+    ledger = FakeScheduler([CrawlTask(url="https://example.com/private")])
     host_manager = FakeHostManager(allowed=False)
 
     async with CrawlerEngine(
         max_pages=10,
-        url_ledger=ledger,
+        scheduler=ledger,
         host_manager=host_manager,
     ) as engine:
         results = await engine.crawl()
@@ -407,7 +414,7 @@ async def test_crawler_finalizes_robots_denied_without_counting_failure():
 
 @pytest.mark.asyncio
 async def test_crawler_marks_auth_walls_failed_and_records_host_error():
-    ledger = FakeLedger([CrawlTask(url="https://example.com/forbidden")])
+    ledger = FakeScheduler([CrawlTask(url="https://example.com/forbidden")])
     host_manager = FakeHostManager()
     fetcher = FakeFetcher(
         [
@@ -422,7 +429,7 @@ async def test_crawler_marks_auth_walls_failed_and_records_host_error():
 
     async with CrawlerEngine(
         max_pages=10,
-        url_ledger=ledger,
+        scheduler=ledger,
         host_manager=host_manager,
     ) as engine:
         engine.fetcher = fetcher
@@ -447,7 +454,7 @@ async def test_crawler_marks_auth_walls_failed_and_records_host_error():
 
 @pytest.mark.asyncio
 async def test_crawler_marks_server_errors_failed():
-    ledger = FakeLedger([CrawlTask(url="https://example.com/error")])
+    ledger = FakeScheduler([CrawlTask(url="https://example.com/error")])
     host_manager = FakeHostManager()
     fetcher = FakeFetcher(
         [
@@ -462,7 +469,7 @@ async def test_crawler_marks_server_errors_failed():
 
     async with CrawlerEngine(
         max_pages=10,
-        url_ledger=ledger,
+        scheduler=ledger,
         host_manager=host_manager,
     ) as engine:
         engine.fetcher = fetcher
@@ -478,7 +485,7 @@ async def test_crawler_marks_server_errors_failed():
 
 @pytest.mark.asyncio
 async def test_crawler_marks_parse_errors_failed():
-    ledger = FakeLedger([CrawlTask(url="https://example.com/parse")])
+    ledger = FakeScheduler([CrawlTask(url="https://example.com/parse")])
     host_manager = FakeHostManager()
     fetcher = FakeFetcher(
         [
@@ -493,7 +500,7 @@ async def test_crawler_marks_parse_errors_failed():
 
     async with CrawlerEngine(
         max_pages=10,
-        url_ledger=ledger,
+        scheduler=ledger,
         host_manager=host_manager,
     ) as engine:
         engine.fetcher = fetcher
@@ -514,7 +521,7 @@ async def test_crawler_marks_parse_errors_failed():
 
 @pytest.mark.asyncio
 async def test_crawler_does_not_exceed_max_pages_with_concurrency():
-    ledger = FakeLedger(
+    ledger = FakeScheduler(
         [
             CrawlTask(url="https://example.com/1"),
             CrawlTask(url="https://example.com/2"),
@@ -540,7 +547,7 @@ async def test_crawler_does_not_exceed_max_pages_with_concurrency():
     async with CrawlerEngine(
         max_pages=1,
         concurrency=3,
-        url_ledger=ledger,
+        scheduler=ledger,
         host_manager=host_manager,
     ) as engine:
         engine.fetcher = fetcher
@@ -553,7 +560,7 @@ async def test_crawler_does_not_exceed_max_pages_with_concurrency():
 
 @pytest.mark.asyncio
 async def test_crawler_collects_failure_breakdown():
-    ledger = FakeLedger(
+    ledger = FakeScheduler(
         [
             CrawlTask(url="https://example.com/missing"),
             CrawlTask(url="https://example.com/error"),
@@ -580,7 +587,7 @@ async def test_crawler_collects_failure_breakdown():
     async with CrawlerEngine(
         max_pages=10,
         concurrency=1,
-        url_ledger=ledger,
+        scheduler=ledger,
         host_manager=host_manager,
     ) as engine:
         engine.fetcher = fetcher
@@ -591,7 +598,7 @@ async def test_crawler_collects_failure_breakdown():
 
 @pytest.mark.asyncio
 async def test_crawler_assigns_discovery_metadata_to_outlinks():
-    ledger = FakeLedger([CrawlTask(url="https://example.com/")])
+    ledger = FakeScheduler([CrawlTask(url="https://example.com/")])
     host_manager = FakeHostManager()
     fetcher = FakeFetcher(
         [
@@ -611,7 +618,7 @@ async def test_crawler_assigns_discovery_metadata_to_outlinks():
     async with CrawlerEngine(
         max_pages=1,
         same_host=False,
-        url_ledger=ledger,
+        scheduler=ledger,
         host_manager=host_manager,
         seed_urls=["https://example.com/", "https://docs.example.com/"],
     ) as engine:
@@ -632,7 +639,8 @@ async def test_crawler_assigns_discovery_metadata_to_outlinks():
     assert by_url["https://docs.example.com/guide"].runnable_surface == SCHEDULER_SURFACE_SCHEDULED
     assert by_url["https://docs.example.com/guide"].intent == INTENT_EXPLORE
     assert (
-        by_url["https://external.example.net/project"].runnable_surface == SCHEDULER_SURFACE_SCHEDULED
+        by_url["https://external.example.net/project"].runnable_surface
+        == SCHEDULER_SURFACE_SCHEDULED
     )
     assert by_url["https://external.example.net/project"].intent == INTENT_EXPLORE
 
@@ -640,7 +648,7 @@ async def test_crawler_assigns_discovery_metadata_to_outlinks():
 @pytest.mark.asyncio
 @pytest.mark.asyncio
 async def test_crawler_assigns_known_hosts_to_scheduled_surface():
-    ledger = FakeLedger(
+    ledger = FakeScheduler(
         [CrawlTask(url="https://example.com/")],
         known_counts={"example.com": 8},
     )
@@ -659,7 +667,7 @@ async def test_crawler_assigns_known_hosts_to_scheduled_surface():
     async with CrawlerEngine(
         max_pages=1,
         same_host=False,
-        url_ledger=ledger,
+        scheduler=ledger,
         host_manager=host_manager,
         seed_urls=["https://example.com/"],
     ) as engine:
@@ -673,7 +681,7 @@ async def test_crawler_assigns_known_hosts_to_scheduled_surface():
 
 @pytest.mark.asyncio
 async def test_crawler_treats_pdf_as_metadata_only():
-    ledger = FakeLedger([CrawlTask(url="https://example.com/spec.pdf")])
+    ledger = FakeScheduler([CrawlTask(url="https://example.com/spec.pdf")])
     host_manager = FakeHostManager()
     fetcher = FakeFetcher(
         [
@@ -688,7 +696,7 @@ async def test_crawler_treats_pdf_as_metadata_only():
 
     async with CrawlerEngine(
         max_pages=1,
-        url_ledger=ledger,
+        scheduler=ledger,
         host_manager=host_manager,
     ) as engine:
         engine.fetcher = fetcher
@@ -705,7 +713,7 @@ async def test_crawler_treats_pdf_as_metadata_only():
 
 @pytest.mark.asyncio
 async def test_crawler_completes_metadata_only_audio_without_parsing():
-    ledger = FakeLedger([CrawlTask(url="https://example.com/live.mp3")])
+    ledger = FakeScheduler([CrawlTask(url="https://example.com/live.mp3")])
     host_manager = FakeHostManager()
     fetcher = FakeFetcher(
         [
@@ -723,7 +731,7 @@ async def test_crawler_completes_metadata_only_audio_without_parsing():
 
     async with CrawlerEngine(
         max_pages=1,
-        url_ledger=ledger,
+        scheduler=ledger,
         host_manager=host_manager,
     ) as engine:
         engine.fetcher = fetcher
@@ -741,7 +749,7 @@ async def test_crawler_completes_metadata_only_audio_without_parsing():
 
 @pytest.mark.asyncio
 async def test_crawler_reserves_some_leases_for_breadth():
-    ledger = FakeLedger(
+    ledger = FakeScheduler(
         [
             CrawlTask(url="https://example.com/1"),
             CrawlTask(url="https://example.com/2"),
@@ -762,7 +770,7 @@ async def test_crawler_reserves_some_leases_for_breadth():
     async with CrawlerEngine(
         max_pages=2,
         concurrency=1,
-        url_ledger=ledger,
+        scheduler=ledger,
         host_manager=host_manager,
     ) as engine:
         engine.fetcher = fetcher
@@ -786,7 +794,7 @@ async def test_crawler_reserves_some_leases_for_breadth():
 
 @pytest.mark.asyncio
 async def test_crawler_uses_normal_surface_for_regular_crawls():
-    ledger = FakeLedger([CrawlTask(url="https://example.com/page")])
+    ledger = FakeScheduler([CrawlTask(url="https://example.com/page")])
     host_manager = FakeHostManager()
     fetcher = FakeFetcher(
         [
@@ -799,7 +807,7 @@ async def test_crawler_uses_normal_surface_for_regular_crawls():
     async with CrawlerEngine(
         max_pages=1,
         concurrency=1,
-        url_ledger=ledger,
+        scheduler=ledger,
         host_manager=host_manager,
     ) as engine:
         engine.fetcher = fetcher
@@ -810,7 +818,7 @@ async def test_crawler_uses_normal_surface_for_regular_crawls():
 
 @pytest.mark.asyncio
 async def test_crawler_avoids_leasing_same_host_while_request_in_flight():
-    ledger = FakeLedger(
+    ledger = FakeScheduler(
         [
             CrawlTask(url="https://a.com/1"),
             CrawlTask(url="https://a.com/2"),
@@ -829,7 +837,7 @@ async def test_crawler_avoids_leasing_same_host_while_request_in_flight():
     async with CrawlerEngine(
         max_pages=2,
         concurrency=3,
-        url_ledger=ledger,
+        scheduler=ledger,
         host_manager=host_manager,
     ) as engine:
         engine.max_inflight_requests_per_host = 1
@@ -842,7 +850,7 @@ async def test_crawler_avoids_leasing_same_host_while_request_in_flight():
 
 @pytest.mark.asyncio
 async def test_crawler_allows_second_inflight_for_fast_host_budget():
-    ledger = FakeLedger(
+    ledger = FakeScheduler(
         [
             CrawlTask(url="https://a.com/1"),
             CrawlTask(url="https://a.com/2"),
@@ -862,7 +870,7 @@ async def test_crawler_allows_second_inflight_for_fast_host_budget():
     async with CrawlerEngine(
         max_pages=3,
         concurrency=3,
-        url_ledger=ledger,
+        scheduler=ledger,
         host_manager=host_manager,
     ) as engine:
         engine.max_inflight_requests_per_host = 1
@@ -876,7 +884,7 @@ async def test_crawler_allows_second_inflight_for_fast_host_budget():
 
 @pytest.mark.asyncio
 async def test_crawler_uses_normal_workers_for_scheduled_work():
-    ledger = FakeLedger(
+    ledger = FakeScheduler(
         [
             CrawlTask(
                 url="https://example.com/page",
@@ -897,7 +905,7 @@ async def test_crawler_uses_normal_workers_for_scheduled_work():
     async with CrawlerEngine(
         max_pages=1,
         concurrency=6,
-        url_ledger=ledger,
+        scheduler=ledger,
         host_manager=host_manager,
     ) as engine:
         engine.fetcher = fetcher
@@ -905,8 +913,6 @@ async def test_crawler_uses_normal_workers_for_scheduled_work():
         assert runtime["normal_workers"] == 5
         assert runtime["warm_workers"] == 4
         assert runtime["probing_workers"] == 1
-        assert runtime["runnable_workers"] == 5
-        assert runtime["scheduled_workers"] == 0
         assert runtime["refresh_workers"] == 1
         assert runtime["execution_workers"] == {"warm": 4, "probing": 1, "refresh": 1}
         await engine.crawl()
@@ -917,9 +923,11 @@ async def test_crawler_uses_normal_workers_for_scheduled_work():
 
 @pytest.mark.asyncio
 async def test_crawler_splits_normal_workers_into_execution_tier_lanes():
-    ledger = FakeLedger(
+    ledger = FakeScheduler(
         [
-            CrawlTask(url=f"https://example{i}.com/page", runnable_surface=SCHEDULER_SURFACE_RUNNABLE)
+            CrawlTask(
+                url=f"https://example{i}.com/page", runnable_surface=SCHEDULER_SURFACE_RUNNABLE
+            )
             for i in range(5)
         ]
     )
@@ -940,7 +948,7 @@ async def test_crawler_splits_normal_workers_into_execution_tier_lanes():
     async with CrawlerEngine(
         max_pages=5,
         concurrency=6,
-        url_ledger=ledger,
+        scheduler=ledger,
         host_manager=host_manager,
     ) as engine:
         engine.fetcher = fetcher

@@ -1,4 +1,4 @@
-"""Tests for URL ledger module."""
+"""Tests for scheduler."""
 
 import os
 import time
@@ -22,6 +22,8 @@ from crawler.url_identity import (
     url_identity_length,
 )
 from crawler.scheduler_admission import ADMISSION_DIAGNOSTIC_FIELDS
+from crawler.scheduler_lease_service import SchedulerLeaseService
+from crawler.scheduler_lease_telemetry import HostFirstLeaseTelemetry
 from crawler.scheduler_leases import ACTIVE_LEASES_TABLE as LEASE_TABLE
 from crawler.scheduler_membership import (
     PHYSICAL_QUEUE_TABLES,
@@ -34,9 +36,10 @@ from crawler.scheduler_membership import (
     SCHEDULER_SURFACE_NORMAL,
 )
 from crawler.scheduler_quarantine import BLOCKED_HOST_BACKOFF_TABLE
-from crawler.scheduler_selection import LEASE_STRATEGY_HOST_FIRST
+from crawler.scheduler_queue_policy import LEASE_STRATEGY_HOST_FIRST, SchedulerQueuePolicy
 from crawler.scheduler_task import CrawlTask, INTENT_EXPLORE, INTENT_REFRESH
-from crawler.url_ledger import URL_LEDGER_TABLE, UrlLedger
+from crawler.scheduler import Scheduler
+from crawler.url_ledger_store import URL_LEDGER_TABLE
 from crawler.migrate import apply_migrations
 from crawler.scheduler_membership import HOST_HEAD_UPDATE_DIRTY
 from crawler.urls import normalize_url
@@ -95,12 +98,14 @@ class TestHostFirstFallbackStats:
             def rollback(self):
                 return None
 
-        ledger = UrlLedger.__new__(UrlLedger)
-        ledger._conn = FakeConn()
-        ledger.reset_host_first_fallback_stats()
-        selector = ledger._lease_selector()
-
-        monkeypatch.setattr(ledger, "_recover_leased_locked", lambda *_args, **_kwargs: None)
+        telemetry = HostFirstLeaseTelemetry()
+        selector = SchedulerLeaseService.__new__(SchedulerLeaseService)
+        selector._conn = FakeConn()
+        selector._requeue = SimpleNamespace(recover_leased_locked=lambda *_args, **_kwargs: 0)
+        selector._telemetry = telemetry
+        selector._queue_policy = SimpleNamespace(
+            normalized_physical_queues=lambda queues: queues,
+        )
         monkeypatch.setattr(
             selector,
             "lease_next_host_first_from_read_model",
@@ -118,13 +123,13 @@ class TestHostFirstFallbackStats:
             lambda **_kwargs: next(fallback_results),
         )
 
-        first = ledger._lease_next_host_first(
+        first = selector.lease_next_host_first(
             host=None,
             lease_seconds=None,
             exclude_hosts=None,
             physical_queue=QUEUE_RUNNABLE,
         )
-        second = ledger._lease_next_host_first(
+        second = selector.lease_next_host_first(
             host=None,
             lease_seconds=None,
             exclude_hosts=None,
@@ -133,7 +138,7 @@ class TestHostFirstFallbackStats:
 
         assert first is not None
         assert second is None
-        assert ledger.host_first_fallback_stats() == {
+        assert telemetry.fallback_stats() == {
             "attempts": 2,
             "hits": 1,
             "misses": 1,
@@ -144,13 +149,17 @@ class TestHostFirstFallbackStats:
         }
 
 
-class TestUrlLedgerSqlFragments:
+class TestSchedulerLeaseSql:
     def test_runnable_host_heads_uses_host_state_join(self):
-        ledger = UrlLedger.__new__(UrlLedger)
-        ledger._host_store = object()
+        membership = SimpleNamespace(queue_table_sql=lambda _queue: "scheduler_queue_runnable")
+        queue_policy = SchedulerQueuePolicy(membership)
+        queue_policy.attach_host_store(object())
+        service = SchedulerLeaseService.__new__(SchedulerLeaseService)
+        service._membership = membership
+        service._queue_policy = queue_policy
 
-        runnable_sql = ledger._queue_runnable_sql(alias="candidate", now=1000.0)
-        sql, _params = ledger._runnable_host_heads_sql(
+        runnable_sql = queue_policy.queue_runnable_sql(alias="candidate", now=1000.0)
+        sql, _params = service.runnable_host_heads_sql(
             physical_queue=QUEUE_RUNNABLE,
             runnable_sql=runnable_sql,
         )
@@ -161,7 +170,7 @@ class TestUrlLedgerSqlFragments:
 
 
 @requires_pg
-class TestUrlLedger:
+class TestScheduler:
     @pytest.fixture(autouse=True)
     def ledger(self):
         conn = psycopg2.connect(PG_DSN)
@@ -186,7 +195,7 @@ class TestUrlLedger:
         apply_migrations(PG_DSN)
         conn = psycopg2.connect(PG_DSN)
         conn.autocommit = False
-        f = UrlLedger(conn)
+        f = Scheduler(conn)
         self.host_store = HostStore(conn)
         f.attach_host_store(self.host_store)
         yield f
@@ -547,7 +556,7 @@ class TestUrlLedger:
         assert heads == []
 
     def test_prepare_tasks_prefers_more_urgent_surface(self, ledger):
-        prepared = ledger._prepare_tasks(
+        prepared = ledger.preview_tasks(
             [
                 CrawlTask(
                     url="http://example.com/page",
@@ -1355,9 +1364,7 @@ class TestUrlLedger:
         assert readiness.scheduled == 1
         assert readiness.next_runnable_delay == 10.0
 
-    def test_lease_next_host_first_uses_read_model_before_derived_query(
-        self, ledger, monkeypatch
-    ):
+    def test_lease_next_host_first_uses_read_model_before_derived_query(self, ledger, monkeypatch):
         now = 1000.0
         ledger.place(
             CrawlTask(
@@ -1426,9 +1433,7 @@ class TestUrlLedger:
         assert ledger.last_lease_diagnostics()["fallback"] == "none"
         assert ledger.host_first_fallback_stats()["attempts"] == 0
 
-    def test_lease_next_host_first_falls_back_when_read_model_is_empty(
-        self, ledger, monkeypatch
-    ):
+    def test_lease_next_host_first_falls_back_when_read_model_is_empty(self, ledger, monkeypatch):
         ledger.place(CrawlTask(url="http://a.com/1", added_at=1000))
 
         monkeypatch.setattr(ledger, "host_runnable_heads_from_read_model", lambda **_kwargs: [])
@@ -1644,8 +1649,12 @@ class TestUrlLedger:
         }
 
     def test_lease_next_uses_host_first_breadth_without_branch_rotation(self, ledger):
-        ledger.place(CrawlTask(url="http://a.com/docs/python/1", discovery_value=1.0, added_at=1000))
-        ledger.place(CrawlTask(url="http://a.com/docs/python/2", discovery_value=1.0, added_at=1001))
+        ledger.place(
+            CrawlTask(url="http://a.com/docs/python/1", discovery_value=1.0, added_at=1000)
+        )
+        ledger.place(
+            CrawlTask(url="http://a.com/docs/python/2", discovery_value=1.0, added_at=1001)
+        )
         ledger.place(CrawlTask(url="http://a.com/docs/rust/1", discovery_value=1.0, added_at=2000))
         ledger.place(CrawlTask(url="http://b.com/1", discovery_value=1.5, added_at=5000))
 
@@ -1747,9 +1756,7 @@ class TestUrlLedger:
         )
 
         with ledger._conn.cursor() as cur:
-            cur.execute(
-                f"SELECT url, last_success_at FROM {URL_LEDGER_TABLE} ORDER BY url"
-            )
+            cur.execute(f"SELECT url, last_success_at FROM {URL_LEDGER_TABLE} ORDER BY url")
             rows = cur.fetchall()
             cur.execute(f"SELECT url FROM {LEASE_TABLE} ORDER BY url")
             lease_rows = [url for (url,) in cur.fetchall()]
@@ -1998,8 +2005,8 @@ class TestUrlLedger:
         ledger.place(CrawlTask(url="http://blocked.example/retry", next_fetch_at=now))
 
         with ledger._conn.cursor() as cur:
-            ledger._delete_queue_entries(cur, ["http://blocked.example/retry/"])
-            ledger._insert_blocked_host_backoff_rows(
+            ledger._membership.delete_queue_entries(cur, ["http://blocked.example/retry/"])
+            ledger._requeue.insert_blocked_host_backoff_rows(
                 cur,
                 [
                     (
@@ -2480,15 +2487,6 @@ class TestUrlLedger:
         assert discovery_value == 1.25
         assert scheduler_score == 0.75
 
-    def test_compute_retry_backoff_uses_configured_values(self, ledger):
-        configured = UrlLedger(
-            ledger._conn, retry_backoff_seconds=5.0, max_retry_backoff_seconds=12.0
-        )
-
-        assert configured._compute_retry_backoff(1) == 5.0
-        assert configured._compute_retry_backoff(2) == 10.0
-        assert configured._compute_retry_backoff(3) == 12.0
-
     def test_lease_next_prefers_fresh_url_over_retried_url(self, ledger):
         ledger.place(CrawlTask(url="http://retry.com/page", discovery_value=1.25))
         first = ledger.lease_next(host="retry.com")
@@ -2695,7 +2693,9 @@ class TestUrlLedger:
 
     def test_delay_overcrowded_scheduled_surface_honors_limit(self, ledger):
         for index in range(1, 5):
-            ledger.place(CrawlTask(url=f"http://a.com/{index}", discovery_value=0.55, added_at=1000 + index))
+            ledger.place(
+                CrawlTask(url=f"http://a.com/{index}", discovery_value=0.55, added_at=1000 + index)
+            )
 
         delayed = ledger.delay_overcrowded_scheduled_surface(
             keep_runnable_per_host=1,
@@ -2706,8 +2706,12 @@ class TestUrlLedger:
         assert delayed == 1
 
     def test_delay_overcrowded_scheduled_surface_delays_excess_branch_urls(self, ledger):
-        ledger.place(CrawlTask(url="http://a.com/docs/python/1", discovery_value=0.55, added_at=1000))
-        ledger.place(CrawlTask(url="http://a.com/docs/python/2", discovery_value=0.55, added_at=1001))
+        ledger.place(
+            CrawlTask(url="http://a.com/docs/python/1", discovery_value=0.55, added_at=1000)
+        )
+        ledger.place(
+            CrawlTask(url="http://a.com/docs/python/2", discovery_value=0.55, added_at=1001)
+        )
         ledger.place(CrawlTask(url="http://a.com/docs/rust/1", discovery_value=0.55, added_at=1002))
 
         delayed = ledger.delay_overcrowded_scheduled_surface(

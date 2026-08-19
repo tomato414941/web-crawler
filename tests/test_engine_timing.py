@@ -39,11 +39,24 @@ _ADMISSION_DIAGNOSTICS = {
 }
 
 
-class _FakeLedger:
+class _FakeScheduler:
     def __init__(self, task):
         self._task = task
         self.done = []
         self.added = []
+        self.host_ledger_store = SimpleNamespace(get_many=lambda _hosts: {})
+
+    def reset_host_first_fallback_stats(self):
+        return None
+
+    def host_first_fallback_stats(self):
+        return {}
+
+    def last_lease_diagnostics(self):
+        return {}
+
+    def preview_tasks(self, tasks):
+        return tasks
 
     def lease_next(self, lease_strategy=None, **_kwargs):
         task, self._task = self._task, None
@@ -52,6 +65,11 @@ class _FakeLedger:
     def mark_done(self, url, lease_token=None):
         self.done.append((url, lease_token))
         return True
+
+    def mark_done_many(self, tasks):
+        for task in tasks:
+            self.mark_done(task.url, lease_token=task.lease_token)
+        return len(tasks)
 
     def mark_failed(self, url, retryable, error, lease_token=None):
         raise AssertionError(f"unexpected failure for {url}: {error}")
@@ -296,13 +314,13 @@ def test_timing_accumulator_handles_empty_samples():
 
 
 def test_runtime_stats_include_host_first_fallback_stats():
-    class FallbackLedger(_FakeLedger):
+    class FallbackScheduler(_FakeScheduler):
         def host_first_fallback_stats(self):
             return {"attempts": 2, "hits": 1, "misses": 1}
 
     engine = CrawlerEngine(
         max_pages=0,
-        url_ledger=FallbackLedger(None),
+        scheduler=FallbackScheduler(None),
         host_manager=_FakeHostManager(),
     )
 
@@ -328,10 +346,10 @@ def test_runtime_stats_include_host_first_fallback_stats():
 
 @pytest.mark.asyncio
 async def test_finalizer_and_publisher_drain_success_with_dedicated_executors():
-    ledger = _FakeLedger(None)
+    ledger = _FakeScheduler(None)
     engine = CrawlerEngine(
         max_pages=1,
-        url_ledger=ledger,
+        scheduler=ledger,
         host_manager=_FakeHostManager(),
     )
     storage = _FakeStorage()
@@ -384,7 +402,7 @@ async def test_finalizer_and_publisher_drain_success_with_dedicated_executors():
 
 @pytest.mark.asyncio
 async def test_finalizer_survives_item_error_and_drains_next_item():
-    class FlakyLedger(_FakeLedger):
+    class FlakyScheduler(_FakeScheduler):
         def __init__(self):
             super().__init__(None)
             self.fail_once = True
@@ -395,10 +413,10 @@ async def test_finalizer_survives_item_error_and_drains_next_item():
                 raise RuntimeError("boom")
             return super().mark_done(url, lease_token=lease_token)
 
-    ledger = FlakyLedger()
+    ledger = FlakyScheduler()
     engine = CrawlerEngine(
         max_pages=1,
-        url_ledger=ledger,
+        scheduler=ledger,
         host_manager=_FakeHostManager(),
     )
     engine._finalize_queue = asyncio.Queue()
@@ -444,7 +462,7 @@ async def test_publisher_survives_item_error_and_drains_next_item(monkeypatch):
 
     engine = CrawlerEngine(
         max_pages=1,
-        url_ledger=_FakeLedger(None),
+        scheduler=_FakeScheduler(None),
         host_manager=_FakeHostManager(),
     )
     monkeypatch.setattr(settings, "publisher_batch_size", 1)
@@ -477,10 +495,10 @@ async def test_publisher_survives_item_error_and_drains_next_item(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_success_finalizer_records_operation_breakdown():
-    ledger = _FakeLedger(None)
+    ledger = _FakeScheduler(None)
     engine = CrawlerEngine(
         max_pages=1,
-        url_ledger=ledger,
+        scheduler=ledger,
         host_manager=_FakeHostManager(),
     )
     host_store = _RecordingHostStore()
@@ -515,7 +533,7 @@ async def test_success_finalizer_records_operation_breakdown():
 
 @pytest.mark.asyncio
 async def test_success_finalizer_batches_scheduler_mutations():
-    class BatchLedger(_FakeLedger):
+    class BatchScheduler(_FakeScheduler):
         def __init__(self):
             super().__init__(None)
             self.discover_batches = []
@@ -543,10 +561,10 @@ async def test_success_finalizer_batches_scheduler_mutations():
             self.success_batches.append(list(records))
             return len(records)
 
-    ledger = BatchLedger()
+    ledger = BatchScheduler()
     engine = CrawlerEngine(
         max_pages=2,
-        url_ledger=ledger,
+        scheduler=ledger,
         host_manager=_FakeHostManager(),
     )
     host_store = BatchHostStore()
@@ -595,7 +613,7 @@ async def test_success_finalizer_batches_scheduler_mutations():
 
 
 def test_success_finalizer_caps_fallback_mark_done_count(caplog):
-    class PartialBatchLedger(_FakeLedger):
+    class PartialBatchScheduler(_FakeScheduler):
         def __init__(self):
             super().__init__(None)
             self.done_batches = []
@@ -604,10 +622,10 @@ def test_success_finalizer_caps_fallback_mark_done_count(caplog):
             self.done_batches.append(list(tasks))
             return 1
 
-    ledger = PartialBatchLedger()
+    ledger = PartialBatchScheduler()
     engine = CrawlerEngine(
         max_pages=2,
-        url_ledger=ledger,
+        scheduler=ledger,
         host_manager=_FakeHostManager(),
     )
     parsed_pages = [
@@ -633,10 +651,10 @@ def test_success_finalizer_caps_fallback_mark_done_count(caplog):
 
 @pytest.mark.asyncio
 async def test_skipped_finalizer_records_mark_done_breakdown():
-    ledger = _FakeLedger(None)
+    ledger = _FakeScheduler(None)
     engine = CrawlerEngine(
         max_pages=1,
-        url_ledger=ledger,
+        scheduler=ledger,
         host_manager=_FakeHostManager(),
     )
     skipped = _SkippedTask(
@@ -657,7 +675,7 @@ async def test_skipped_finalizer_records_mark_done_breakdown():
 
 @pytest.mark.asyncio
 async def test_failed_finalizer_records_mark_failed_breakdown():
-    class FailedLedger(_FakeLedger):
+    class FailedScheduler(_FakeScheduler):
         def __init__(self):
             super().__init__(None)
             self.failed = []
@@ -666,10 +684,10 @@ async def test_failed_finalizer_records_mark_failed_breakdown():
             self.failed.append((url, retryable, error, backoff_seconds, lease_token))
             return True
 
-    ledger = FailedLedger()
+    ledger = FailedScheduler()
     engine = CrawlerEngine(
         max_pages=1,
-        url_ledger=ledger,
+        scheduler=ledger,
         host_manager=_FakeHostManager(),
     )
     host_store = _RecordingHostStore()
@@ -695,18 +713,16 @@ async def test_failed_finalizer_records_mark_failed_breakdown():
     assert finalized.timings.finalizer.mark_failed_ms >= 0
     assert finalized.timings.finalizer.total_ms >= 0
     assert host_store.failures == [("example.com", 2.0)]
-    assert ledger.failed == [
-        ("https://example.com/fail", True, "timeout", 2.0, "lease-1")
-    ]
+    assert ledger.failed == [("https://example.com/fail", True, "timeout", 2.0, "lease-1")]
 
 
 @pytest.mark.asyncio
 async def test_crawler_engine_records_stage_timings():
-    ledger = _FakeLedger(CrawlTask(url="https://example.com/", lease_token="lease-1"))
+    ledger = _FakeScheduler(CrawlTask(url="https://example.com/", lease_token="lease-1"))
     engine = CrawlerEngine(
         start_url="https://example.com/",
         max_pages=1,
-        url_ledger=ledger,
+        scheduler=ledger,
         host_manager=_FakeHostManager(),
     )
     engine.fetcher = _FakeFetcher()
@@ -782,7 +798,7 @@ async def test_crawler_engine_records_stage_timings():
     assert ledger.added
 
 
-class _SlowLedger(_FakeLedger):
+class _SlowScheduler(_FakeScheduler):
     def place_many(self, tasks):
         time.sleep(0.25)
         super().place_many(tasks)
@@ -790,11 +806,11 @@ class _SlowLedger(_FakeLedger):
 
 @pytest.mark.asyncio
 async def test_parse_scheduler_delay_does_not_extend_fetch_slot():
-    ledger = _SlowLedger(CrawlTask(url="https://example.com/", lease_token="lease-1"))
+    ledger = _SlowScheduler(CrawlTask(url="https://example.com/", lease_token="lease-1"))
     engine = CrawlerEngine(
         start_url="https://example.com/",
         max_pages=1,
-        url_ledger=ledger,
+        scheduler=ledger,
         host_manager=_FakeHostManager(),
     )
     engine.fetcher = _FakeFetcher()
@@ -816,11 +832,11 @@ class _SlowStorage(_FakeStorage):
 
 @pytest.mark.asyncio
 async def test_queue_wait_metrics_record_backpressure():
-    ledger = _FakeLedger(CrawlTask(url="https://example.com/", lease_token="lease-1"))
+    ledger = _FakeScheduler(CrawlTask(url="https://example.com/", lease_token="lease-1"))
     engine = CrawlerEngine(
         start_url="https://example.com/",
         max_pages=1,
-        url_ledger=ledger,
+        scheduler=ledger,
         host_manager=_FakeHostManager(),
     )
     engine.fetcher = _FakeFetcher()
@@ -842,7 +858,7 @@ async def test_queue_wait_metrics_record_backpressure():
 async def test_publish_result_records_output_writer_breakdown():
     engine = CrawlerEngine(
         max_pages=1,
-        url_ledger=_FakeLedger(None),
+        scheduler=_FakeScheduler(None),
         host_manager=_FakeHostManager(),
     )
     storage = _FakeStorage()

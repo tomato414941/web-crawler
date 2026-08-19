@@ -20,7 +20,7 @@ from crawler.scheduler_membership import (
     QUEUE_REFRESH,
 )
 from crawler.scheduler_quarantine import BLOCKED_HOST_BACKOFF_TABLE
-from crawler.url_ledger import URL_LEDGER_TABLE
+from crawler.url_ledger_store import URL_LEDGER_TABLE
 
 pytestmark = pytest.mark.skipif(
     not os.environ.get("TEST_POSTGRES_DSN"),
@@ -183,9 +183,10 @@ def test_scheduler_invariant_checker_detects_url_identity_violations(conn):
     assert report.url_hash_duplicates == 1
     assert report.url_too_long == 1
     assert report.samples["url_hash_missing"][0]["url"] == "https://example.com/missing"
-    assert report.samples["url_hash_mismatches"][0]["url_hash"] != report.samples[
-        "url_hash_mismatches"
-    ][0]["expected_url_hash"]
+    assert (
+        report.samples["url_hash_mismatches"][0]["url_hash"]
+        != report.samples["url_hash_mismatches"][0]["expected_url_hash"]
+    )
     assert report.samples["url_hash_duplicates"][0]["url_hash"] == "duplicate-hash"
     assert report.samples["url_length_mismatches"][0]["url"] == "https://example.com/bad-length"
     assert report.samples["url_too_long"][0]["url"] == long_url

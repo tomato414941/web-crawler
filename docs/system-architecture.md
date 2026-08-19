@@ -35,6 +35,23 @@ At the project level, the crawler should converge toward these layers:
 
 These layers should be separable even if the runtime still shares tables or code paths today.
 
+### Runtime ownership
+
+The implementation exposes `Scheduler` as the only scheduler entry point used by the crawler and
+daemon. It composes focused components with one-way dependencies:
+
+- `UrlLedgerStore` persists durable URL facts.
+- `SchedulerMembershipStore` persists live queue membership.
+- `ExecutionLeaseStore` persists execution ownership.
+- `HostRunnableHeadStore` maintains the host-first read model.
+- `SchedulerAdmissionService`, `SchedulerLeaseService`, `SchedulerCompletionService`,
+  `SchedulerRequeueService`, and `SchedulerQuarantineService` own their named transitions.
+- `SchedulerQueuePolicy` owns queue topology, readiness SQL, and ordering policy without persistence.
+- `SchedulerObservability` reads scheduler state without mutating it.
+
+Services receive only their required stores and policies. They must not call back into `Scheduler`.
+`ledger` names are reserved for durable facts and must not be used for the scheduler as a whole.
+
 ## 1. URL Ledger
 
 The URL ledger owns durable URL identity and durable URL history.

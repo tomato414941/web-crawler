@@ -100,7 +100,7 @@ but move normal host-first candidate selection onto an incremental loose read mo
 Implemented order:
 
 1. Replace correlated `host_state` subqueries in host-first candidate selection with a single join.
-   This is now implemented in the URL ledger query builder.
+   This is implemented by `SchedulerLeaseService` using `SchedulerQueuePolicy`.
 2. Evaluate setting PostgreSQL JIT off for crawler sessions or for the specific hot-path query.
 3. Recheck whether `COUNT(*) OVER (PARTITION BY host)` is still too expensive at production scale.
    Production measurement shows it remains the dominant cost.

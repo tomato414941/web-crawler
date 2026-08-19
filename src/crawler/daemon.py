@@ -17,7 +17,7 @@ from .host_store import HostStore
 from .discovery import seed_hosts_from_urls
 from .storage import PgStorage
 from .scheduler_membership import SCHEDULER_SURFACE_RUNNABLE
-from .url_ledger import UrlLedger
+from .scheduler import Scheduler
 
 logger = logging.getLogger(__name__)
 
@@ -44,13 +44,6 @@ def _format_error_breakdown(error_breakdown: dict[str, int]) -> str:
     )
     parts = [f"{name}={error_breakdown[name]}" for name in ordered if error_breakdown.get(name)]
     return ", ".join(parts) if parts else "none"
-
-
-def _daemon_readiness(url_ledger: object):
-    """Read daemon gating readiness, preferring the lightweight runtime projection."""
-    if hasattr(url_ledger, "daemon_readiness"):
-        return url_ledger.daemon_readiness()
-    return url_ledger.readiness()
 
 
 class CrawlDaemon:
@@ -175,25 +168,25 @@ class CrawlDaemon:
         )
 
         storage = None
-        url_ledger = None
+        scheduler = None
         cycle = 0
 
         try:
             while not self._shutdown:
                 # Ensure DB connection
                 if storage is None:
-                    storage, url_ledger = await self._connect()
+                    storage, scheduler = await self._connect()
                     if storage is None:
                         await self._interruptible_sleep(self._idle_sleep)
                         continue
 
                 try:
-                    bootstrapped = self._bootstrap_scheduler(url_ledger)
+                    bootstrapped = self._bootstrap_scheduler(scheduler)
                     if bootstrapped:
                         logger.info("Bootstrapped scheduler with %d seed URLs", bootstrapped)
                     maintenance = self._policy.prepare_scheduler(
-                        url_ledger,
-                        refresh_stale=lambda: self._refresh_stale(storage, url_ledger),
+                        scheduler,
+                        refresh_stale=lambda: self._refresh_stale(storage, scheduler),
                     )
                     if maintenance["admitted"]:
                         logger.info(
@@ -227,10 +220,10 @@ class CrawlDaemon:
                             "Promoted %d blocked-host-backoff URLs for retry",
                             maintenance["promoted"],
                         )
-                    self._refresh_dirty_host_runnable_heads(url_ledger)
-                    self._repair_host_runnable_heads(url_ledger)
+                    self._refresh_dirty_host_runnable_heads(scheduler)
+                    self._repair_host_runnable_heads(scheduler)
 
-                    readiness = _daemon_readiness(url_ledger)
+                    readiness = scheduler.daemon_readiness()
                     pending = readiness.pending
                     if pending == 0:
                         logger.info("No URLs to crawl, sleeping %ds", self._idle_sleep)
@@ -272,7 +265,7 @@ class CrawlDaemon:
                                 "next_runnable_delay": next_runnable_delay,
                             }
                             | self._scheduler_runtime_views(
-                                url_ledger,
+                                scheduler,
                                 readiness=readiness,
                             ),
                         )
@@ -282,7 +275,7 @@ class CrawlDaemon:
                     cycle += 1
                     logger.info("Cycle %d: %d runnable / %d pending URLs", cycle, runnable, pending)
                     start = time.time()
-                    cycle_result = await self._run_cycle(storage, url_ledger)
+                    cycle_result = await self._run_cycle(storage, scheduler)
                     host_first_fallback = {
                         "attempts": 0,
                         "hits": 0,
@@ -361,7 +354,7 @@ class CrawlDaemon:
                     )
                     cycle_payload.update(
                         self._scheduler_runtime_views(
-                            url_ledger,
+                            scheduler,
                             readiness=readiness,
                         )
                     )
@@ -373,7 +366,7 @@ class CrawlDaemon:
                 except (psycopg2.OperationalError, psycopg2.InterfaceError) as e:
                     logger.error("Database connection lost: %s", e)
                     storage = self._close_storage(storage)
-                    url_ledger = None
+                    scheduler = None
                     await self._interruptible_sleep(_RECONNECT_DELAY)
 
         finally:
@@ -469,7 +462,7 @@ class CrawlDaemon:
 
     def _scheduler_runtime_views(
         self,
-        _url_ledger: UrlLedger,
+        _url_ledger: Scheduler,
         *,
         readiness,
         _now: float | None = None,
@@ -501,49 +494,39 @@ class CrawlDaemon:
     def _add_scheduler_runtime_views(
         self,
         payload: dict[str, object],
-        url_ledger: UrlLedger,
+        scheduler: Scheduler,
     ) -> dict[str, object]:
         """Attach scheduler readiness views to a runtime payload when available."""
         try:
-            readiness = _daemon_readiness(url_ledger)
-            payload.update(self._scheduler_runtime_views(url_ledger, readiness=readiness))
+            readiness = scheduler.daemon_readiness()
+            payload.update(self._scheduler_runtime_views(scheduler, readiness=readiness))
         except Exception:
             logger.debug("Failed to attach scheduler runtime views", exc_info=True)
         return payload
 
-    def _repair_host_runnable_heads(self, url_ledger: UrlLedger) -> None:
+    def _repair_host_runnable_heads(self, scheduler: Scheduler) -> None:
         """Run bounded host-head repair before daemon cycle gating."""
         if self._host_head_repair_limit <= 0:
             return
-        repair_fn = getattr(url_ledger, "repair_host_runnable_heads", None)
-        if not callable(repair_fn):
-            return
         try:
-            summary = repair_fn(limit=self._host_head_repair_limit)
+            summary = scheduler.repair_host_runnable_heads(limit=self._host_head_repair_limit)
         except Exception:
             logger.debug("Host runnable-head repair failed", exc_info=True)
             return
-        as_dict = getattr(summary, "as_dict", None)
-        self._last_host_head_repair = (
-            as_dict() if callable(as_dict) else dict(summary) if isinstance(summary, dict) else {}
-        )
+        self._last_host_head_repair = summary.as_dict()
 
-    def _refresh_dirty_host_runnable_heads(self, url_ledger: UrlLedger) -> None:
+    def _refresh_dirty_host_runnable_heads(self, scheduler: Scheduler) -> None:
         """Refresh bounded dirty host-head rows before daemon cycle gating."""
         if self._host_head_dirty_refresh_limit <= 0:
             return
-        refresh_fn = getattr(url_ledger, "refresh_dirty_host_runnable_heads", None)
-        if not callable(refresh_fn):
-            return
         try:
-            summary = refresh_fn(limit=self._host_head_dirty_refresh_limit)
+            summary = scheduler.refresh_dirty_host_runnable_heads(
+                limit=self._host_head_dirty_refresh_limit
+            )
         except Exception:
             logger.debug("Dirty host runnable-head refresh failed", exc_info=True)
             return
-        as_dict = getattr(summary, "as_dict", None)
-        self._last_host_head_dirty_refresh = (
-            as_dict() if callable(as_dict) else dict(summary) if isinstance(summary, dict) else {}
-        )
+        self._last_host_head_dirty_refresh = summary.as_dict()
 
     def _report_runtime_stats(self, stop_event: threading.Event, engine: CrawlerEngine) -> None:
         """Persist crawler runtime stats for API consumers.
@@ -552,20 +535,20 @@ class CrawlDaemon:
         workers does not stall runtime visibility.
         """
         storage = PgStorage(self._postgres_dsn)
-        url_ledger = UrlLedger(storage.conn) if hasattr(storage, "conn") else None
+        scheduler = Scheduler(storage.conn) if hasattr(storage, "conn") else None
         try:
             while not stop_event.is_set():
                 if engine._running:
                     payload = engine.snapshot_runtime_stats()
-                    if url_ledger is not None:
-                        payload = self._add_scheduler_runtime_views(payload, url_ledger)
+                    if scheduler is not None:
+                        payload = self._add_scheduler_runtime_views(payload, scheduler)
                     self._persist_runtime_payload(storage, payload)
                 stop_event.wait(1.0)
         finally:
             with contextlib.suppress(Exception):
                 payload = engine.snapshot_runtime_stats()
-                if url_ledger is not None:
-                    payload = self._add_scheduler_runtime_views(payload, url_ledger)
+                if scheduler is not None:
+                    payload = self._add_scheduler_runtime_views(payload, scheduler)
                 self._persist_runtime_payload(storage, payload)
             storage.close()
 
@@ -573,28 +556,28 @@ class CrawlDaemon:
         self,
         storage: PgStorage,
         engine: CrawlerEngine,
-        url_ledger: UrlLedger | None = None,
+        scheduler: Scheduler | None = None,
     ) -> None:
         """Store one last runtime snapshot on cycle boundaries."""
         payload = engine.snapshot_runtime_stats()
-        if url_ledger is not None:
-            payload = self._add_scheduler_runtime_views(payload, url_ledger)
+        if scheduler is not None:
+            payload = self._add_scheduler_runtime_views(payload, scheduler)
         self._persist_runtime_payload(storage, payload)
 
-    async def _connect(self) -> tuple[PgStorage | None, UrlLedger | None]:
+    async def _connect(self) -> tuple[PgStorage | None, Scheduler | None]:
         """Connect to Postgres and initialize scheduler state."""
         for attempt in range(1, _MAX_RECONNECT_ATTEMPTS + 1):
             try:
                 storage = PgStorage(self._postgres_dsn)
-                url_ledger = UrlLedger(storage.conn)
+                scheduler = Scheduler(storage.conn)
                 self._host_store = HostStore(storage.conn, default_delay=self._delay)
-                url_ledger.attach_host_store(self._host_store)
+                scheduler.attach_host_store(self._host_store)
                 self._host_manager.attach_store(self._host_store)
-                self._host_manager.attach_host_ledger_store(url_ledger.host_ledger_store)
-                count = url_ledger.recover_leased(expired_only=False)
+                self._host_manager.attach_host_ledger_store(scheduler.host_ledger_store)
+                count = scheduler.recover_leased(expired_only=False)
                 if count:
                     logger.info("Recovered %d leased URLs", count)
-                prime = self._policy.prime_scheduler(url_ledger)
+                prime = self._policy.prime_scheduler(scheduler)
                 if prime["admitted"]:
                     logger.info(
                         "Admitted %d discovered URLs into the scheduled surface", prime["admitted"]
@@ -605,15 +588,13 @@ class CrawlDaemon:
                         prime["rebalanced"],
                     )
                 if prime["scheduled"]:
-                    logger.info(
-                        "Delayed %d low-score scheduled-surface URLs", prime["scheduled"]
-                    )
+                    logger.info("Delayed %d low-score scheduled-surface URLs", prime["scheduled"])
                 if prime["promoted"]:
                     logger.info(
                         "Promoted %d blocked-host-backoff URLs for retry", prime["promoted"]
                     )
                 logger.info("Database connected (attempt %d)", attempt)
-                return storage, url_ledger
+                return storage, scheduler
             except psycopg2.OperationalError as e:
                 logger.error(
                     "Connection attempt %d/%d failed: %s", attempt, _MAX_RECONNECT_ATTEMPTS, e
@@ -632,7 +613,7 @@ class CrawlDaemon:
         return None
 
     async def _run_cycle(
-        self, storage: PgStorage, url_ledger: UrlLedger
+        self, storage: PgStorage, scheduler: Scheduler
     ) -> tuple[int, dict[str, int], dict[str, object], str, dict[str, int]]:
         """Run one crawl cycle."""
         runtime_storage = PgStorage(self._postgres_dsn)
@@ -643,13 +624,13 @@ class CrawlDaemon:
                 delay=self._delay,
                 concurrency=self._concurrency,
                 pg_storage=storage,
-                url_ledger=url_ledger,
+                scheduler=scheduler,
                 host_manager=self._host_manager,
                 host_store=self._host_store,
                 seed_urls=self._seeds,
             ) as engine:
                 self._engine = engine
-                self._flush_runtime_stats(runtime_storage, engine, url_ledger)
+                self._flush_runtime_stats(runtime_storage, engine, scheduler)
                 reporter_stop = threading.Event()
                 reporter = threading.Thread(
                     target=self._report_runtime_stats,
@@ -662,7 +643,7 @@ class CrawlDaemon:
                 finally:
                     reporter_stop.set()
                     reporter.join(timeout=2.0)
-                    self._flush_runtime_stats(runtime_storage, engine, url_ledger)
+                    self._flush_runtime_stats(runtime_storage, engine, scheduler)
                     self._engine = None
                 return (
                     engine.pages_crawled,
@@ -674,17 +655,17 @@ class CrawlDaemon:
         finally:
             runtime_storage.close()
 
-    def _ensure_runnable_supply(self, url_ledger: UrlLedger):
+    def _ensure_runnable_supply(self, scheduler: Scheduler):
         """Keep the runnable scheduler surface supplied from existing scheduler state."""
-        before_pending = url_ledger.pending_count()
-        before_runnable = url_ledger.runnable_count(runnable_surface=SCHEDULER_SURFACE_RUNNABLE)
-        before_runnable_pending = url_ledger.pending_count(
+        before_pending = scheduler.pending_count()
+        before_runnable = scheduler.runnable_count(runnable_surface=SCHEDULER_SURFACE_RUNNABLE)
+        before_runnable_pending = scheduler.pending_count(
             runnable_surface=SCHEDULER_SURFACE_RUNNABLE
         )
-        self._policy.ensure_runnable_supply(url_ledger)
-        after_pending = url_ledger.pending_count()
-        after_runnable = url_ledger.runnable_count(runnable_surface=SCHEDULER_SURFACE_RUNNABLE)
-        after_runnable_pending = url_ledger.pending_count(
+        self._policy.ensure_runnable_supply(scheduler)
+        after_pending = scheduler.pending_count()
+        after_runnable = scheduler.runnable_count(runnable_surface=SCHEDULER_SURFACE_RUNNABLE)
+        after_runnable_pending = scheduler.pending_count(
             runnable_surface=SCHEDULER_SURFACE_RUNNABLE
         )
         if after_pending == before_pending and after_runnable == before_runnable:
@@ -700,27 +681,27 @@ class CrawlDaemon:
             self._min_runnable_supply_count,
         )
 
-    def _bootstrap_scheduler(self, url_ledger: UrlLedger) -> int:
+    def _bootstrap_scheduler(self, scheduler: Scheduler) -> int:
         """Seed an empty scheduler through a dedicated bootstrap path."""
-        if url_ledger.pending_count() != 0:
+        if scheduler.pending_count() != 0:
             return 0
-        return url_ledger.upsert_seeds(self._seeds, discovery_value=2.0)
+        return scheduler.upsert_seeds(self._seeds, discovery_value=2.0)
 
-    def _promote_blocked_retry(self, url_ledger: UrlLedger) -> int:
+    def _promote_blocked_retry(self, scheduler: Scheduler) -> int:
         """Restore a small cooled-down subset from blocked retry queue when runnable work is thin."""
-        return self._policy.promote_blocked_retry(url_ledger)
+        return self._policy.promote_blocked_retry(scheduler)
 
-    def _retire_blocked_retry(self, url_ledger: UrlLedger) -> int:
+    def _retire_blocked_retry(self, scheduler: Scheduler) -> int:
         """Retire long-stuck blocked retry URLs out of pending scheduler state."""
-        return self._policy.retire_blocked_retry(url_ledger)
+        return self._policy.retire_blocked_retry(scheduler)
 
-    def _restore_recovered_blocked_retry(self, url_ledger: UrlLedger) -> int:
+    def _restore_recovered_blocked_retry(self, scheduler: Scheduler) -> int:
         """Restore healthy blocked retry hosts before using bounded retry promotion."""
-        return self._policy.restore_recovered_blocked_retry(url_ledger)
+        return self._policy.restore_recovered_blocked_retry(scheduler)
 
-    def _refresh_stale(self, storage: PgStorage, url_ledger: UrlLedger):
+    def _refresh_stale(self, storage: PgStorage, scheduler: Scheduler):
         """Re-queue stale pages for refresh intent."""
-        pending = url_ledger.pending_count()
+        pending = scheduler.pending_count()
         if pending >= self._cycle_pages:
             return
 
@@ -743,7 +724,7 @@ class CrawlDaemon:
             )
             candidate_urls = [url for (url,) in cur.fetchall()]
 
-        count = url_ledger.requeue_refresh_urls(
+        count = scheduler.requeue_refresh_urls(
             candidate_urls,
             next_fetch_at=now,
         )

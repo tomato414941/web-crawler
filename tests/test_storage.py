@@ -23,7 +23,7 @@ from crawler.scheduler_membership import (
     QUEUE_SCHEDULED,
 )
 from crawler.scheduler_quarantine import BLOCKED_HOST_BACKOFF_TABLE
-from crawler.url_ledger import URL_LEDGER_TABLE
+from crawler.url_ledger_store import URL_LEDGER_TABLE
 
 # Skip all tests if no Postgres available
 pytestmark = pytest.mark.skipif(

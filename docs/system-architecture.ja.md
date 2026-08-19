@@ -35,6 +35,23 @@ project 全体としては、crawler は次の layer へ収束していくべき
 
 runtime 上で table や code path をまだ共有していても、概念上はこれらを分離できるべきである。
 
+### Runtime の責務配置
+
+実装では、crawler と daemon が使う scheduler の入口を `Scheduler` だけにする。
+`Scheduler` は次の狭い component を一方向の依存で組み立てる。
+
+- `UrlLedgerStore`: durable な URL fact の永続化
+- `SchedulerMembershipStore`: live queue membership の永続化
+- `ExecutionLeaseStore`: execution ownership の永続化
+- `HostRunnableHeadStore`: host-first read model の維持
+- `SchedulerAdmissionService`、`SchedulerLeaseService`、`SchedulerCompletionService`、
+  `SchedulerRequeueService`、`SchedulerQuarantineService`: 名前に対応する状態遷移
+- `SchedulerQueuePolicy`: 永続化を行わない queue topology、readiness SQL、ordering policy
+- `SchedulerObservability`: scheduler state の読み取り専用集計
+
+各 service は必要な store と policy だけを受け取り、`Scheduler`へ逆参照しない。
+`ledger`という名前は durable fact に限定し、scheduler 全体の名前には使わない。
+
 ## 1. URL Ledger
 
 URL ledger は durable な URL identity と durable な URL history を持つ。

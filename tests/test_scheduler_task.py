@@ -2,7 +2,7 @@
 
 import time
 
-import crawler.url_ledger as url_ledger
+import crawler.scheduler as scheduler
 from crawler.scheduler_task import CrawlTask
 
 
@@ -39,12 +39,15 @@ def test_crawl_task_sets_current_time_when_added_at_is_missing():
     assert before <= task.added_at <= after
 
 
-def test_url_ledger_does_not_reexport_scheduler_definitions():
+def test_scheduler_does_not_reexport_owned_definitions():
     old_exports = {
         "CrawlTask",
         "INTENT_EXPLORE",
         "SCHEDULER_SURFACE_NORMAL",
         "LEASE_STRATEGY_HOST_FIRST",
+        "UrlLedger",
+        "SchedulerKernel",
+        "SchedulerTopology",
     }
 
-    assert old_exports.isdisjoint(vars(url_ledger))
+    assert old_exports.isdisjoint(vars(scheduler))

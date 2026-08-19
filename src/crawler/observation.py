@@ -14,7 +14,7 @@ from typing import Any
 from .scheduler_leases import ACTIVE_LEASES_TABLE
 from .scheduler_membership import PHYSICAL_QUEUE_TABLES
 from .scheduler_quarantine import BLOCKED_HOST_BACKOFF_TABLE
-from .url_ledger import URL_LEDGER_TABLE
+from .url_ledger_store import URL_LEDGER_TABLE
 from .scheduler_invariants import SchedulerInvariantChecker
 from .host_ledger import HOST_LEDGER_TABLE
 
@@ -49,7 +49,9 @@ def read_operator_observation(
     storage_shape = _read_storage_shape(storage.conn)
     scheduler_invariants = None
     if include_scheduler_invariants:
-        scheduler_invariants = SchedulerInvariantChecker(storage.conn).check(sample_limit=0).to_dict()
+        scheduler_invariants = (
+            SchedulerInvariantChecker(storage.conn).check(sample_limit=0).to_dict()
+        )
     return build_operator_observation(stats, storage_shape, scheduler_invariants)
 
 
@@ -115,9 +117,7 @@ def build_operator_observation(
             "finalize_queue_size": _int(backpressure.get("finalize_queue_size")),
             "publish_queue_size": _int(backpressure.get("publish_queue_size")),
             "parse_queue_wait_max_ms": _float(backpressure.get("parse_queue_wait_max_ms")),
-            "finalize_queue_wait_max_ms": _float(
-                backpressure.get("finalize_queue_wait_max_ms")
-            ),
+            "finalize_queue_wait_max_ms": _float(backpressure.get("finalize_queue_wait_max_ms")),
             "publish_queue_wait_max_ms": _float(backpressure.get("publish_queue_wait_max_ms")),
         },
         "admission_control": {
@@ -127,18 +127,14 @@ def build_operator_observation(
             "min_score": _float(admission_control.get("min_score")),
             "per_page_cap": _int(admission_control.get("per_page_cap")),
             "per_target_host_cap": _int(admission_control.get("per_target_host_cap")),
-            "new_external_host_cap": _int(
-                admission_control.get("new_external_host_cap")
-            ),
+            "new_external_host_cap": _int(admission_control.get("new_external_host_cap")),
         },
         "discovery_admission": {
             "extracted": _int(discovery_admission.get("extracted")),
             "admitted": _int(discovery_admission.get("admitted")),
             "rejected": _int(discovery_admission.get("rejected")),
             "admit_ratio": discovery_admission.get("admit_ratio"),
-            "rejection_reasons": dict(
-                _mapping(discovery_admission.get("rejection_reasons"))
-            ),
+            "rejection_reasons": dict(_mapping(discovery_admission.get("rejection_reasons"))),
         },
         "storage": {
             "tiers": list(storage_shape.get("tiers", [])),

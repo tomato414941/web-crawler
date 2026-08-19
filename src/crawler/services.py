@@ -17,7 +17,7 @@ if TYPE_CHECKING:
     from .host_store import HostStore
     from .pipeline import FailedTask, ParsedPage, SkippedTask
     from .storage import PgStorage
-    from .url_ledger import UrlLedger
+    from .scheduler import Scheduler
 
 
 logger = logging.getLogger(__name__)
@@ -92,7 +92,7 @@ class FinalizerService:
     def __init__(
         self,
         *,
-        scheduler: "UrlLedger",
+        scheduler: "Scheduler",
         host_store: "HostStore | None",
         executor: concurrent.futures.ThreadPoolExecutor | None,
         host_key_for_url: Callable[[str], str],
@@ -112,34 +112,19 @@ class FinalizerService:
         )
         total_started = time.perf_counter()
         if all_new_tasks:
-            if hasattr(self.scheduler, "discover_many") and hasattr(
-                self.scheduler, "admit_discovered_tasks"
-            ):
-                discover_started = time.perf_counter()
-                self.scheduler.discover_many(all_new_tasks)
-                telemetry.discover_ms = _elapsed_ms(discover_started)
-                admit_started = time.perf_counter()
-                self.scheduler.admit_discovered_tasks(all_new_tasks)
-                telemetry.admit_ms = _elapsed_ms(admit_started)
-                diagnostics_fn = getattr(self.scheduler, "last_admission_diagnostics", None)
-                if callable(diagnostics_fn):
-                    diagnostics = diagnostics_fn()
-                    for field in FINALIZER_TIMING_FIELDS:
-                        if field.startswith("admit_") and field in diagnostics:
-                            setattr(telemetry, field, float(diagnostics[field]))
-            else:
-                admit_started = time.perf_counter()
-                self.scheduler.place_many(all_new_tasks)
-                telemetry.admit_ms = _elapsed_ms(admit_started)
+            discover_started = time.perf_counter()
+            self.scheduler.discover_many(all_new_tasks)
+            telemetry.discover_ms = _elapsed_ms(discover_started)
+            admit_started = time.perf_counter()
+            self.scheduler.admit_discovered_tasks(all_new_tasks)
+            telemetry.admit_ms = _elapsed_ms(admit_started)
+            diagnostics = self.scheduler.last_admission_diagnostics()
+            for field in FINALIZER_TIMING_FIELDS:
+                if field.startswith("admit_") and field in diagnostics:
+                    setattr(telemetry, field, float(diagnostics[field]))
 
         mark_started = time.perf_counter()
-        if hasattr(self.scheduler, "mark_done_many"):
-            updated_count = self.scheduler.mark_done_many([parsed.task for parsed in parsed_pages])
-        else:
-            updated_count = 0
-            for parsed in parsed_pages:
-                if self.scheduler.mark_done(parsed.task.url, lease_token=parsed.task.lease_token):
-                    updated_count += 1
+        updated_count = self.scheduler.mark_done_many([parsed.task for parsed in parsed_pages])
         if updated_count != len(parsed_pages):
             fallback_count = 0
             for parsed in parsed_pages:
@@ -370,7 +355,9 @@ class PublisherService:
                 for result in results:
                     result.timings.publisher.total_ms = total_ms
                 raise timed_save_many.error
-            for result, save_result in zip(results, timed_save_many.save_results or [], strict=False):
+            for result, save_result in zip(
+                results, timed_save_many.save_results or [], strict=False
+            ):
                 storage_telemetry = getattr(save_result, "telemetry", None)
                 if storage_telemetry is not None:
                     result.timings.storage = storage_telemetry

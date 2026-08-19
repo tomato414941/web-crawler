@@ -273,7 +273,7 @@ def test_scheduler_check_repair_host_heads_prints_repair_summary(monkeypatch):
                 },
             )()
 
-    class FakeLedger:
+    class FakeScheduler:
         def __init__(self, conn):
             self.conn = conn
 
@@ -295,7 +295,7 @@ def test_scheduler_check_repair_host_heads_prints_repair_summary(monkeypatch):
 
     monkeypatch.setattr("crawler.storage.PgStorage", FakeStorage)
     monkeypatch.setattr("crawler.scheduler_invariants.SchedulerInvariantChecker", FakeChecker)
-    monkeypatch.setattr("crawler.url_ledger.UrlLedger", FakeLedger)
+    monkeypatch.setattr("crawler.scheduler.Scheduler", FakeScheduler)
 
     result = runner.invoke(
         app,

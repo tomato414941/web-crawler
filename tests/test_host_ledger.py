@@ -7,7 +7,7 @@ import pytest
 
 from crawler.host_ledger import HOST_LEDGER_TABLE, HostLedgerStore, registrable_domain_for_host
 from crawler.migrate import apply_migrations
-from crawler.url_ledger import URL_LEDGER_TABLE
+from crawler.url_ledger_store import URL_LEDGER_TABLE
 
 PG_DSN = os.environ.get("TEST_POSTGRES_DSN", "postgresql://crawler:crawler@localhost/crawldb_test")
 
