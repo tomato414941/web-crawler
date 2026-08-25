@@ -243,15 +243,11 @@ class CrawlerEngine:
             self.scheduler.attach_host_store(self.host_store)
         self.host_ledger_store = self.scheduler.host_ledger_store
 
-        if host_manager:
+        if host_manager is not None:
             self.host_manager = host_manager
             self._owns_host_manager = False
-            if hasattr(self.host_manager, "attach_store"):
-                self.host_manager.attach_store(self.host_store)
-            if self.host_ledger_store is not None and hasattr(
-                self.host_manager, "attach_host_ledger_store"
-            ):
-                self.host_manager.attach_host_ledger_store(self.host_ledger_store)
+            self.host_manager.attach_store(self.host_store)
+            self.host_manager.attach_host_ledger_store(self.host_ledger_store)
         else:
             self.host_manager = HostManager(
                 user_agent=settings.user_agent,
@@ -341,15 +337,11 @@ class CrawlerEngine:
         if self._owns_host_manager:
             await self.host_manager.close()
 
-    def _host_store_for_success_tracking(self) -> HostStore | None:
-        """Return the durable store used for host success resets when available."""
-        return getattr(self.host_manager, "_host_store", None)
-
     def _finalizer_service(self) -> FinalizerService:
         """Build the finalizer service for the current runtime wiring."""
         return FinalizerService(
             scheduler=self._finalizer_scheduler or self.scheduler,
-            host_store=self._finalizer_host_store or self._host_store_for_success_tracking(),
+            host_store=self._finalizer_host_store or self.host_store,
             storage=self._finalizer_storage or self.pg_storage,
             executor=self._finalizer_executor,
             output_writer=self.output_writer,
@@ -367,10 +359,7 @@ class CrawlerEngine:
 
     def _record_error_runtime(self, url: str) -> float:
         """Advance runtime failure state without requiring durable writes on the event loop."""
-        if hasattr(self.host_manager, "record_error_runtime"):
-            return self.host_manager.record_error_runtime(url)
-        self.host_manager.record_error(url)
-        return 0.0
+        return self.host_manager.record_error_runtime(url)
 
     def _build_retryable_failed_task(
         self,
@@ -407,13 +396,11 @@ class CrawlerEngine:
     def _host_inflight_budget(self, host_key: str) -> int:
         """Resolve the allowed concurrent in-flight requests for a host."""
         default_budget = self.max_inflight_requests_per_host
-        if hasattr(self.host_manager, "get_host_budget"):
-            budget = self.host_manager.get_host_budget(
-                host_key,
-                default_budget=default_budget,
-            )
-            return max(1, int(budget))
-        return default_budget
+        budget = self.host_manager.get_host_budget(
+            host_key,
+            default_budget=default_budget,
+        )
+        return max(1, int(budget))
 
     async def _finalize_failed_task(self, failed: _FailedTask) -> CrawlFailure:
         """Apply scheduler mutations for a failed crawl outside fetch and parse workers."""
@@ -527,11 +514,8 @@ class CrawlerEngine:
         hosts = sorted({host_key(link) for link in links if self._is_valid_url(link)})
         if not hosts or self.host_ledger_store is None:
             return {}
-        get_many = getattr(self.host_ledger_store, "get_many", None)
-        if not callable(get_many):
-            return {}
         try:
-            records = get_many(hosts)
+            records = self.host_ledger_store.get_many(hosts)
         except Exception:
             logger.debug("Failed to read host admission context", exc_info=True)
             return {}
@@ -584,17 +568,9 @@ class CrawlerEngine:
                 timings=timings,
                 process_started=process_started,
             )
-        robots_allowed = (
-            robots_decision.allowed
-            if hasattr(robots_decision, "allowed")
-            else bool(robots_decision)
-        )
-        if hasattr(robots_decision, "elapsed_ms"):
-            timings.robots = robots_decision
-            timings.robots_ms = robots_decision.elapsed_ms
-        else:
-            timings.robots_ms = _elapsed_ms(robots_started)
-        if not robots_allowed:
+        timings.robots = robots_decision
+        timings.robots_ms = robots_decision.elapsed_ms
+        if not robots_decision.allowed:
             timings.precheck_ms = _elapsed_ms(precheck_started)
             return _SkippedTask(
                 task=task,
@@ -603,8 +579,6 @@ class CrawlerEngine:
                 process_started=process_started,
             )
 
-        if not hasattr(robots_decision, "elapsed_ms"):
-            timings.robots_ms = _elapsed_ms(robots_started)
         rate_limit_started = time.perf_counter()
         try:
             await self.host_manager.wait_for_rate_limit(url)
@@ -668,10 +642,7 @@ class CrawlerEngine:
                             backoff_seconds=backoff_seconds,
                         )
                     else:
-                        if hasattr(self.host_manager, "record_success_runtime"):
-                            self.host_manager.record_success_runtime(url)
-                        else:
-                            self.host_manager.record_success(url)
+                        self.host_manager.record_success_runtime(url)
                         failed = _FailedTask(
                             task=task,
                             failure=CrawlFailure(
@@ -950,16 +921,9 @@ class CrawlerEngine:
 
     async def _finalize_parsed_pages(self, parsed_pages: list[_ParsedPage]) -> list[CrawlResult]:
         """Persist parsed pages before applying scheduler completion mutations."""
-        if self._finalizer_executor is not None and hasattr(
-            self.host_manager,
-            "record_success_runtime",
-        ):
-            record_success_runtime = self.host_manager.record_success_runtime
-        else:
-            record_success_runtime = self.host_manager.record_success
         return await self._finalizer_service().finalize_parsed_pages(
             parsed_pages,
-            record_success_runtime=record_success_runtime,
+            record_success_runtime=self.host_manager.record_success_runtime,
         )
 
     async def _finalizer(self):
