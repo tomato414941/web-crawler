@@ -25,16 +25,16 @@ Current priorities:
 Runtime flow:
 
 ```text
-lease -> fetch -> parse -> finalize -> persist
+lease -> fetch -> parse -> finalize
 ```
 
 Responsibilities:
 
 - `fetch` obtains responses while respecting host pacing and fetch admission.
 - `parse` extracts content and discovered links.
-- `finalize` applies scheduler mutations, discovery admission, host success/failure state, and URL
-  completion/failure transitions.
-- `persist` writes page metadata to PostgreSQL, response bodies to R2, and optional JSONL output.
+- `finalize` writes successful observations to PostgreSQL, R2, and optional JSONL output before
+  applying discovery admission, host state, and URL completion; failures and skips record their
+  scheduler outcome without page persistence.
 
 Primary operator surfaces:
 
@@ -81,7 +81,7 @@ Captured on 2026-05-10 from the private Docker Compose deployment on
 - admission: `drain` mode, target pending 500,000, admission pending about 1.02M
 - latest admission sample: 3-7% admit ratio, mostly rejected by score threshold and
   per-target-host caps
-- queue pressure: parse/finalize/publish queues shallow during the sample window
+- queue pressure: parse/finalize queues shallow during the sample window
 - scheduler check: `ok=true`, zero invariant violations
 - egress smoke: passed for current direct-egress deployment; public HTTP remained reachable and
   representative local/private/link-local/metadata/CGNAT/benchmark targets did not connect
@@ -269,32 +269,20 @@ Before changing this, verify:
 
 Do not set `CRAWLER_ALLOW_PRIVATE_NETWORK_EGRESS=true` in production.
 
-### 5. Publisher and persistence throughput
+### 5. Finalization and persistence throughput
 
-Investigate whether the publisher path is still the next bottleneck after batched persistence.
-Use `crawler observe`, `/stats`, and timing summaries to decide whether to:
-
-- [ ] decide whether publisher pressure is actually the next bottleneck
-- [ ] increase publisher worker count if supported by DB write latency and queue depth
-- [ ] tune publisher batch size / wait time if queue wait remains high
-- [ ] inspect R2 write latency if storage timing dominates
-- [ ] adjust queue maxsize together with publisher lane count
-
-Do not tune publisher concurrency without checking database write latency and publish queue depth
-in the same observation window.
-
-### 6. Finalizer backpressure
-
-If `finalize_queue_wait_ms` dominates while publish pressure stays low, inspect finalizer operation
-timings before changing scheduler logic. Candidate areas:
+If `finalize_queue_wait_ms` dominates, use `crawler observe`, `/stats`, and timing summaries to
+identify whether storage or scheduler completion is responsible before changing the pipeline.
+Candidate areas:
 
 - [ ] decide whether finalizer pressure is actually the next bottleneck
+- [ ] inspect R2 write latency if storage timing dominates
 - [ ] discovery admission batching
 - [ ] host success/failure bulk updates
 - [ ] URL completion/failure batch mutation
 - [ ] dirty host-head refresh behavior after queue membership changes
 
-### 7. Frontier and storage growth control
+### 6. Frontier and storage growth control
 
 If URL ledger growth or stored content growth is too fast for the intended broad-web crawl, tune
 generic policy before adding allowlists:
@@ -307,7 +295,7 @@ generic policy before adding allowlists:
 - [ ] consider host-level or registrable-domain-level budgets only after URL-level and per-page caps are
   shown insufficient
 
-### 8. Documentation and operator workflow
+### 7. Documentation and operator workflow
 
 Keep README and docs aligned with runtime behavior:
 
