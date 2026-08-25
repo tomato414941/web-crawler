@@ -15,7 +15,6 @@ from .scheduler_task import CrawlTask
 
 logger = logging.getLogger(__name__)
 
-PUBLISHER_SENTINEL = object()
 FINALIZER_SENTINEL = object()
 PARSER_SENTINEL = object()
 
@@ -33,15 +32,6 @@ class FetchedPage:
     response: Response
     timings: CrawlStageTimings
     process_started: float
-    enqueued_at: float = 0.0
-    queue_depth: int = 0
-
-
-@dataclass(slots=True)
-class PublishItem:
-    """Finalized result handed from finalizer to publisher."""
-
-    result: CrawlResult
     enqueued_at: float = 0.0
     queue_depth: int = 0
 
@@ -116,25 +106,19 @@ class PipelineQueues:
         self.maxsize = max(0, maxsize)
         self.parse: asyncio.Queue[FetchedPage | object] = asyncio.Queue(maxsize=self.maxsize)
         self.finalize: asyncio.Queue[FinalizeItem | object] = asyncio.Queue(maxsize=self.maxsize)
-        self.publish: asyncio.Queue[PublishItem | object] = asyncio.Queue(maxsize=self.maxsize)
         self.parse_stats = QueueStats()
         self.finalize_stats = QueueStats()
-        self.publish_stats = QueueStats()
 
     def snapshot(self) -> dict[str, object]:
         return {
             "parse_queue_size": self.parse.qsize(),
             "finalize_queue_size": self.finalize.qsize(),
-            "publish_queue_size": self.publish.qsize(),
             "parse_queue_wait_last_ms": self.parse_stats.wait_last_ms,
             "finalize_queue_wait_last_ms": self.finalize_stats.wait_last_ms,
-            "publish_queue_wait_last_ms": self.publish_stats.wait_last_ms,
             "parse_queue_wait_max_ms": self.parse_stats.wait_max_ms,
             "finalize_queue_wait_max_ms": self.finalize_stats.wait_max_ms,
-            "publish_queue_wait_max_ms": self.publish_stats.wait_max_ms,
             "parse_queue_depth_max": self.parse_stats.depth_max,
             "finalize_queue_depth_max": self.finalize_stats.depth_max,
-            "publish_queue_depth_max": self.publish_stats.depth_max,
             "pipeline_queue_maxsize": self.maxsize,
         }
 
@@ -143,16 +127,12 @@ class PipelineQueues:
         return {
             "parse_queue_size": 0,
             "finalize_queue_size": 0,
-            "publish_queue_size": 0,
             "parse_queue_wait_last_ms": 0.0,
             "finalize_queue_wait_last_ms": 0.0,
-            "publish_queue_wait_last_ms": 0.0,
             "parse_queue_wait_max_ms": 0.0,
             "finalize_queue_wait_max_ms": 0.0,
-            "publish_queue_wait_max_ms": 0.0,
             "parse_queue_depth_max": 0,
             "finalize_queue_depth_max": 0,
-            "publish_queue_depth_max": 0,
             "pipeline_queue_maxsize": maxsize,
         }
 
@@ -217,15 +197,13 @@ class FinalizeStage:
         self,
         *,
         finalize_queue: asyncio.Queue[FinalizeItem | object],
-        publish_queue: asyncio.Queue[PublishItem | object] | None,
         finalize_stats: QueueStats,
-        publish_stats: QueueStats,
         liveness: StageLiveness,
         finalize_parsed_page: Callable[[ParsedPage], Awaitable[CrawlResult]],
         finalize_skipped_task: Callable[[SkippedTask], Awaitable[SkippedTask]],
         finalize_failed_task: Callable[[FailedTask], Awaitable[CrawlFailure]],
-        publish_result: Callable[[CrawlResult], Awaitable[None]],
         record_timing: Callable[[str, CrawlStageTimings | None], None],
+        record_failure_category: Callable[[str], None],
         progress: Callable[[], tuple[int, int]],
         format_timings: Callable[[CrawlStageTimings | None], str],
         finalize_parsed_pages: Callable[[list[ParsedPage]], Awaitable[list[CrawlResult]]]
@@ -234,16 +212,14 @@ class FinalizeStage:
         success_batch_wait_ms: float = 0.0,
     ) -> None:
         self.finalize_queue = finalize_queue
-        self.publish_queue = publish_queue
         self.finalize_stats = finalize_stats
-        self.publish_stats = publish_stats
         self.liveness = liveness
         self.finalize_parsed_page = finalize_parsed_page
         self.finalize_parsed_pages = finalize_parsed_pages
         self.finalize_skipped_task = finalize_skipped_task
         self.finalize_failed_task = finalize_failed_task
-        self.publish_result = publish_result
         self.record_timing = record_timing
+        self.record_failure_category = record_failure_category
         self.progress = progress
         self.format_timings = format_timings
         self.success_batch_size = max(1, success_batch_size)
@@ -339,6 +315,7 @@ class FinalizeStage:
         except Exception:
             for _queue_item in batch:
                 self.liveness.fail()
+                self.record_failure_category("completion_error")
             logger.exception(
                 "Finalizer failed while processing success batch: size=%d",
                 len(parsed_pages),
@@ -354,16 +331,6 @@ class FinalizeStage:
         return [await self.finalize_parsed_page(parsed) for parsed in parsed_pages]
 
     async def _handle_success_result(self, result: CrawlResult) -> None:
-        if self.publish_queue is not None:
-            publish_item = PublishItem(
-                result=result,
-                enqueued_at=time.perf_counter(),
-                queue_depth=self.publish_queue.qsize(),
-            )
-            self.publish_stats.record_enqueue(publish_item.queue_depth)
-            await self.publish_queue.put(publish_item)
-            return
-        await self.publish_result(result)
         self.record_timing("success", result.timings)
         pages_crawled, max_pages = self.progress()
         logger.info(
@@ -380,25 +347,15 @@ class FinalizeStage:
             parsed.result.timings.finalize_queue_wait_ms = queue_wait_ms
             parsed.result.timings.finalize_queue_depth = queue_item.queue_depth
             result = await self.finalize_parsed_page(parsed)
-            if self.publish_queue is not None:
-                publish_item = PublishItem(
-                    result=result,
-                    enqueued_at=time.perf_counter(),
-                    queue_depth=self.publish_queue.qsize(),
-                )
-                self.publish_stats.record_enqueue(publish_item.queue_depth)
-                await self.publish_queue.put(publish_item)
-            else:
-                await self.publish_result(result)
-                self.record_timing("success", result.timings)
-                pages_crawled, max_pages = self.progress()
-                logger.info(
-                    "[%d/%d] %s (%s)",
-                    pages_crawled,
-                    max_pages,
-                    result.url,
-                    self.format_timings(result.timings),
-                )
+            self.record_timing("success", result.timings)
+            pages_crawled, max_pages = self.progress()
+            logger.info(
+                "[%d/%d] %s (%s)",
+                pages_crawled,
+                max_pages,
+                result.url,
+                self.format_timings(result.timings),
+            )
         elif queue_item.skipped is not None:
             skipped = queue_item.skipped
             skipped.timings.finalize_queue_wait_ms = queue_wait_ms
@@ -512,7 +469,9 @@ class FetchStage:
         claim_page_slot: Callable[[], Awaitable[bool]],
         release_page_slot: Callable[[bool], Awaitable[None]],
         lease_task: Callable[[float], Awaitable[tuple[CrawlTask | None, Any]]],
-        process_url: Callable[[CrawlTask], Awaitable[FetchedPage | FailedTask | SkippedTask | None]],
+        process_url: Callable[
+            [CrawlTask], Awaitable[FetchedPage | FailedTask | SkippedTask | None]
+        ],
         release_active_host: Callable[[str], Awaitable[None]],
         record_failure_category: Callable[[str], None],
         worker_patience: int,
@@ -642,118 +601,3 @@ class FetchStage:
         self.parse_stats.record_enqueue(fetched.queue_depth)
         fetched.enqueued_at = time.perf_counter()
         await self.parse_queue.put(fetched)
-
-
-class PublishStage:
-    """Drain processed crawl results and perform blocking writes."""
-
-    def __init__(
-        self,
-        *,
-        publish_queue: asyncio.Queue[PublishItem | object],
-        publish_stats: QueueStats,
-        liveness: StageLiveness,
-        publish_result: Callable[[CrawlResult], Awaitable[None]],
-        record_timing: Callable[[str, CrawlStageTimings | None], None],
-        progress: Callable[[], tuple[int, int]],
-        format_timings: Callable[[CrawlStageTimings | None], str],
-        publish_results: Callable[[list[CrawlResult]], Awaitable[None]] | None = None,
-        success_batch_size: int = 1,
-        success_batch_wait_ms: float = 0.0,
-    ) -> None:
-        self.publish_queue = publish_queue
-        self.publish_stats = publish_stats
-        self.liveness = liveness
-        self.publish_result = publish_result
-        self.publish_results = publish_results
-        self.record_timing = record_timing
-        self.progress = progress
-        self.format_timings = format_timings
-        self.success_batch_size = max(1, success_batch_size)
-        self.success_batch_wait_seconds = max(0.0, success_batch_wait_ms / 1000.0)
-        self._pending_item: PublishItem | object | None = None
-
-    async def run(self) -> None:
-        while True:
-            item = await self._next_item()
-            if item is PUBLISHER_SENTINEL:
-                self.publish_queue.task_done()
-                break
-
-            await self._process_success_batch(item)
-
-    async def _next_item(self) -> PublishItem | object:
-        if self._pending_item is not None:
-            item = self._pending_item
-            self._pending_item = None
-            return item
-        return await self.publish_queue.get()
-
-    def _start_item(self, queue_item: PublishItem) -> None:
-        result = queue_item.result
-        self.liveness.start(url=result.url)
-        result.timings.publish_queue_wait_ms = self.publish_stats.record_dequeue(
-            queue_item.enqueued_at,
-            queue_item.queue_depth,
-        )
-        result.timings.publish_queue_depth = queue_item.queue_depth
-
-    async def _collect_success_batch(self, first_item: PublishItem) -> list[PublishItem]:
-        batch = [first_item]
-        waited = False
-        while len(batch) < self.success_batch_size:
-            try:
-                if self.publish_queue.qsize() > 0:
-                    item = self.publish_queue.get_nowait()
-                elif not waited and self.success_batch_wait_seconds > 0:
-                    waited = True
-                    item = await asyncio.wait_for(
-                        self.publish_queue.get(),
-                        timeout=self.success_batch_wait_seconds,
-                    )
-                else:
-                    break
-            except (asyncio.QueueEmpty, TimeoutError):
-                break
-            if item is PUBLISHER_SENTINEL:
-                self._pending_item = item
-                break
-            batch.append(item)
-        return batch
-
-    async def _publish_batch(self, results: list[CrawlResult]) -> None:
-        if self.publish_results is not None:
-            await self.publish_results(results)
-            return
-        for result in results:
-            await self.publish_result(result)
-
-    async def _process_success_batch(self, first_item: PublishItem) -> None:
-        batch = await self._collect_success_batch(first_item)
-        results = [queue_item.result for queue_item in batch]
-        for queue_item in batch:
-            self._start_item(queue_item)
-        try:
-            await self._publish_batch(results)
-            for result in results:
-                self.record_timing("success", result.timings)
-                pages_crawled, max_pages = self.progress()
-                logger.info(
-                    "[%d/%d] %s (%s)",
-                    pages_crawled,
-                    max_pages,
-                    result.url,
-                    self.format_timings(result.timings),
-                )
-                self.liveness.complete()
-        except Exception:
-            for result in results:
-                self.liveness.fail()
-                logger.exception(
-                    "Publisher failed while processing queued crawl result: url=%s",
-                    result.url,
-                )
-        finally:
-            self.liveness.clear_current()
-            for _queue_item in batch:
-                self.publish_queue.task_done()

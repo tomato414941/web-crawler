@@ -29,10 +29,8 @@ class CrawlerRuntime:
         self.pipeline_queues: PipelineQueues | None = None
         self.parse_queue: asyncio.Queue[object] | None = None
         self.finalize_queue: asyncio.Queue[object] | None = None
-        self.publish_queue: asyncio.Queue[object] | None = None
         self.parser_liveness = StageLiveness(include_kind=True)
         self.finalizer_liveness = StageLiveness(include_kind=True)
-        self.publisher_liveness = StageLiveness()
         self.timing_summary = TelemetryAccumulator()
         self.admission_control: dict[str, object] = {}
 
@@ -50,9 +48,6 @@ class CrawlerRuntime:
             queue_payload["finalize_queue_size"] = (
                 self.finalize_queue.qsize() if self.finalize_queue is not None else 0
             )
-            queue_payload["publish_queue_size"] = (
-                self.publish_queue.qsize() if self.publish_queue is not None else 0
-            )
         return queue_payload
 
     def record_timing(self, outcome: str, timings: CrawlStageTimings | None) -> None:
@@ -61,10 +56,8 @@ class CrawlerRuntime:
             timings.pipeline = PipelineTelemetry(
                 parse_queue_wait_ms=timings.parse_queue_wait_ms,
                 finalize_queue_wait_ms=timings.finalize_queue_wait_ms,
-                publish_queue_wait_ms=timings.publish_queue_wait_ms,
                 parse_queue_depth=timings.parse_queue_depth,
                 finalize_queue_depth=timings.finalize_queue_depth,
-                publish_queue_depth=timings.publish_queue_depth,
             )
         self.timing_summary.record(outcome, timings)
 
@@ -105,7 +98,6 @@ class CycleSnapshotBuilder:
             **runtime.queue_payload(),
             "parser_liveness": runtime.parser_liveness.snapshot(),
             "finalizer_liveness": runtime.finalizer_liveness.snapshot(),
-            "publisher_liveness": runtime.publisher_liveness.snapshot(),
             "failure_breakdown": dict(runtime.failure_counts),
             "timing_summary": runtime.timing_summary.snapshot(),
             "admission_control": dict(runtime.admission_control),

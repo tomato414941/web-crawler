@@ -43,7 +43,6 @@ from .host_store import HostStore
 from .pipeline import (
     FINALIZER_SENTINEL as _FINALIZER_SENTINEL,
     PARSER_SENTINEL as _PARSER_SENTINEL,
-    PUBLISHER_SENTINEL as _PUBLISHER_SENTINEL,
     FailedTask as _FailedTask,
     FetchStage,
     FetchedPage as _FetchedPage,
@@ -52,8 +51,6 @@ from .pipeline import (
     ParseStage,
     ParsedPage as _ParsedPage,
     PipelineQueues,
-    PublishItem as _PublishItem,
-    PublishStage,
     QueueStats,
     SkippedTask as _SkippedTask,
     StageLiveness,
@@ -69,7 +66,7 @@ from .scheduler import Scheduler
 from .output import StreamingOutputWriter
 from .result import CrawlFailure, CrawlResult, CrawlStageTimings
 from .runtime import CrawlerRuntime, CycleSnapshotBuilder
-from .services import FinalizerService, PublisherService
+from .services import FinalizerService
 from .telemetry import (
     FetchTelemetry,
     LeaseTelemetry,
@@ -144,8 +141,8 @@ def _format_timings(timings: CrawlStageTimings | None) -> str:
         "lease=%0.1fms precheck=%0.1fms robots=%0.1fms rate_limit=%0.1fms "
         "fetch=%0.1fms request=%0.1fms body=%0.1fms parse=%0.1fms "
         "scheduler=%0.1fms persist=%0.1fms output=%0.1fms "
-        "parse_q_wait=%0.1fms finalize_q_wait=%0.1fms publish_q_wait=%0.1fms process=%0.1fms slot=%0.1fms "
-        "parse_q_depth=%d finalize_q_depth=%d publish_q_depth=%d"
+        "parse_q_wait=%0.1fms finalize_q_wait=%0.1fms process=%0.1fms slot=%0.1fms "
+        "parse_q_depth=%d finalize_q_depth=%d"
     ) % (
         timings.lease_ms,
         timings.precheck_ms,
@@ -160,12 +157,10 @@ def _format_timings(timings: CrawlStageTimings | None) -> str:
         timings.output_ms,
         timings.parse_queue_wait_ms,
         timings.finalize_queue_wait_ms,
-        timings.publish_queue_wait_ms,
         timings.process_ms,
         timings.slot_ms,
         timings.parse_queue_depth,
         timings.finalize_queue_depth,
-        timings.publish_queue_depth,
     )
 
 
@@ -183,7 +178,6 @@ def _format_timing_summary(summary: dict[str, object]) -> str:
         "scheduler_ms",
         "persist_ms",
         "finalize_queue_wait_ms",
-        "publish_queue_wait_ms",
     )
     parts = []
     for field in fields:
@@ -235,8 +229,6 @@ class CrawlerEngine:
             self.normal_workers,
             settings.execution_probing_worker_ratio,
         )
-        self._publisher_executor: concurrent.futures.ThreadPoolExecutor | None = None
-        self._publisher_storage = None
         self._finalizer_executor: concurrent.futures.ThreadPoolExecutor | None = None
         self._finalizer_storage = None
         self._finalizer_scheduler: Scheduler | None = None
@@ -308,10 +300,6 @@ class CrawlerEngine:
         return self._runtime.finalizer_liveness.last_progress_at
 
     @property
-    def _last_publisher_progress_at(self) -> float:
-        return self._runtime.publisher_liveness.last_progress_at
-
-    @property
     def pages_crawled(self) -> int:
         return self._runtime.pages_crawled
 
@@ -376,14 +364,6 @@ class CrawlerEngine:
         self._runtime.finalize_queue = value
 
     @property
-    def _publish_queue(self) -> asyncio.Queue[_PublishItem | object] | None:
-        return self._runtime.publish_queue  # type: ignore[return-value]
-
-    @_publish_queue.setter
-    def _publish_queue(self, value: asyncio.Queue[_PublishItem | object] | None) -> None:
-        self._runtime.publish_queue = value
-
-    @property
     def _parser_liveness(self) -> StageLiveness:
         return self._runtime.parser_liveness
 
@@ -398,14 +378,6 @@ class CrawlerEngine:
     @_finalizer_liveness.setter
     def _finalizer_liveness(self, value: StageLiveness) -> None:
         self._runtime.finalizer_liveness = value
-
-    @property
-    def _publisher_liveness(self) -> StageLiveness:
-        return self._runtime.publisher_liveness
-
-    @_publisher_liveness.setter
-    def _publisher_liveness(self, value: StageLiveness) -> None:
-        self._runtime.publisher_liveness = value
 
     @property
     def _timing_summary(self) -> TelemetryAccumulator:
@@ -455,12 +427,6 @@ class CrawlerEngine:
 
     async def close(self):
         """Close all resources."""
-        if self._publisher_executor is not None:
-            self._publisher_executor.shutdown(wait=True, cancel_futures=False)
-            self._publisher_executor = None
-        if self._publisher_storage is not None:
-            self._publisher_storage.close()
-            self._publisher_storage = None
         if self._finalizer_executor is not None:
             self._finalizer_executor.shutdown(wait=True, cancel_futures=False)
         self._finalizer_executor = None
@@ -483,17 +449,11 @@ class CrawlerEngine:
         return FinalizerService(
             scheduler=self._finalizer_scheduler or self.scheduler,
             host_store=self._finalizer_host_store or self._host_store_for_success_tracking(),
+            storage=self._finalizer_storage or self.pg_storage,
             executor=self._finalizer_executor,
-            host_key_for_url=self._host_key_for_url,
-        )
-
-    def _publisher_service(self) -> PublisherService:
-        """Build the publisher service for the current runtime wiring."""
-        return PublisherService(
-            storage=self._publisher_storage or self.pg_storage,
-            executor=self._publisher_executor,
             output_writer=self.output_writer,
             results_sink=self.results,
+            host_key_for_url=self._host_key_for_url,
         )
 
     def _progress(self) -> tuple[int, int]:
@@ -1108,7 +1068,7 @@ class CrawlerEngine:
         return (await self._finalize_parsed_pages([parsed]))[0]
 
     async def _finalize_parsed_pages(self, parsed_pages: list[_ParsedPage]) -> list[CrawlResult]:
-        """Apply scheduler mutations after parse and before persistence."""
+        """Persist parsed pages before applying scheduler completion mutations."""
         if self._finalizer_executor is not None and hasattr(
             self.host_manager,
             "record_success_runtime",
@@ -1121,28 +1081,14 @@ class CrawlerEngine:
             record_success_runtime=record_success_runtime,
         )
 
-    async def _publish_result(self, result: CrawlResult):
-        """Persist crawl output outside fetch, parse, and finalize workers."""
-        await self._publisher_service().publish_result(result)
-
-    async def _publish_results(self, results: list[CrawlResult]):
-        """Persist crawl output for one or more finalized crawl results."""
-        await self._publisher_service().publish_results(results)
-
     async def _finalizer(self):
-        """Drain parsed payloads and apply scheduler mutations before persistence."""
+        """Persist parsed payloads and apply their scheduler outcome."""
         if self._finalize_queue is None:
             return
         stage = FinalizeStage(
             finalize_queue=self._finalize_queue,
-            publish_queue=self._publish_queue,
             finalize_stats=(
                 self._pipeline_queues.finalize_stats
-                if self._pipeline_queues is not None
-                else QueueStats()
-            ),
-            publish_stats=(
-                self._pipeline_queues.publish_stats
                 if self._pipeline_queues is not None
                 else QueueStats()
             ),
@@ -1151,34 +1097,12 @@ class CrawlerEngine:
             finalize_parsed_pages=self._finalize_parsed_pages,
             finalize_skipped_task=self._finalize_skipped_task,
             finalize_failed_task=self._finalize_failed_task,
-            publish_result=self._publish_result,
             record_timing=self._record_timing,
+            record_failure_category=self._record_failure_category,
             progress=self._progress,
             format_timings=_format_timings,
             success_batch_size=settings.finalizer_batch_size,
             success_batch_wait_ms=settings.finalizer_batch_wait_ms,
-        )
-        await stage.run()
-
-    async def _publisher(self):
-        """Drain processed crawl results and perform blocking writes."""
-        if self._publish_queue is None:
-            return
-        stage = PublishStage(
-            publish_queue=self._publish_queue,
-            publish_stats=(
-                self._pipeline_queues.publish_stats
-                if self._pipeline_queues is not None
-                else QueueStats()
-            ),
-            liveness=self._publisher_liveness,
-            publish_result=self._publish_result,
-            publish_results=self._publish_results,
-            record_timing=self._record_timing,
-            progress=self._progress,
-            format_timings=_format_timings,
-            success_batch_size=settings.publisher_batch_size,
-            success_batch_wait_ms=settings.publisher_batch_wait_ms,
         )
         await stage.run()
 
@@ -1244,33 +1168,25 @@ class CrawlerEngine:
         self._pipeline_queues = PipelineQueues(maxsize=self._pipeline_queue_maxsize)
         self._parse_queue = self._pipeline_queues.parse
         self._finalize_queue = self._pipeline_queues.finalize
-        self._publish_queue = self._pipeline_queues.publish
-        publisher_dsn = (
+        finalizer_dsn = (
             getattr(self.pg_storage, "_dsn", None) if self.pg_storage is not None else None
         )
-        if publisher_dsn and self._publisher_storage is None:
+        if finalizer_dsn and self._finalizer_storage is None:
             from .storage import PgStorage
 
-            self._publisher_storage = PgStorage(publisher_dsn)
-            self._finalizer_storage = PgStorage(publisher_dsn)
+            self._finalizer_storage = PgStorage(finalizer_dsn)
             self._finalizer_scheduler = Scheduler(self._finalizer_storage.conn)
             self._finalizer_host_store = HostStore(
                 self._finalizer_storage.conn,
                 default_delay=self.host_manager.default_delay,
             )
-        if publisher_dsn and self._publisher_executor is None:
-            self._publisher_executor = concurrent.futures.ThreadPoolExecutor(
-                max_workers=1,
-                thread_name_prefix="crawler-publisher",
-            )
-        if publisher_dsn and self._finalizer_executor is None:
+        if finalizer_dsn and self._finalizer_executor is None:
             self._finalizer_executor = concurrent.futures.ThreadPoolExecutor(
                 max_workers=1,
                 thread_name_prefix="crawler-finalizer",
             )
         parsers = [asyncio.create_task(self._parser()) for _ in range(self.parser_workers)]
         finalizers = [asyncio.create_task(self._finalizer()) for _ in range(self.parser_workers)]
-        publisher = asyncio.create_task(self._publisher())
 
         workers: list[asyncio.Task] = []
         worker_id = 0
@@ -1337,10 +1253,6 @@ class CrawlerEngine:
             for _ in range(len(finalizers)):
                 await self._finalize_queue.put(_FINALIZER_SENTINEL)
             await asyncio.gather(*finalizers)
-
-            await self._publish_queue.join()
-            await self._publish_queue.put(_PUBLISHER_SENTINEL)
-            await publisher
         finally:
             self._running = False
             self.failure_breakdown = dict(self._failure_counts)

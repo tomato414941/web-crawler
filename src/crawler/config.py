@@ -50,8 +50,6 @@ class CrawlerSettings(BaseSettings):
     direct_egress_allowed: bool = True
     finalizer_batch_size: int = 16
     finalizer_batch_wait_ms: float = 25.0
-    publisher_batch_size: int = 16
-    publisher_batch_wait_ms: float = 25.0
     r2_endpoint_url: str | None = None
     r2_bucket: str | None = None
     r2_access_key_id: str | None = None
