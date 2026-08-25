@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
-from collections import Counter
 from dataclasses import dataclass
 import logging
 import re
@@ -46,14 +45,10 @@ from .pipeline import (
     FailedTask as _FailedTask,
     FetchStage,
     FetchedPage as _FetchedPage,
-    FinalizeItem as _FinalizeItem,
     FinalizeStage,
     ParseStage,
     ParsedPage as _ParsedPage,
-    PipelineQueues,
-    QueueStats,
     SkippedTask as _SkippedTask,
-    StageLiveness,
 )
 from .scheduler_membership import (
     SCHEDULER_SURFACE_RUNNABLE,
@@ -65,13 +60,9 @@ from .scheduler_task import CrawlTask, INTENT_EXPLORE, INTENT_REFRESH
 from .scheduler import Scheduler
 from .output import StreamingOutputWriter
 from .result import CrawlFailure, CrawlResult, CrawlStageTimings
-from .runtime import CrawlerRuntime, CycleSnapshotBuilder
+from .cycle import CrawlCycle, CycleSnapshotBuilder
 from .services import FinalizerService
-from .telemetry import (
-    FetchTelemetry,
-    LeaseTelemetry,
-    TelemetryAccumulator,
-)
+from .telemetry import FetchTelemetry, LeaseTelemetry
 from .urls import extract_links
 
 logger = logging.getLogger(__name__)
@@ -277,13 +268,11 @@ class CrawlerEngine:
         else:
             self.fetcher = HttpFetcher(timeout=settings.timeout)
 
-        self.results: list[dict] = []
-        self.failure_breakdown: dict[str, int] = {}
         self._page_lock = asyncio.Lock()
         self._lease_lock = asyncio.Lock()
         self._frontier_pending_cache: tuple[float, int] = (0.0, 0)
         self._pipeline_queue_maxsize = max(16, concurrency * 4)
-        self._runtime = CrawlerRuntime(queue_maxsize=self._pipeline_queue_maxsize)
+        self._cycle = CrawlCycle(queue_maxsize=self._pipeline_queue_maxsize)
         self._snapshot_builder = CycleSnapshotBuilder(
             max_pages=self.max_pages,
             concurrency=self.concurrency,
@@ -296,96 +285,16 @@ class CrawlerEngine:
         )
 
     @property
-    def _last_finalizer_progress_at(self) -> float:
-        return self._runtime.finalizer_liveness.last_progress_at
-
-    @property
     def pages_crawled(self) -> int:
-        return self._runtime.pages_crawled
-
-    @pages_crawled.setter
-    def pages_crawled(self, value: int) -> None:
-        self._runtime.pages_crawled = value
+        return self._cycle.pages_crawled
 
     @property
-    def _running(self) -> bool:
-        return self._runtime.running
-
-    @_running.setter
-    def _running(self, value: bool) -> None:
-        self._runtime.running = value
+    def results(self) -> list[dict]:
+        return self._cycle.results
 
     @property
-    def _claimed_pages(self) -> int:
-        return self._runtime.claimed_pages
-
-    @_claimed_pages.setter
-    def _claimed_pages(self, value: int) -> None:
-        self._runtime.claimed_pages = value
-
-    @property
-    def _failure_counts(self) -> Counter[str]:
-        return self._runtime.failure_counts
-
-    @_failure_counts.setter
-    def _failure_counts(self, value: Counter[str]) -> None:
-        self._runtime.failure_counts = value
-
-    @property
-    def _active_host_counts(self) -> Counter[str]:
-        return self._runtime.active_host_counts
-
-    @_active_host_counts.setter
-    def _active_host_counts(self, value: Counter[str]) -> None:
-        self._runtime.active_host_counts = value
-
-    @property
-    def _pipeline_queues(self) -> PipelineQueues | None:
-        return self._runtime.pipeline_queues
-
-    @_pipeline_queues.setter
-    def _pipeline_queues(self, value: PipelineQueues | None) -> None:
-        self._runtime.pipeline_queues = value
-
-    @property
-    def _parse_queue(self) -> asyncio.Queue[_FetchedPage | object] | None:
-        return self._runtime.parse_queue  # type: ignore[return-value]
-
-    @_parse_queue.setter
-    def _parse_queue(self, value: asyncio.Queue[_FetchedPage | object] | None) -> None:
-        self._runtime.parse_queue = value
-
-    @property
-    def _finalize_queue(self) -> asyncio.Queue[_FinalizeItem | object] | None:
-        return self._runtime.finalize_queue  # type: ignore[return-value]
-
-    @_finalize_queue.setter
-    def _finalize_queue(self, value: asyncio.Queue[_FinalizeItem | object] | None) -> None:
-        self._runtime.finalize_queue = value
-
-    @property
-    def _parser_liveness(self) -> StageLiveness:
-        return self._runtime.parser_liveness
-
-    @_parser_liveness.setter
-    def _parser_liveness(self, value: StageLiveness) -> None:
-        self._runtime.parser_liveness = value
-
-    @property
-    def _finalizer_liveness(self) -> StageLiveness:
-        return self._runtime.finalizer_liveness
-
-    @_finalizer_liveness.setter
-    def _finalizer_liveness(self, value: StageLiveness) -> None:
-        self._runtime.finalizer_liveness = value
-
-    @property
-    def _timing_summary(self) -> TelemetryAccumulator:
-        return self._runtime.timing_summary
-
-    @_timing_summary.setter
-    def _timing_summary(self, value: TelemetryAccumulator) -> None:
-        self._runtime.timing_summary = value
+    def failure_breakdown(self) -> dict[str, int]:
+        return dict(self._cycle.failure_counts)
 
     def _host_first_fallback_stats(self) -> dict[str, int]:
         raw = self.scheduler.host_first_fallback_stats()
@@ -399,25 +308,17 @@ class CrawlerEngine:
             "read_model_errors": int(raw.get("read_model_errors", 0)),
         }
 
-    def _active_cycle_payload(self) -> dict[str, object]:
-        """Return active cycle stats without completed-cycle fields."""
-        return self._snapshot_builder.active_cycle_payload(self._runtime)
-
     def snapshot_runtime_stats(self) -> dict[str, object]:
         """Return live queue/backpressure stats for external observers."""
-        return self._snapshot_builder.runtime_stats(self._runtime)
+        return self._snapshot_builder.runtime_stats(self._cycle)
 
     def timing_summary(self) -> dict[str, object]:
         """Return the current cycle timing summary."""
-        return self._runtime.timing_summary.snapshot()
+        return self._cycle.timing_summary.snapshot()
 
     def timing_summary_log(self) -> str:
         """Return a compact log representation of the current cycle timings."""
         return _format_timing_summary(self.timing_summary())
-
-    def _record_timing(self, outcome: str, timings: CrawlStageTimings | None) -> None:
-        """Record one finalized crawl attempt in cycle-local timing stats."""
-        self._runtime.record_timing(outcome, timings)
 
     async def __aenter__(self) -> "CrawlerEngine":
         return self
@@ -452,7 +353,7 @@ class CrawlerEngine:
             storage=self._finalizer_storage or self.pg_storage,
             executor=self._finalizer_executor,
             output_writer=self.output_writer,
-            results_sink=self.results,
+            results_sink=self._cycle.results,
             host_key_for_url=self._host_key_for_url,
         )
 
@@ -462,7 +363,7 @@ class CrawlerEngine:
     def _record_failure_category(self, error: str) -> None:
         category = categorize_crawl_error(error)
         if category:
-            self._failure_counts[category] += 1
+            self._cycle.failure_counts[category] += 1
 
     def _record_error_runtime(self, url: str) -> float:
         """Advance runtime failure state without requiring durable writes on the event loop."""
@@ -583,7 +484,7 @@ class CrawlerEngine:
     ) -> tuple[list[CrawlTask], dict[str, int]]:
         """Build admitted tasks and explain why discovered links were kept or rejected."""
         admission_control = self._admission_control()
-        self._runtime.admission_control = admission_control.snapshot()
+        self._cycle.admission_control = admission_control.snapshot()
         host_contexts = self._host_admission_contexts(links)
         result = DiscoveryAdmissionPolicy(
             seed_hosts=self.seed_hosts,
@@ -888,26 +789,26 @@ class CrawlerEngine:
         """Release in-flight host reservations after fetch processing finishes."""
         host_key = self._host_key_for_url(url)
         async with self._lease_lock:
-            current = self._active_host_counts.get(host_key, 0)
+            current = self._cycle.active_host_counts.get(host_key, 0)
             if current <= 1:
-                self._active_host_counts.pop(host_key, None)
+                self._cycle.active_host_counts.pop(host_key, None)
             else:
-                self._active_host_counts[host_key] = current - 1
+                self._cycle.active_host_counts[host_key] = current - 1
 
     async def _claim_page_slot(self) -> bool:
         """Reserve capacity so concurrent workers do not exceed max_pages."""
         async with self._page_lock:
-            if self.pages_crawled + self._claimed_pages >= self.max_pages:
+            if self._cycle.pages_crawled + self._cycle.claimed_pages >= self.max_pages:
                 return False
-            self._claimed_pages += 1
+            self._cycle.claimed_pages += 1
             return True
 
     async def _release_page_slot(self, success: bool):
         """Release a reserved page slot and commit successful crawls."""
         async with self._page_lock:
-            self._claimed_pages -= 1
+            self._cycle.claimed_pages -= 1
             if success:
-                self.pages_crawled += 1
+                self._cycle.pages_crawled += 1
 
     async def _worker(
         self,
@@ -916,22 +817,12 @@ class CrawlerEngine:
         lease_lane: _LeaseLane,
     ):
         """Worker coroutine that processes URLs from a dedicated runnable surface."""
-        if self._parse_queue is None or self._finalize_queue is None:
-            return
         stage = FetchStage(
-            parse_queue=self._parse_queue,
-            finalize_queue=self._finalize_queue,
-            parse_stats=(
-                self._pipeline_queues.parse_stats
-                if self._pipeline_queues is not None
-                else QueueStats()
-            ),
-            finalize_stats=(
-                self._pipeline_queues.finalize_stats
-                if self._pipeline_queues is not None
-                else QueueStats()
-            ),
-            is_running=lambda: self._running,
+            parse_queue=self._cycle.parse_queue,
+            finalize_queue=self._cycle.finalize_queue,
+            parse_stats=self._cycle.pipeline_queues.parse_stats,
+            finalize_stats=self._cycle.pipeline_queues.finalize_stats,
+            is_running=lambda: self._cycle.running,
             claim_page_slot=self._claim_page_slot,
             release_page_slot=self._release_page_slot,
             lease_task=lambda lease_started: self._lease_task(
@@ -998,7 +889,7 @@ class CrawlerEngine:
             admission_counts,
         ) = await asyncio.to_thread(self._prepare_parsed_payload, task, response)
         if admission_counts:
-            self._timing_summary.record_discovery_admission(admission_counts)
+            self._cycle.timing_summary.record_discovery_admission(admission_counts)
         timings.parse_ms = _elapsed_ms(parse_started)
 
         return _ParsedPage(
@@ -1041,22 +932,12 @@ class CrawlerEngine:
 
     async def _parser(self):
         """Drain fetched pages and parse them into crawl results."""
-        if self._parse_queue is None or self._finalize_queue is None:
-            return
         stage = ParseStage(
-            parse_queue=self._parse_queue,
-            finalize_queue=self._finalize_queue,
-            parse_stats=(
-                self._pipeline_queues.parse_stats
-                if self._pipeline_queues is not None
-                else QueueStats()
-            ),
-            finalize_stats=(
-                self._pipeline_queues.finalize_stats
-                if self._pipeline_queues is not None
-                else QueueStats()
-            ),
-            liveness=self._parser_liveness,
+            parse_queue=self._cycle.parse_queue,
+            finalize_queue=self._cycle.finalize_queue,
+            parse_stats=self._cycle.pipeline_queues.parse_stats,
+            finalize_stats=self._cycle.pipeline_queues.finalize_stats,
+            liveness=self._cycle.parser_liveness,
             parse_fetched_page=self._parse_fetched_page,
             build_failed_task=self._build_parse_failed_task,
             record_failure_category=self._record_failure_category,
@@ -1083,21 +964,15 @@ class CrawlerEngine:
 
     async def _finalizer(self):
         """Persist parsed payloads and apply their scheduler outcome."""
-        if self._finalize_queue is None:
-            return
         stage = FinalizeStage(
-            finalize_queue=self._finalize_queue,
-            finalize_stats=(
-                self._pipeline_queues.finalize_stats
-                if self._pipeline_queues is not None
-                else QueueStats()
-            ),
-            liveness=self._finalizer_liveness,
+            finalize_queue=self._cycle.finalize_queue,
+            finalize_stats=self._cycle.pipeline_queues.finalize_stats,
+            liveness=self._cycle.finalizer_liveness,
             finalize_parsed_page=self._finalize_parsed_page,
             finalize_parsed_pages=self._finalize_parsed_pages,
             finalize_skipped_task=self._finalize_skipped_task,
             finalize_failed_task=self._finalize_failed_task,
-            record_timing=self._record_timing,
+            record_timing=self._cycle.record_timing,
             record_failure_category=self._record_failure_category,
             progress=self._progress,
             format_timings=_format_timings,
@@ -1116,7 +991,7 @@ class CrawlerEngine:
         async with self._lease_lock:
             excluded_hosts = [
                 host
-                for host, count in self._active_host_counts.items()
+                for host, count in self._cycle.active_host_counts.items()
                 if count >= self._host_inflight_budget(host)
             ]
             task = self.scheduler.lease_next(
@@ -1129,7 +1004,7 @@ class CrawlerEngine:
             )
             if task is not None:
                 host_key = self._host_key_for_url(task.url)
-                self._active_host_counts[host_key] += 1
+                self._cycle.active_host_counts[host_key] += 1
             read_model = "unknown"
             fallback = "none"
             if lease_lane.lease_strategy == LEASE_STRATEGY_HOST_FIRST:
@@ -1153,9 +1028,8 @@ class CrawlerEngine:
 
     async def crawl(self) -> list[dict]:
         """Run the crawler and return results."""
-        self._runtime.reset_cycle()
-        self._running = True
-        self.failure_breakdown = {}
+        self._cycle = CrawlCycle(queue_maxsize=self._pipeline_queue_maxsize)
+        self._cycle.running = True
         self.scheduler.reset_host_first_fallback_stats()
 
         if (
@@ -1165,9 +1039,6 @@ class CrawlerEngine:
         ):
             self.scheduler.place(self._build_seed_task(self.start_url))
 
-        self._pipeline_queues = PipelineQueues(maxsize=self._pipeline_queue_maxsize)
-        self._parse_queue = self._pipeline_queues.parse
-        self._finalize_queue = self._pipeline_queues.finalize
         finalizer_dsn = (
             getattr(self.pg_storage, "_dsn", None) if self.pg_storage is not None else None
         )
@@ -1244,24 +1115,23 @@ class CrawlerEngine:
 
         try:
             await asyncio.gather(*workers)
-            await self._parse_queue.join()
+            await self._cycle.parse_queue.join()
             for _ in range(self.parser_workers):
-                await self._parse_queue.put(_PARSER_SENTINEL)
+                await self._cycle.parse_queue.put(_PARSER_SENTINEL)
             await asyncio.gather(*parsers)
 
-            await self._finalize_queue.join()
+            await self._cycle.finalize_queue.join()
             for _ in range(len(finalizers)):
-                await self._finalize_queue.put(_FINALIZER_SENTINEL)
+                await self._cycle.finalize_queue.put(_FINALIZER_SENTINEL)
             await asyncio.gather(*finalizers)
         finally:
-            self._running = False
-            self.failure_breakdown = dict(self._failure_counts)
+            self._cycle.running = False
 
-        return self.results
+        return self._cycle.results
 
     def stop(self):
         """Stop the crawler."""
-        self._running = False
+        self._cycle.running = False
 
 
 async def run_crawl(

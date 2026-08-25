@@ -183,6 +183,8 @@ pipeline stage は operational boundary であり、durable URL identity boundar
 
 runtime の stage code はこの境界を明示すべきである。
 
+- `CrawlerEngine` は cycle 開始時に生成する1つの `CrawlCycle` を所有する
+- `CrawlCycle` は cycle-local な queue、counter、liveness、timing state を所有する
 - queue ownership と backpressure は pipeline runtime が持つ
 - stage ごとの liveness は pipeline runtime が持つ
 - parse は fetched page parsing と parse exception の finalizable failure 変換を持つ

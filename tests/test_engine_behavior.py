@@ -224,6 +224,28 @@ class FakeFetcher:
         return self.responses.pop(0)
 
 
+@pytest.mark.asyncio
+async def test_each_crawl_owns_fresh_cycle_state():
+    engine = CrawlerEngine(
+        max_pages=0,
+        scheduler=FakeScheduler([]),
+        host_manager=FakeHostManager(),
+    )
+
+    await engine.crawl()
+    first_cycle = engine._cycle
+    first_cycle.results.append({"url": "https://example.com/first"})
+    first_cycle.failure_counts["timeout"] = 1
+
+    await engine.crawl()
+
+    assert engine._cycle is not first_cycle
+    assert engine.results == []
+    assert engine.failure_breakdown == {}
+    assert first_cycle.results == [{"url": "https://example.com/first"}]
+    assert first_cycle.failure_counts == {"timeout": 1}
+
+
 def test_discovered_tasks_are_capped_by_value_total_and_target_host(monkeypatch):
     monkeypatch.setattr(settings, "admission_target_pending", 50)
     ledger = FakeScheduler([], pending_count=50)
