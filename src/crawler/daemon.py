@@ -16,7 +16,6 @@ from .host_manager import HostManager
 from .host_store import HostStore
 from .discovery import seed_hosts_from_urls
 from .storage import PgStorage
-from .scheduler_membership import SCHEDULER_SURFACE_RUNNABLE
 from .scheduler import Scheduler
 
 logger = logging.getLogger(__name__)
@@ -648,49 +647,11 @@ class CrawlDaemon:
         finally:
             runtime_storage.close()
 
-    def _ensure_runnable_supply(self, scheduler: Scheduler):
-        """Keep the runnable scheduler surface supplied from existing scheduler state."""
-        before_pending = scheduler.pending_count()
-        before_runnable = scheduler.runnable_count(runnable_surface=SCHEDULER_SURFACE_RUNNABLE)
-        before_runnable_pending = scheduler.pending_count(
-            runnable_surface=SCHEDULER_SURFACE_RUNNABLE
-        )
-        self._policy.ensure_runnable_supply(scheduler)
-        after_pending = scheduler.pending_count()
-        after_runnable = scheduler.runnable_count(runnable_surface=SCHEDULER_SURFACE_RUNNABLE)
-        after_runnable_pending = scheduler.pending_count(
-            runnable_surface=SCHEDULER_SURFACE_RUNNABLE
-        )
-        if after_pending == before_pending and after_runnable == before_runnable:
-            return
-        logger.info(
-            "Ensured runnable supply: pending_total=%d->%d runnable=%d->%d pending_runnable=%d->%d target_runnable=%d",
-            before_pending,
-            after_pending,
-            before_runnable,
-            after_runnable,
-            before_runnable_pending,
-            after_runnable_pending,
-            self._min_runnable_supply_count,
-        )
-
     def _bootstrap_scheduler(self, scheduler: Scheduler) -> int:
         """Seed an empty scheduler through a dedicated bootstrap path."""
         if scheduler.pending_count() != 0:
             return 0
         return scheduler.upsert_seeds(self._seeds, discovery_value=2.0)
-
-    def _promote_blocked_retry(self, scheduler: Scheduler) -> int:
-        """Restore a small cooled-down subset from blocked retry queue when runnable work is thin."""
-        return self._policy.promote_blocked_retry(scheduler)
-
-    def _retire_blocked_retry(self, scheduler: Scheduler) -> int:
-        """Retire long-stuck blocked retry URLs out of pending scheduler state."""
-        return self._policy.retire_blocked_retry(scheduler)
-
-    def _restore_recovered_blocked_retry(self, scheduler: Scheduler) -> int:
-        """Restore healthy blocked retry hosts before using bounded retry promotion."""
-        return self._policy.restore_recovered_blocked_retry(scheduler)
 
     def _refresh_stale(self, storage: PgStorage, scheduler: Scheduler):
         """Re-queue stale pages for refresh intent."""

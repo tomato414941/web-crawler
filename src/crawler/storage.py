@@ -1230,12 +1230,6 @@ class PgStorage:
         """Save multiple crawl results in one transaction."""
         return self.page_writes.save_many(results)
 
-    def _save_many_impl(
-        self,
-        results: list[CrawlResult | Mapping[str, object]],
-    ) -> list[StorageSaveResult]:
-        return self.page_writes.save_many(results)
-
     @property
     def count(self) -> int:
         return self._count
@@ -1255,48 +1249,24 @@ class PgStorage:
         """List crawled pages with optional filters."""
         return self.page_queries.list_pages(since=since, limit=limit, offset=offset, host=host)
 
-    def _list_pages_impl(
-        self,
-        since: float = 0,
-        limit: int = 100,
-        offset: int = 0,
-        host: str | None = None,
-    ) -> list[dict]:
-        return self.page_queries.list_pages(since=since, limit=limit, offset=offset, host=host)
-
     def upsert_runtime_stats(self, component: str, payload: Mapping[str, object]) -> None:
         """Store runtime crawler stats for API consumption."""
-        self.runtime_stats.upsert(component, payload)
-
-    def _upsert_runtime_stats_impl(self, component: str, payload: Mapping[str, object]) -> None:
         self.runtime_stats.upsert(component, payload)
 
     def get_runtime_stats(self, component: str | None = None) -> dict[str, object]:
         """Fetch runtime crawler stats snapshots."""
         return self.runtime_stats.get(component)
 
-    def _get_runtime_stats_impl(self, component: str | None = None) -> dict[str, object]:
-        return self.runtime_stats.get(component)
-
     def get_page(self, url_hash: str) -> dict | None:
         """Get a single page with full content."""
-        return self.page_queries.get_page(url_hash)
-
-    def _get_page_impl(self, url_hash: str) -> dict | None:
         return self.page_queries.get_page(url_hash)
 
     def get_runtime_stats_summary(self) -> dict:
         """Get fast operator stats from the persisted runtime snapshot."""
         return self.runtime_stats.summary()
 
-    def _get_runtime_stats_summary_impl(self) -> dict:
-        return self.runtime_stats.summary()
-
     def get_stats(self) -> dict:
         """Get crawl statistics."""
-        return self.diagnostics.get_stats()
-
-    def _get_stats_impl(self) -> dict:
         return self.diagnostics.get_stats()
 
     def close(self):
