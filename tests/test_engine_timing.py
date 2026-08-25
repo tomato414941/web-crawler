@@ -7,15 +7,15 @@ from types import SimpleNamespace
 
 import pytest
 
-from crawler.crawl import (
-    CrawlerEngine,
-    _FINALIZER_SENTINEL,
-    _FailedTask,
-    _FinalizeItem,
-    _ParsedPage,
-    _SkippedTask,
-)
+from crawler.crawl import CrawlerEngine
 from crawler.config import settings
+from crawler.pipeline import (
+    FINALIZER_SENTINEL as _FINALIZER_SENTINEL,
+    FailedTask as _FailedTask,
+    FinalizeItem as _FinalizeItem,
+    ParsedPage as _ParsedPage,
+    SkippedTask as _SkippedTask,
+)
 from crawler.result import CrawlFailure, CrawlResult, CrawlStageTimings
 from crawler.storage import StorageSaveResult
 from crawler.telemetry import (
@@ -345,12 +345,12 @@ async def test_finalizer_persists_before_scheduler_completion():
     )
     storage = OrderedStorage()
     engine.pg_storage = storage
-    engine._finalize_queue = asyncio.Queue()
+    finalize_queue = engine._cycle.finalize_queue
     engine._finalizer_executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
 
     finalizer = asyncio.create_task(engine._finalizer())
     result = _crawl_result()
-    await engine._finalize_queue.put(
+    await finalize_queue.put(
         _FinalizeItem(
             parsed=_ParsedPage(
                 task=CrawlTask(url=result.url, lease_token="lease-1"),
@@ -363,21 +363,23 @@ async def test_finalizer_persists_before_scheduler_completion():
         )
     )
 
-    await asyncio.wait_for(engine._finalize_queue.join(), timeout=2)
-    await _stop_queue_worker(engine._finalize_queue, _FINALIZER_SENTINEL, finalizer)
+    await asyncio.wait_for(finalize_queue.join(), timeout=2)
+    await _stop_queue_worker(finalize_queue, _FINALIZER_SENTINEL, finalizer)
     await engine.close()
 
     assert events == ["saved", "done"]
     assert ledger.done == [(result.url, "lease-1")]
     assert storage.saved == [result]
-    assert engine.snapshot_runtime_stats()["finalizer_liveness"] == {
+    finalizer_liveness = engine.snapshot_runtime_stats()["finalizer_liveness"]
+    assert finalizer_liveness == {
         "started": 1,
         "completed": 1,
         "failed": 0,
-        "last_progress_at": engine._last_finalizer_progress_at,
+        "last_progress_at": finalizer_liveness["last_progress_at"],
         "current_url": None,
         "current_kind": None,
     }
+    assert finalizer_liveness["last_progress_at"] > 0
 
 
 @pytest.mark.asyncio
@@ -399,12 +401,12 @@ async def test_finalizer_survives_item_error_and_drains_next_item():
         scheduler=ledger,
         host_manager=_FakeHostManager(),
     )
-    engine._finalize_queue = asyncio.Queue()
+    finalize_queue = engine._cycle.finalize_queue
     engine._finalizer_executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
     finalizer = asyncio.create_task(engine._finalizer())
 
     for suffix in ("first", "second"):
-        await engine._finalize_queue.put(
+        await finalize_queue.put(
             _FinalizeItem(
                 skipped=_SkippedTask(
                     task=CrawlTask(url=f"https://example.com/{suffix}", lease_token=suffix),
@@ -417,8 +419,8 @@ async def test_finalizer_survives_item_error_and_drains_next_item():
             )
         )
 
-    await asyncio.wait_for(engine._finalize_queue.join(), timeout=2)
-    await _stop_queue_worker(engine._finalize_queue, _FINALIZER_SENTINEL, finalizer)
+    await asyncio.wait_for(finalize_queue.join(), timeout=2)
+    await _stop_queue_worker(finalize_queue, _FINALIZER_SENTINEL, finalizer)
     await engine.close()
 
     assert ledger.done == [("https://example.com/second", "second")]
@@ -459,14 +461,14 @@ async def test_finalizer_retries_storage_failure_and_drains_next_item(monkeypatc
     monkeypatch.setattr(settings, "finalizer_batch_size", 1)
     storage = FlakyStorage()
     engine.pg_storage = storage
-    engine._finalize_queue = asyncio.Queue()
+    finalize_queue = engine._cycle.finalize_queue
     engine._finalizer_executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
     finalizer = asyncio.create_task(engine._finalizer())
 
     first = _crawl_result("https://example.com/first")
     second = _crawl_result("https://example.com/second")
     for result in (first, second):
-        await engine._finalize_queue.put(
+        await finalize_queue.put(
             _FinalizeItem(
                 parsed=_ParsedPage(
                     task=CrawlTask(url=result.url, lease_token=result.url.rsplit("/", 1)[-1]),
@@ -479,8 +481,8 @@ async def test_finalizer_retries_storage_failure_and_drains_next_item(monkeypatc
             )
         )
 
-    await asyncio.wait_for(engine._finalize_queue.join(), timeout=2)
-    await _stop_queue_worker(engine._finalize_queue, _FINALIZER_SENTINEL, finalizer)
+    await asyncio.wait_for(finalize_queue.join(), timeout=2)
+    await _stop_queue_worker(finalize_queue, _FINALIZER_SENTINEL, finalizer)
     await engine.close()
 
     assert storage.saved == [second]

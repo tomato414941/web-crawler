@@ -22,12 +22,12 @@ class _FakeStorage:
 
 class _FakeEngine:
     def __init__(self):
-        self._running = False
+        self.running = False
         self.calls = 0
 
     def snapshot_runtime_stats(self):
         self.calls += 1
-        return {"running": self._running, "tick": self.calls}
+        return {"running": self.running, "tick": self.calls}
 
 
 def test_report_runtime_stats_waits_for_engine_to_start(monkeypatch):
@@ -50,7 +50,7 @@ def test_report_runtime_stats_waits_for_engine_to_start(monkeypatch):
         time.sleep(0.05)
         assert _FakeStorage.payloads == []
 
-        engine._running = True
+        engine.running = True
         time.sleep(1.1)
 
         assert _FakeStorage.payloads

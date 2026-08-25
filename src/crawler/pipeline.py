@@ -122,21 +122,6 @@ class PipelineQueues:
             "pipeline_queue_maxsize": self.maxsize,
         }
 
-    @staticmethod
-    def empty_snapshot(maxsize: int) -> dict[str, object]:
-        return {
-            "parse_queue_size": 0,
-            "finalize_queue_size": 0,
-            "parse_queue_wait_last_ms": 0.0,
-            "finalize_queue_wait_last_ms": 0.0,
-            "parse_queue_wait_max_ms": 0.0,
-            "finalize_queue_wait_max_ms": 0.0,
-            "parse_queue_depth_max": 0,
-            "finalize_queue_depth_max": 0,
-            "pipeline_queue_maxsize": maxsize,
-        }
-
-
 class StageLiveness:
     """Per-stage progress counters exposed in runtime snapshots."""
 
