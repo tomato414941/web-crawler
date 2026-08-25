@@ -20,6 +20,7 @@ from crawler.result import CrawlFailure, CrawlResult, CrawlStageTimings
 from crawler.storage import StorageSaveResult
 from crawler.telemetry import (
     FinalizerTelemetry,
+    RobotsDecision,
     StorageTelemetry,
     TelemetryAccumulator,
 )
@@ -90,10 +91,30 @@ class _FakeScheduler:
     def pending_count(self):
         return 0
 
+    def attach_host_store(self, host_store):
+        self.host_store = host_store
+
 
 class _FakeHostManager:
+    def __init__(self):
+        self.host_store = None
+        self.host_ledger_store = None
+
+    def attach_store(self, host_store):
+        self.host_store = host_store
+
+    def attach_host_ledger_store(self, host_ledger_store):
+        self.host_ledger_store = host_ledger_store
+
     async def is_allowed(self, url):
-        return True
+        return RobotsDecision(
+            allowed=True,
+            reason="allowed",
+            cache_status="hit",
+            robots_status="ok",
+            elapsed_ms=0.0,
+            host=url.split("/")[2],
+        )
 
     async def wait_for_rate_limit(self, url):
         return None
@@ -101,8 +122,17 @@ class _FakeHostManager:
     def record_success(self, url):
         return None
 
+    def record_success_runtime(self, url):
+        return None
+
     def record_error(self, url):
         return None
+
+    def record_error_runtime(self, url):
+        return 0.0
+
+    def get_host_budget(self, host_key, *, default_budget):
+        return default_budget
 
     def should_retry(self, url):
         return False
@@ -154,6 +184,10 @@ class _RecordingHostStore:
 
     def record_success(self, host, request_latency_ms=None):
         self.successes.append((host, request_latency_ms))
+
+    def record_success_many(self, records):
+        self.successes.extend(records)
+        return len(records)
 
     def record_failure(self, host, backoff_seconds=0.0):
         self.failures.append((host, backoff_seconds))
@@ -496,13 +530,13 @@ async def test_finalizer_retries_storage_failure_and_drains_next_item(monkeypatc
 @pytest.mark.asyncio
 async def test_success_finalizer_records_operation_breakdown():
     ledger = _FakeScheduler(None)
+    host_store = _RecordingHostStore()
     engine = CrawlerEngine(
         max_pages=1,
         scheduler=ledger,
         host_manager=_FakeHostManager(),
+        host_store=host_store,
     )
-    host_store = _RecordingHostStore()
-    engine.host_manager._host_store = host_store
     result = _crawl_result()
     parsed = _ParsedPage(
         task=CrawlTask(url=result.url, lease_token="lease-1"),
@@ -562,13 +596,13 @@ async def test_success_finalizer_batches_scheduler_mutations():
             return len(records)
 
     ledger = BatchScheduler()
+    host_store = BatchHostStore()
     engine = CrawlerEngine(
         max_pages=2,
         scheduler=ledger,
         host_manager=_FakeHostManager(),
+        host_store=host_store,
     )
-    host_store = BatchHostStore()
-    engine.host_manager._host_store = host_store
     parsed_pages = []
     for suffix in ("first", "second"):
         result = _crawl_result(f"https://example.com/{suffix}")
@@ -685,13 +719,13 @@ async def test_failed_finalizer_records_mark_failed_breakdown():
             return True
 
     ledger = FailedScheduler()
+    host_store = _RecordingHostStore()
     engine = CrawlerEngine(
         max_pages=1,
         scheduler=ledger,
         host_manager=_FakeHostManager(),
+        host_store=host_store,
     )
-    host_store = _RecordingHostStore()
-    engine.host_manager._host_store = host_store
     failed = _FailedTask(
         task=CrawlTask(url="https://example.com/fail", lease_token="lease-1"),
         failure=CrawlFailure(
