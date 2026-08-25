@@ -22,7 +22,6 @@ TIMING_STAGE_FIELDS = (
     "output_ms",
     "parse_queue_wait_ms",
     "finalize_queue_wait_ms",
-    "publish_queue_wait_ms",
     "process_ms",
     "slot_ms",
 )
@@ -50,15 +49,6 @@ STORAGE_TIMING_FIELDS = (
     "pages_upsert_ms",
     "content_store_ms",
     "commit_ms",
-    "total_ms",
-)
-
-
-PUBLISHER_TIMING_FIELDS = (
-    "save_dispatch_wait_ms",
-    "save_run_ms",
-    "output_dispatch_wait_ms",
-    "output_run_ms",
     "total_ms",
 )
 
@@ -126,10 +116,8 @@ class PipelineTelemetry:
 
     parse_queue_wait_ms: float = 0.0
     finalize_queue_wait_ms: float = 0.0
-    publish_queue_wait_ms: float = 0.0
     parse_queue_depth: int = 0
     finalize_queue_depth: int = 0
-    publish_queue_depth: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -173,20 +161,6 @@ class StorageTelemetry:
     stored_content_bytes: int = 0
     storage_tier: str = "unknown"
     content_truncated: bool = False
-
-    def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
-
-
-@dataclass(slots=True)
-class PublisherTelemetry:
-    """Detailed publisher timings for one persisted crawl result."""
-
-    save_dispatch_wait_ms: float = 0.0
-    save_run_ms: float = 0.0
-    output_dispatch_wait_ms: float = 0.0
-    output_run_ms: float = 0.0
-    total_ms: float = 0.0
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -250,9 +224,6 @@ class TelemetryAccumulator:
         self._storage_tiers: Counter[str] = Counter()
         self._storage_truncated: Counter[str] = Counter()
         self._stored_content_bytes: list[float] = []
-        self._publisher_stages: dict[str, list[float]] = {
-            field: [] for field in PUBLISHER_TIMING_FIELDS
-        }
         self._discovery_admission: Counter[str] = Counter()
 
     def record_discovery_admission(self, counts: Mapping[str, int]) -> None:
@@ -310,29 +281,15 @@ class TelemetryAccumulator:
             self._storage_truncated[str(truncated).lower()] += 1
             self._stored_content_bytes.append(float(getattr(storage, "stored_content_bytes", 0)))
 
-        publisher = getattr(timings, "publisher", None)
-        if publisher is not None:
-            for field in PUBLISHER_TIMING_FIELDS:
-                self._publisher_stages[field].append(float(getattr(publisher, field)))
-
     def snapshot(self) -> dict[str, object]:
         """Return a runtime-safe summary of observed cycle telemetry."""
-        stages = {
-            field: _summarize_values(values) for field, values in self._stages.items()
-        }
+        stages = {field: _summarize_values(values) for field, values in self._stages.items()}
         finalizer = {
-            field: _summarize_values(values)
-            for field, values in self._finalizer_stages.items()
+            field: _summarize_values(values) for field, values in self._finalizer_stages.items()
         }
         storage = {
-            field: _summarize_values(values)
-            for field, values in self._storage_stages.items()
+            field: _summarize_values(values) for field, values in self._storage_stages.items()
         }
-        publisher = {
-            field: _summarize_values(values)
-            for field, values in self._publisher_stages.items()
-        }
-
         outcomes = {
             "success": int(self._outcomes.get("success", 0)),
             "skipped": int(self._outcomes.get("skipped", 0)),
@@ -365,5 +322,4 @@ class TelemetryAccumulator:
             },
             "finalizer": finalizer,
             "storage": storage,
-            "publisher": publisher,
         }
