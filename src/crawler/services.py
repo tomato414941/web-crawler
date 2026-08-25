@@ -143,14 +143,7 @@ class FinalizerService:
                 )
                 for parsed in parsed_pages
             ]
-            if hasattr(self.host_store, "record_success_many"):
-                self.host_store.record_success_many(success_records)
-            else:
-                for host_key, request_latency_ms in success_records:
-                    self.host_store.record_success(
-                        host_key,
-                        request_latency_ms=request_latency_ms,
-                    )
+            self.host_store.record_success_many(success_records)
             telemetry.host_success_ms = _elapsed_ms(host_started)
 
         telemetry.total_ms = _elapsed_ms(total_started)

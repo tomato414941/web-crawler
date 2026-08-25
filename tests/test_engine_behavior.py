@@ -16,6 +16,7 @@ from crawler.scheduler_membership import (
     SCHEDULER_SURFACE_REFRESH,
 )
 from crawler.scheduler_task import CrawlTask, INTENT_EXPLORE, INTENT_REFRESH
+from crawler.telemetry import RobotsDecision
 
 
 class FakeScheduler:
@@ -181,9 +182,24 @@ class FakeHostManager:
         self.successes: list[str] = []
         self.budgets = budgets or {}
         self.allowed = allowed
+        self.host_store = None
+        self.host_ledger_store = None
 
-    async def is_allowed(self, url: str) -> bool:
-        return self.allowed
+    def attach_store(self, host_store):
+        self.host_store = host_store
+
+    def attach_host_ledger_store(self, host_ledger_store):
+        self.host_ledger_store = host_ledger_store
+
+    async def is_allowed(self, url: str) -> RobotsDecision:
+        return RobotsDecision(
+            allowed=self.allowed,
+            reason="allowed" if self.allowed else "denied",
+            cache_status="hit",
+            robots_status="ok",
+            elapsed_ms=0.0,
+            host=url.split("/")[2],
+        )
 
     async def wait_for_rate_limit(self, url: str):
         return None
