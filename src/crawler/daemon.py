@@ -26,7 +26,6 @@ _RECONNECT_DELAY = 5.0
 _PIPELINE_LIVENESS_KEYS = (
     "parser_liveness",
     "finalizer_liveness",
-    "publisher_liveness",
 )
 
 
@@ -346,7 +345,6 @@ class CrawlDaemon:
                                 "active_hosts": 0,
                                 "parse_queue_size": 0,
                                 "finalize_queue_size": 0,
-                                "publish_queue_size": 0,
                                 **self._last_pipeline_liveness(),
                             },
                             "last_completed_cycle": last_completed_cycle,
@@ -413,7 +411,6 @@ class CrawlDaemon:
             "cycle_pages": self._cycle_pages,
             "parse_queue_size": 0,
             "finalize_queue_size": 0,
-            "publish_queue_size": 0,
             "host_head_repair": dict(self._last_host_head_repair),
             "host_head_dirty_refresh": dict(self._last_host_head_dirty_refresh),
         }
@@ -423,13 +420,10 @@ class CrawlDaemon:
             "max_pages",
             "parse_queue_wait_last_ms",
             "finalize_queue_wait_last_ms",
-            "publish_queue_wait_last_ms",
             "parse_queue_wait_max_ms",
             "finalize_queue_wait_max_ms",
-            "publish_queue_wait_max_ms",
             "parse_queue_depth_max",
             "finalize_queue_depth_max",
-            "publish_queue_depth_max",
             "failure_breakdown",
             "timing_summary",
             "host_first_fallback",
@@ -446,7 +440,6 @@ class CrawlDaemon:
             "runnable": runnable,
             "parse_queue_size": 0,
             "finalize_queue_size": 0,
-            "publish_queue_size": 0,
             "host_head_dirty_refresh": dict(self._last_host_head_dirty_refresh),
             **self._last_pipeline_liveness(),
         }

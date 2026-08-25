@@ -1,17 +1,17 @@
-"""Execution services for finalization and publishing."""
+"""Execution services for crawl finalization."""
 
 from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable
 import concurrent.futures
-from dataclasses import dataclass, replace
+from dataclasses import replace
 import logging
 import time
 from typing import TYPE_CHECKING
 
 from .result import CrawlFailure, CrawlResult
-from .telemetry import FINALIZER_TIMING_FIELDS, FinalizerTelemetry, PublisherTelemetry
+from .telemetry import FINALIZER_TIMING_FIELDS, FinalizerTelemetry
 
 if TYPE_CHECKING:
     from .host_store import HostStore
@@ -27,83 +27,77 @@ def _elapsed_ms(started_at: float) -> float:
     return round((time.perf_counter() - started_at) * 1000, 1)
 
 
-def _elapsed_ms_between(started_at: float, finished_at: float) -> float:
-    return round((finished_at - started_at) * 1000, 1)
-
-
-@dataclass(frozen=True, slots=True)
-class _TimedStorageSaveMany:
-    started_at: float
-    finished_at: float
-    save_results: list[object] | None = None
-    error: Exception | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class _TimedOutputWrite:
-    started_at: float
-    finished_at: float
-    error: Exception | None = None
-
-
-def _timed_storage_save_many(
-    storage: object,
-    results: list[CrawlResult],
-) -> _TimedStorageSaveMany:
-    started_at = time.perf_counter()
-    try:
-        save_results = storage.save_many(results)
-    except Exception as exc:  # pragma: no cover - exercised via caller path
-        finished_at = time.perf_counter()
-        return _TimedStorageSaveMany(
-            started_at=started_at,
-            finished_at=finished_at,
-            error=exc,
-        )
-    finished_at = time.perf_counter()
-    return _TimedStorageSaveMany(
-        started_at=started_at,
-        finished_at=finished_at,
-        save_results=save_results,
-    )
-
-
-def _timed_output_write(output_writer: object, result: CrawlResult) -> _TimedOutputWrite:
-    started_at = time.perf_counter()
-    try:
-        output_writer.write_one(result)
-    except Exception as exc:  # pragma: no cover - exercised via caller path
-        finished_at = time.perf_counter()
-        return _TimedOutputWrite(
-            started_at=started_at,
-            finished_at=finished_at,
-            error=exc,
-        )
-    finished_at = time.perf_counter()
-    return _TimedOutputWrite(
-        started_at=started_at,
-        finished_at=finished_at,
-    )
-
-
 class FinalizerService:
-    """Own blocking finalizer work and telemetry shaping."""
+    """Persist successful results, then finalize their scheduler state."""
 
     def __init__(
         self,
         *,
         scheduler: "Scheduler",
         host_store: "HostStore | None",
+        storage: "PgStorage | None",
         executor: concurrent.futures.ThreadPoolExecutor | None,
+        output_writer: object | None,
+        results_sink: list[dict],
         host_key_for_url: Callable[[str], str],
     ) -> None:
         self.scheduler = scheduler
         self.host_store = host_store
+        self.storage = storage
         self.executor = executor
+        self.output_writer = output_writer
+        self.results_sink = results_sink
         self.host_key_for_url = host_key_for_url
 
+    def _persist_results(self, results: list[CrawlResult]) -> None:
+        if self.storage is not None:
+            persist_started = time.perf_counter()
+            save_results = self.storage.save_many(results)
+            persist_ms = _elapsed_ms(persist_started)
+            for result, save_result in zip(results, save_results, strict=False):
+                result.timings.persist_ms = persist_ms
+                storage_telemetry = getattr(save_result, "telemetry", None)
+                if storage_telemetry is not None:
+                    result.timings.storage = storage_telemetry
+
+        if self.output_writer is not None:
+            for result in results:
+                output_started = time.perf_counter()
+                self.output_writer.write_one(result)
+                result.timings.output_ms = _elapsed_ms(output_started)
+
+    def _retry_completion_failures(self, parsed_pages: list["ParsedPage"]) -> None:
+        if self.storage is not None:
+            self.storage.conn.rollback()
+        for parsed in parsed_pages:
+            updated = self.scheduler.mark_failed(
+                parsed.task.url,
+                retryable=True,
+                error="completion_error",
+                lease_token=parsed.task.lease_token,
+            )
+            if not updated:
+                self.scheduler.mark_failed(
+                    parsed.task.url,
+                    retryable=True,
+                    error="completion_error",
+                    lease_token=None,
+                )
+
     def finalize_success_batch_sync(self, parsed_pages: list["ParsedPage"]) -> FinalizerTelemetry:
-        """Apply success scheduler mutations for multiple parsed pages in one batch."""
+        """Persist successful pages before applying scheduler completion mutations."""
+        try:
+            self._persist_results([parsed.result for parsed in parsed_pages])
+            return self._finalize_persisted_batch(parsed_pages)
+        except Exception:
+            self._retry_completion_failures(parsed_pages)
+            raise
+
+    def _finalize_persisted_batch(
+        self,
+        parsed_pages: list["ParsedPage"],
+    ) -> FinalizerTelemetry:
+        """Apply scheduler mutations for an already-persisted success batch."""
         all_new_tasks = [new_task for parsed in parsed_pages for new_task in parsed.new_tasks]
         telemetry = FinalizerTelemetry(
             kind="success",
@@ -171,7 +165,6 @@ class FinalizerService:
         """Finalize successful parsed pages outside parse workers."""
         if not parsed_pages:
             return []
-        scheduler_started = time.perf_counter()
         if self.executor is not None:
             loop = asyncio.get_running_loop()
             telemetry = await loop.run_in_executor(
@@ -181,18 +174,19 @@ class FinalizerService:
             )
         else:
             telemetry = self.finalize_success_batch_sync(parsed_pages)
-        scheduler_ms = _elapsed_ms(scheduler_started)
         results: list[CrawlResult] = []
         for parsed in parsed_pages:
             record_success_runtime(parsed.task.url)
             result = parsed.result
-            result.timings.scheduler_ms += scheduler_ms
+            result.timings.scheduler_ms += telemetry.total_ms
             result.timings.finalizer = replace(
                 telemetry,
                 new_tasks_count=len(parsed.new_tasks),
             )
             result.timings.process_ms = _elapsed_ms(parsed.process_started)
             results.append(result)
+        if self.storage is None and self.output_writer is None:
+            self.results_sink.extend(result.to_dict() for result in results)
         return results
 
     def finalize_failed_sync(self, failed: "FailedTask") -> FinalizerTelemetry:
@@ -295,108 +289,3 @@ class FinalizerService:
         skipped.timings.finalizer = telemetry
         skipped.timings.process_ms = _elapsed_ms(skipped.process_started)
         return skipped
-
-
-class PublisherService:
-    """Own persistence and output publishing."""
-
-    def __init__(
-        self,
-        *,
-        storage: "PgStorage | None",
-        executor: concurrent.futures.ThreadPoolExecutor | None,
-        output_writer: object | None,
-        results_sink: list[dict],
-    ) -> None:
-        self.storage = storage
-        self.executor = executor
-        self.output_writer = output_writer
-        self.results_sink = results_sink
-
-    async def publish_results(self, results: list[CrawlResult]) -> None:
-        """Persist crawl output for one or more finalized crawl results."""
-        if not results:
-            return
-        loop = asyncio.get_running_loop()
-        publisher_started = time.perf_counter()
-        for result in results:
-            result.timings.publisher = result.timings.publisher or PublisherTelemetry()
-
-        if self.storage is not None:
-            persist_started = time.perf_counter()
-            if self.executor is not None:
-                timed_save_many = await loop.run_in_executor(
-                    self.executor,
-                    _timed_storage_save_many,
-                    self.storage,
-                    results,
-                )
-            else:
-                timed_save_many = await asyncio.to_thread(
-                    _timed_storage_save_many,
-                    self.storage,
-                    results,
-                )
-            persist_ms = _elapsed_ms(persist_started)
-            save_dispatch_wait_ms = _elapsed_ms_between(
-                persist_started,
-                timed_save_many.started_at,
-            )
-            save_run_ms = _elapsed_ms_between(
-                timed_save_many.started_at,
-                timed_save_many.finished_at,
-            )
-            for result in results:
-                result.timings.persist_ms = persist_ms
-                result.timings.publisher.save_dispatch_wait_ms = save_dispatch_wait_ms
-                result.timings.publisher.save_run_ms = save_run_ms
-            if timed_save_many.error is not None:
-                total_ms = _elapsed_ms(publisher_started)
-                for result in results:
-                    result.timings.publisher.total_ms = total_ms
-                raise timed_save_many.error
-            for result, save_result in zip(
-                results, timed_save_many.save_results or [], strict=False
-            ):
-                storage_telemetry = getattr(save_result, "telemetry", None)
-                if storage_telemetry is not None:
-                    result.timings.storage = storage_telemetry
-        if self.output_writer is not None:
-            for result in results:
-                output_started = time.perf_counter()
-                if self.executor is not None:
-                    timed_output = await loop.run_in_executor(
-                        self.executor,
-                        _timed_output_write,
-                        self.output_writer,
-                        result,
-                    )
-                else:
-                    timed_output = await asyncio.to_thread(
-                        _timed_output_write,
-                        self.output_writer,
-                        result,
-                    )
-                result.timings.output_ms = _elapsed_ms(output_started)
-                result.timings.publisher.output_dispatch_wait_ms = _elapsed_ms_between(
-                    output_started,
-                    timed_output.started_at,
-                )
-                result.timings.publisher.output_run_ms = _elapsed_ms_between(
-                    timed_output.started_at,
-                    timed_output.finished_at,
-                )
-                if timed_output.error is not None:
-                    total_ms = _elapsed_ms(publisher_started)
-                    result.timings.publisher.total_ms = total_ms
-                    raise timed_output.error
-        elif self.storage is None:
-            for result in results:
-                self.results_sink.append(result.to_dict())
-        total_ms = _elapsed_ms(publisher_started)
-        for result in results:
-            result.timings.publisher.total_ms = total_ms
-
-    async def publish_result(self, result: CrawlResult) -> None:
-        """Persist a single crawl result."""
-        await self.publish_results([result])

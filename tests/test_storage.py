@@ -526,10 +526,8 @@ def test_get_stats_includes_runtime_snapshot(pg_storage):
             "active_hosts": 3,
             "parse_queue_size": 2,
             "finalize_queue_size": 1,
-            "publish_queue_size": 1,
             "parse_queue_wait_max_ms": 12.5,
             "finalize_queue_wait_max_ms": 8.0,
-            "publish_queue_wait_max_ms": 4.5,
             "errors": {"timeout": 1},
         },
     )
@@ -543,10 +541,8 @@ def test_get_stats_includes_runtime_snapshot(pg_storage):
         "active_hosts": 3,
         "parse_queue_size": 2,
         "finalize_queue_size": 1,
-        "publish_queue_size": 1,
         "parse_queue_wait_max_ms": 12.5,
         "finalize_queue_wait_max_ms": 8.0,
-        "publish_queue_wait_max_ms": 4.5,
         "errors": {"timeout": 1},
     }
     assert stats["runtime"]["updated_at"] > 0
@@ -634,10 +630,8 @@ def test_get_stats_includes_runtime_snapshot(pg_storage):
         "backpressure": {
             "parse_queue_size": 2,
             "finalize_queue_size": 1,
-            "publish_queue_size": 1,
             "parse_queue_wait_max_ms": 12.5,
             "finalize_queue_wait_max_ms": 8.0,
-            "publish_queue_wait_max_ms": 4.5,
         },
         "admission_control": {},
         "discovery_admission": {

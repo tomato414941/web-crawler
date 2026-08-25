@@ -309,10 +309,8 @@ def _build_operator_summary(
         "backpressure": {
             "parse_queue_size": int(active_cycle.get("parse_queue_size", 0) or 0),
             "finalize_queue_size": int(active_cycle.get("finalize_queue_size", 0) or 0),
-            "publish_queue_size": int(active_cycle.get("publish_queue_size", 0) or 0),
             "parse_queue_wait_max_ms": active_cycle.get("parse_queue_wait_max_ms", 0.0),
             "finalize_queue_wait_max_ms": active_cycle.get("finalize_queue_wait_max_ms", 0.0),
-            "publish_queue_wait_max_ms": active_cycle.get("publish_queue_wait_max_ms", 0.0),
         },
         "admission_control": dict(active_cycle.get("admission_control", {})),
         "discovery_admission": _discovery_admission_summary(

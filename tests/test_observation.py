@@ -49,10 +49,8 @@ def test_build_operator_observation_compacts_runtime_and_storage_shape():
                 "backpressure": {
                     "parse_queue_size": 1,
                     "finalize_queue_size": 2,
-                    "publish_queue_size": 3,
                     "parse_queue_wait_max_ms": 10.0,
                     "finalize_queue_wait_max_ms": 20.0,
-                    "publish_queue_wait_max_ms": 30.0,
                 },
                 "admission_control": {
                     "mode": "reduce",
@@ -125,7 +123,7 @@ def test_build_operator_observation_compacts_runtime_and_storage_shape():
         "checked_at": 1710000001.0,
     }
     assert observation["throughput"]["errors"] == {"timeout": 1}
-    assert observation["backpressure"]["publish_queue_size"] == 3
+    assert observation["backpressure"]["finalize_queue_size"] == 2
     assert observation["admission_control"]["mode"] == "reduce"
     assert observation["admission_control"]["per_target_host_cap"] == 4
     assert observation["discovery_admission"]["admit_ratio"] == 0.25
@@ -177,10 +175,8 @@ def test_format_operator_observation_is_stable_and_readable():
             "backpressure": {
                 "parse_queue_size": 1,
                 "finalize_queue_size": 2,
-                "publish_queue_size": 3,
                 "parse_queue_wait_max_ms": 10.0,
                 "finalize_queue_wait_max_ms": 20.0,
-                "publish_queue_wait_max_ms": 30.0,
             },
             "discovery_admission": {
                 "extracted": 20,

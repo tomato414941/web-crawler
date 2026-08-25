@@ -11,10 +11,8 @@ from crawler.crawl import (
     CrawlerEngine,
     _FINALIZER_SENTINEL,
     _FailedTask,
-    _PUBLISHER_SENTINEL,
     _FinalizeItem,
     _ParsedPage,
-    _PublishItem,
     _SkippedTask,
 )
 from crawler.config import settings
@@ -22,7 +20,6 @@ from crawler.result import CrawlFailure, CrawlResult, CrawlStageTimings
 from crawler.storage import StorageSaveResult
 from crawler.telemetry import (
     FinalizerTelemetry,
-    PublisherTelemetry,
     StorageTelemetry,
     TelemetryAccumulator,
 )
@@ -221,13 +218,6 @@ def test_timing_accumulator_summarizes_stage_percentiles():
                 storage_tier="summary",
                 content_truncated=True,
             ),
-            publisher=PublisherTelemetry(
-                save_dispatch_wait_ms=5.0,
-                save_run_ms=6.0,
-                output_dispatch_wait_ms=7.0,
-                output_run_ms=8.0,
-                total_ms=20.0,
-            ),
         ),
     )
     timings.record("failed", CrawlStageTimings(lease_ms=3.0, fetch_ms=30.0))
@@ -263,10 +253,6 @@ def test_timing_accumulator_summarizes_stage_percentiles():
     assert summary["storage"]["content_store_ms"]["p95"] == 3.0
     assert summary["storage"]["commit_ms"]["p95"] == 4.0
     assert summary["storage"]["total_ms"]["p95"] == 10.0
-    assert summary["publisher"]["save_dispatch_wait_ms"]["p95"] == 5.0
-    assert summary["publisher"]["save_run_ms"]["p95"] == 6.0
-    assert summary["publisher"]["output_run_ms"]["p95"] == 8.0
-    assert summary["publisher"]["total_ms"]["p95"] == 20.0
     assert summary["counts"]["storage_tiers"] == {"summary": 1}
     assert summary["counts"]["storage_truncated"] == {"true": 1}
     assert summary["counts"]["stored_content_bytes"]["max"] == 128.0
@@ -298,13 +284,6 @@ def test_timing_accumulator_handles_empty_samples():
         "max": 0.0,
     }
     assert summary["storage"]["total_ms"] == {
-        "count": 0,
-        "avg": 0.0,
-        "p50": 0.0,
-        "p95": 0.0,
-        "max": 0.0,
-    }
-    assert summary["publisher"]["total_ms"] == {
         "count": 0,
         "avg": 0.0,
         "p50": 0.0,
@@ -345,22 +324,31 @@ def test_runtime_stats_include_host_first_fallback_stats():
 
 
 @pytest.mark.asyncio
-async def test_finalizer_and_publisher_drain_success_with_dedicated_executors():
-    ledger = _FakeScheduler(None)
+async def test_finalizer_persists_before_scheduler_completion():
+    events = []
+
+    class OrderedScheduler(_FakeScheduler):
+        def mark_done(self, url, lease_token=None):
+            events.append("done")
+            return super().mark_done(url, lease_token=lease_token)
+
+    class OrderedStorage(_FakeStorage):
+        def save_many(self, results):
+            events.append("saved")
+            return super().save_many(results)
+
+    ledger = OrderedScheduler(None)
     engine = CrawlerEngine(
         max_pages=1,
         scheduler=ledger,
         host_manager=_FakeHostManager(),
     )
-    storage = _FakeStorage()
+    storage = OrderedStorage()
     engine.pg_storage = storage
     engine._finalize_queue = asyncio.Queue()
-    engine._publish_queue = asyncio.Queue()
     engine._finalizer_executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
-    engine._publisher_executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
 
     finalizer = asyncio.create_task(engine._finalizer())
-    publisher = asyncio.create_task(engine._publisher())
     result = _crawl_result()
     await engine._finalize_queue.put(
         _FinalizeItem(
@@ -376,11 +364,10 @@ async def test_finalizer_and_publisher_drain_success_with_dedicated_executors():
     )
 
     await asyncio.wait_for(engine._finalize_queue.join(), timeout=2)
-    await asyncio.wait_for(engine._publish_queue.join(), timeout=2)
     await _stop_queue_worker(engine._finalize_queue, _FINALIZER_SENTINEL, finalizer)
-    await _stop_queue_worker(engine._publish_queue, _PUBLISHER_SENTINEL, publisher)
     await engine.close()
 
+    assert events == ["saved", "done"]
     assert ledger.done == [(result.url, "lease-1")]
     assert storage.saved == [result]
     assert engine.snapshot_runtime_stats()["finalizer_liveness"] == {
@@ -390,13 +377,6 @@ async def test_finalizer_and_publisher_drain_success_with_dedicated_executors():
         "last_progress_at": engine._last_finalizer_progress_at,
         "current_url": None,
         "current_kind": None,
-    }
-    assert engine.snapshot_runtime_stats()["publisher_liveness"] == {
-        "started": 1,
-        "completed": 1,
-        "failed": 0,
-        "last_progress_at": engine._last_publisher_progress_at,
-        "current_url": None,
     }
 
 
@@ -448,11 +428,21 @@ async def test_finalizer_survives_item_error_and_drains_next_item():
 
 
 @pytest.mark.asyncio
-async def test_publisher_survives_item_error_and_drains_next_item(monkeypatch):
+async def test_finalizer_retries_storage_failure_and_drains_next_item(monkeypatch):
+    class RetryScheduler(_FakeScheduler):
+        def __init__(self):
+            super().__init__(None)
+            self.failed = []
+
+        def mark_failed(self, url, retryable, error, lease_token=None):
+            self.failed.append((url, retryable, error, lease_token))
+            return True
+
     class FlakyStorage(_FakeStorage):
         def __init__(self):
             super().__init__()
             self.fail_once = True
+            self.conn = SimpleNamespace(rollback=lambda: None)
 
         def save_many(self, results):
             if self.fail_once:
@@ -460,37 +450,45 @@ async def test_publisher_survives_item_error_and_drains_next_item(monkeypatch):
                 raise RuntimeError("boom")
             return super().save_many(results)
 
+    ledger = RetryScheduler()
     engine = CrawlerEngine(
         max_pages=1,
-        scheduler=_FakeScheduler(None),
+        scheduler=ledger,
         host_manager=_FakeHostManager(),
     )
-    monkeypatch.setattr(settings, "publisher_batch_size", 1)
+    monkeypatch.setattr(settings, "finalizer_batch_size", 1)
     storage = FlakyStorage()
     engine.pg_storage = storage
-    engine._publish_queue = asyncio.Queue()
-    engine._publisher_executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
-    publisher = asyncio.create_task(engine._publisher())
+    engine._finalize_queue = asyncio.Queue()
+    engine._finalizer_executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    finalizer = asyncio.create_task(engine._finalizer())
 
     first = _crawl_result("https://example.com/first")
     second = _crawl_result("https://example.com/second")
     for result in (first, second):
-        await engine._publish_queue.put(
-            _PublishItem(
-                result=result,
+        await engine._finalize_queue.put(
+            _FinalizeItem(
+                parsed=_ParsedPage(
+                    task=CrawlTask(url=result.url, lease_token=result.url.rsplit("/", 1)[-1]),
+                    result=result,
+                    new_tasks=[],
+                    process_started=time.perf_counter(),
+                ),
                 enqueued_at=time.perf_counter(),
                 queue_depth=0,
             )
         )
 
-    await asyncio.wait_for(engine._publish_queue.join(), timeout=2)
-    await _stop_queue_worker(engine._publish_queue, _PUBLISHER_SENTINEL, publisher)
+    await asyncio.wait_for(engine._finalize_queue.join(), timeout=2)
+    await _stop_queue_worker(engine._finalize_queue, _FINALIZER_SENTINEL, finalizer)
     await engine.close()
 
     assert storage.saved == [second]
-    assert engine.snapshot_runtime_stats()["publisher_liveness"]["started"] == 2
-    assert engine.snapshot_runtime_stats()["publisher_liveness"]["completed"] == 1
-    assert engine.snapshot_runtime_stats()["publisher_liveness"]["failed"] == 1
+    assert ledger.failed == [("https://example.com/first", True, "completion_error", "first")]
+    assert ledger.done == [("https://example.com/second", "second")]
+    assert engine.snapshot_runtime_stats()["finalizer_liveness"]["started"] == 2
+    assert engine.snapshot_runtime_stats()["finalizer_liveness"]["completed"] == 1
+    assert engine.snapshot_runtime_stats()["finalizer_liveness"]["failed"] == 1
 
 
 @pytest.mark.asyncio
@@ -746,10 +744,6 @@ async def test_crawler_engine_records_stage_timings():
     assert result.timings.storage is not None
     assert result.timings.storage.content_store_ms == 3.0
     assert result.timings.storage.storage_tier == "summary"
-    assert result.timings.publisher is not None
-    assert result.timings.publisher.save_dispatch_wait_ms >= 0
-    assert result.timings.publisher.save_run_ms >= 0
-    assert result.timings.publisher.total_ms >= 0
     assert result.timings.lease_ms >= 0
     assert result.timings.precheck_ms >= 0
     assert result.timings.robots_ms >= 0
@@ -762,10 +756,8 @@ async def test_crawler_engine_records_stage_timings():
     assert result.timings.persist_ms >= 0
     assert result.timings.parse_queue_wait_ms >= 0
     assert result.timings.finalize_queue_wait_ms >= 0
-    assert result.timings.publish_queue_wait_ms >= 0
     assert result.timings.parse_queue_depth >= 0
     assert result.timings.finalize_queue_depth >= 0
-    assert result.timings.publish_queue_depth >= 0
     assert result.timings.process_ms >= result.timings.fetch_ms
     assert result.timings.process_ms >= result.timings.slot_ms
     runtime_stats = engine.snapshot_runtime_stats()
@@ -786,8 +778,6 @@ async def test_crawler_engine_records_stage_timings():
     assert timing_summary["finalizer"]["admit_host_heads_ms"]["p95"] == 0.5
     assert timing_summary["storage"]["total_ms"]["count"] == 1
     assert timing_summary["storage"]["content_store_ms"]["p95"] == 3.0
-    assert timing_summary["publisher"]["total_ms"]["count"] == 1
-    assert timing_summary["publisher"]["save_run_ms"]["count"] == 1
     assert timing_summary["counts"]["storage_tiers"] == {"summary": 1}
     assert timing_summary["counts"]["finalizer_kinds"] == {"success": 1}
     assert timing_summary["counts"]["finalizer_new_tasks"]["total"] == 1
@@ -848,14 +838,11 @@ async def test_queue_wait_metrics_record_backpressure():
     result = storage.saved[0]
     assert result.timings.finalize_queue_wait_ms >= 0
     assert result.timings.finalize_queue_depth >= 0
-    assert result.timings.publish_queue_wait_ms >= 0
-    assert result.timings.publish_queue_depth >= 0
-    assert result.timings.publisher is not None
-    assert result.timings.publisher.save_run_ms >= 200
+    assert result.timings.persist_ms >= 200
 
 
 @pytest.mark.asyncio
-async def test_publish_result_records_output_writer_breakdown():
+async def test_finalizer_records_output_writer_timing():
     engine = CrawlerEngine(
         max_pages=1,
         scheduler=_FakeScheduler(None),
@@ -865,14 +852,18 @@ async def test_publish_result_records_output_writer_breakdown():
     output_writer = _FakeOutputWriter()
     engine.pg_storage = storage
     engine.output_writer = output_writer
-    engine._publisher_executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    engine._finalizer_executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
 
     result = _crawl_result()
-    await engine._publish_result(result)
+    await engine._finalize_parsed_page(
+        _ParsedPage(
+            task=CrawlTask(url=result.url, lease_token="lease-1"),
+            result=result,
+            new_tasks=[],
+            process_started=time.perf_counter(),
+        )
+    )
     await engine.close()
 
     assert output_writer.written == [result]
-    assert result.timings.publisher is not None
-    assert result.timings.publisher.output_dispatch_wait_ms >= 0
-    assert result.timings.publisher.output_run_ms >= 0
     assert result.timings.output_ms >= 0

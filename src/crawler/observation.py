@@ -115,10 +115,8 @@ def build_operator_observation(
         "backpressure": {
             "parse_queue_size": _int(backpressure.get("parse_queue_size")),
             "finalize_queue_size": _int(backpressure.get("finalize_queue_size")),
-            "publish_queue_size": _int(backpressure.get("publish_queue_size")),
             "parse_queue_wait_max_ms": _float(backpressure.get("parse_queue_wait_max_ms")),
             "finalize_queue_wait_max_ms": _float(backpressure.get("finalize_queue_wait_max_ms")),
-            "publish_queue_wait_max_ms": _float(backpressure.get("publish_queue_wait_max_ms")),
         },
         "admission_control": {
             "mode": admission_control.get("mode"),
@@ -240,14 +238,12 @@ def format_operator_observation(observation: Mapping[str, object]) -> str:
         (
             "  "
             f"parse={_format_int(backpressure.get('parse_queue_size'))} "
-            f"finalize={_format_int(backpressure.get('finalize_queue_size'))} "
-            f"publish={_format_int(backpressure.get('publish_queue_size'))}"
+            f"finalize={_format_int(backpressure.get('finalize_queue_size'))}"
         ),
         (
             "  "
             f"wait_max_ms parse={_format_float(backpressure.get('parse_queue_wait_max_ms'))} "
-            f"finalize={_format_float(backpressure.get('finalize_queue_wait_max_ms'))} "
-            f"publish={_format_float(backpressure.get('publish_queue_wait_max_ms'))}"
+            f"finalize={_format_float(backpressure.get('finalize_queue_wait_max_ms'))}"
         ),
         "",
         "Storage Tiers",
