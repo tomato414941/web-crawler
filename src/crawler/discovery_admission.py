@@ -72,9 +72,6 @@ class AdmissionControl:
         }
 
 
-FrontierPressure = AdmissionControl
-
-
 @dataclass(frozen=True)
 class HostAdmissionContext:
     """Known host quality signals for admission scoring."""

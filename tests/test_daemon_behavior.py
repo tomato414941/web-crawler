@@ -742,7 +742,7 @@ def test_ensure_runnable_supply_tops_up_when_runnable_surface_is_starved():
     )
     ledger = FakeLedger()
 
-    daemon._ensure_runnable_supply(ledger)
+    daemon._policy.ensure_runnable_supply(ledger)
 
     assert ledger.host_promote_calls == [(3, 1)]
     assert ledger.upsert_calls == []
@@ -837,7 +837,7 @@ def test_ensure_runnable_supply_does_not_bootstrap_empty_ledger():
     )
     ledger = FakeLedger()
 
-    daemon._ensure_runnable_supply(ledger)
+    daemon._policy.ensure_runnable_supply(ledger)
 
     assert ledger.host_promote_calls == [(3, 1)]
     assert ledger.upsert_calls == []
@@ -888,7 +888,7 @@ def test_ensure_runnable_supply_stays_idle_when_host_promotion_is_insufficient()
     )
     ledger = FakeLedger()
 
-    daemon._ensure_runnable_supply(ledger)
+    daemon._policy.ensure_runnable_supply(ledger)
 
     assert ledger.host_promote_calls == [(3, 1)]
     assert ledger.upsert_calls == []
@@ -934,7 +934,7 @@ def test_ensure_runnable_supply_does_not_top_up_when_runnable_surface_is_healthy
     )
     ledger = FakeLedger()
 
-    daemon._ensure_runnable_supply(ledger)
+    daemon._policy.ensure_runnable_supply(ledger)
 
     assert ledger.upsert_calls == []
 
@@ -985,7 +985,7 @@ def test_ensure_runnable_supply_does_not_reinsert_when_runnable_pending_is_high_
     )
     ledger = FakeLedger()
 
-    daemon._ensure_runnable_supply(ledger)
+    daemon._policy.ensure_runnable_supply(ledger)
 
     assert ledger.host_promote_calls == [(29, 1)]
     assert ledger.upsert_calls == []
@@ -1036,7 +1036,7 @@ def test_ensure_runnable_supply_tops_up_when_runnable_host_diversity_is_low():
     )
     ledger = FakeLedger()
 
-    daemon._ensure_runnable_supply(ledger)
+    daemon._policy.ensure_runnable_supply(ledger)
 
     assert ledger.host_promote_calls == [(22, 1)]
     assert ledger.upsert_calls == []
@@ -1077,7 +1077,7 @@ def test_ensure_runnable_supply_stays_idle_when_only_runnable_depth_is_low():
     )
     ledger = FakeLedger()
 
-    daemon._ensure_runnable_supply(ledger)
+    daemon._policy.ensure_runnable_supply(ledger)
 
     assert ledger.host_promote_calls == []
 
@@ -1120,7 +1120,7 @@ def test_promote_blocked_retry_restores_small_subset_when_ready_is_thin():
     )
     ledger = FakeLedger()
 
-    promoted = daemon._promote_blocked_retry(ledger)
+    promoted = daemon._policy.promote_blocked_retry(ledger)
 
     assert promoted == 2
     assert ledger.calls == [(8, 1, 8)]
@@ -1166,7 +1166,7 @@ def test_promote_blocked_retry_surges_when_runnable_is_zero():
     )
     ledger = FakeLedger()
 
-    promoted = daemon._promote_blocked_retry(ledger)
+    promoted = daemon._policy.promote_blocked_retry(ledger)
 
     assert promoted == 5
     assert ledger.calls == [(8, 8, 8)]
@@ -1212,7 +1212,7 @@ def test_promote_blocked_retry_skips_when_runnable_is_healthy():
     )
     ledger = FakeLedger()
 
-    promoted = daemon._promote_blocked_retry(ledger)
+    promoted = daemon._policy.promote_blocked_retry(ledger)
 
     assert promoted == 0
     assert ledger.calls == []
@@ -1258,7 +1258,7 @@ def test_promote_blocked_retry_runs_when_runnable_is_healthy_but_host_diversity_
     )
     ledger = FakeLedger()
 
-    promoted = daemon._promote_blocked_retry(ledger)
+    promoted = daemon._policy.promote_blocked_retry(ledger)
 
     assert promoted == 3
     assert ledger.calls == [(8, 1, 8)]
@@ -1300,7 +1300,7 @@ def test_promote_blocked_retry_skips_when_no_retry_quarantine_is_present():
     )
     ledger = FakeLedger()
 
-    promoted = daemon._promote_blocked_retry(ledger)
+    promoted = daemon._policy.promote_blocked_retry(ledger)
 
     assert promoted == 0
     assert ledger.calls == []
@@ -1342,7 +1342,7 @@ def test_promote_blocked_retry_caps_budget_to_retry_quarantine_count():
     )
     ledger = FakeLedger()
 
-    promoted = daemon._promote_blocked_retry(ledger)
+    promoted = daemon._policy.promote_blocked_retry(ledger)
 
     assert promoted == 3
     assert ledger.calls == [(3, 3, 8)]
@@ -1369,7 +1369,7 @@ def test_retire_blocked_retry_uses_configured_thresholds():
     )
     ledger = FakeLedger()
 
-    retired = daemon._retire_blocked_retry(ledger)
+    retired = daemon._policy.retire_blocked_retry(ledger)
 
     assert retired == 3
     assert ledger.calls == [(64, 86400.0)]
@@ -1404,7 +1404,7 @@ def test_retire_blocked_retry_skips_when_no_retry_quarantine_is_present():
     )
     ledger = FakeLedger()
 
-    retired = daemon._retire_blocked_retry(ledger)
+    retired = daemon._policy.retire_blocked_retry(ledger)
 
     assert retired == 0
     assert ledger.calls == []
@@ -1431,7 +1431,7 @@ def test_restore_recovered_blocked_retry_uses_cycle_sized_budget():
     )
     ledger = FakeLedger()
 
-    restored = daemon._restore_recovered_blocked_retry(ledger)
+    restored = daemon._policy.restore_recovered_blocked_retry(ledger)
 
     assert restored == 7
     assert ledger.calls == [(300, 8)]
@@ -1466,7 +1466,7 @@ def test_restore_recovered_blocked_retry_skips_when_no_retry_quarantine_is_prese
     )
     ledger = FakeLedger()
 
-    restored = daemon._restore_recovered_blocked_retry(ledger)
+    restored = daemon._policy.restore_recovered_blocked_retry(ledger)
 
     assert restored == 0
     assert ledger.calls == []

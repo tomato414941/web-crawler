@@ -132,28 +132,6 @@ class RunnableHostHead:
     host_pending_count: int
 
 
-@dataclass(frozen=True)
-class _RunnableSql:
-    """SQL fragments for pending URL readiness checks."""
-
-    where: str
-    params: tuple[object, ...]
-    runnable_at: str
-    join_sql: str = ""
-    latency_ms_sql: str = "0"
-
-
-@dataclass(frozen=True)
-class _HostFirstReadModelResult:
-    """Result of one host-head read-model lease attempt."""
-
-    task: _CrawlTask | None
-    read_model: str
-    candidates: int = 0
-    stale_candidates: int = 0
-    execution_tier: int | None = None
-
-
 def _elapsed_ms(started_at: float) -> float:
     return round((time.perf_counter() - started_at) * 1000, 1)
 
