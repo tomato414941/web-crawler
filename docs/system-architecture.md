@@ -29,7 +29,7 @@ At the project level, the crawler should converge toward these layers:
 4. Scheduler membership
 5. Execution and lease ownership
 6. Host state
-7. Fetch / parse / finalize / persist pipeline
+7. Fetch / parse / finalize pipeline
 8. Read models and operator surfaces
 9. Bootstrap and seed management
 
@@ -177,10 +177,8 @@ The project has already converged on these pipeline stages:
 - fetch
 - parse
 - finalize
-- persist
 
-This split is important because the scheduler should not be forced to own all later stages
-synchronously.
+This split keeps blocking parsing and completion work outside fetch workers.
 
 Pipeline stages are operational boundaries, not durable URL identity boundaries.
 
@@ -189,8 +187,8 @@ Runtime stage code should make these boundaries explicit:
 - queue ownership and backpressure belong to the pipeline runtime
 - per-stage liveness belongs to the pipeline runtime
 - parse owns fetched-page parsing and conversion of parse exceptions into finalizable failures
-- finalize owns scheduler mutation after parsing
-- persist owns blocking storage and output writes
+- finalize owns completion after parsing: it persists successful observations before applying
+  scheduler completion, and records failed or skipped scheduler outcomes
 - crawler orchestration wires stages together, but should not accumulate stage policy
 
 Every stage item must either complete or fail visibly. Silent worker death and unbounded queues are
@@ -236,7 +234,7 @@ Current implementation concepts should converge toward the following meaning:
 - worker lanes / queue-specific worker pools => operational execution surfaces, not model truth
 - `active_leases` => execution ownership
 - `host_state` => host state
-- `fetch -> parse -> finalize -> persist` => crawl pipeline
+- `fetch -> parse -> finalize` => crawl pipeline
 - `/stats` and runtime payloads => read models
 - seed catalog and bootstrap paths => bootstrap layer
 

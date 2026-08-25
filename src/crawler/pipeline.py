@@ -191,7 +191,7 @@ def finalize_item_context(item: FinalizeItem) -> tuple[str, str | None]:
 
 
 class FinalizeStage:
-    """Drain parsed payloads and apply scheduler mutations before persistence."""
+    """Persist parsed payloads and apply their scheduler outcome."""
 
     def __init__(
         self,

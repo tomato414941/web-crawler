@@ -29,7 +29,7 @@ project 全体としては、crawler は次の layer へ収束していくべき
 4. Scheduler membership
 5. Execution and lease ownership
 6. Host state
-7. Fetch / parse / finalize / persist pipeline
+7. Fetch / parse / finalize pipeline
 8. Read models and operator surfaces
 9. Bootstrap and seed management
 
@@ -176,9 +176,8 @@ project はすでに次の段へ収束しつつある。
 - fetch
 - parse
 - finalize
-- persist
 
-この分離が重要なのは、scheduler が後段全部を同期的に抱え込まないためである。
+この分離により、blocking な parse と completion の処理を fetch worker の外に置く。
 
 pipeline stage は operational boundary であり、durable URL identity boundary ではない。
 
@@ -187,8 +186,8 @@ runtime の stage code はこの境界を明示すべきである。
 - queue ownership と backpressure は pipeline runtime が持つ
 - stage ごとの liveness は pipeline runtime が持つ
 - parse は fetched page parsing と parse exception の finalizable failure 変換を持つ
-- finalize は parse 後の scheduler mutation を持つ
-- persist は blocking な storage / output write を持つ
+- finalize は parse 後の completion を持つ。成功した observation を保存してから scheduler を
+  complete し、failure と skip は対応する scheduler outcome を記録する
 - crawler orchestration は stage を接続するが、stage policy を溜め込まない
 
 stage に入った item は必ず complete するか、失敗として観測できる必要がある。
@@ -234,7 +233,7 @@ URL が crawler の内部に入った後まで、通常の scheduler treatment �
 - worker lane / queue ごとの worker pool => model truth ではなく operational execution surface
 - `active_leases` => execution ownership
 - `host_state` => host state
-- `fetch -> parse -> finalize -> persist` => crawl pipeline
+- `fetch -> parse -> finalize` => crawl pipeline
 - `/stats` と runtime payload => read models
 - seed catalog と bootstrap path => bootstrap layer
 
