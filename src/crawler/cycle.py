@@ -1,8 +1,7 @@
-"""Runtime state containers for crawler orchestration."""
+"""State and operator snapshots for one crawl cycle."""
 
 from __future__ import annotations
 
-import asyncio
 from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -12,23 +11,19 @@ from .result import CrawlStageTimings
 from .telemetry import PipelineTelemetry, TelemetryAccumulator
 
 
-class CrawlerRuntime:
-    """Own cycle-local runtime state and operational queues."""
+class CrawlCycle:
+    """Own the mutable state and operational queues for one crawl cycle."""
 
     def __init__(self, queue_maxsize: int) -> None:
-        self.queue_maxsize = queue_maxsize
-        self.reset_cycle()
-
-    def reset_cycle(self) -> None:
-        """Reset all cycle-local runtime state."""
         self.running = False
         self.pages_crawled = 0
         self.claimed_pages = 0
+        self.results: list[dict] = []
         self.failure_counts: Counter[str] = Counter()
         self.active_host_counts: Counter[str] = Counter()
-        self.pipeline_queues: PipelineQueues | None = None
-        self.parse_queue: asyncio.Queue[object] | None = None
-        self.finalize_queue: asyncio.Queue[object] | None = None
+        self.pipeline_queues = PipelineQueues(maxsize=queue_maxsize)
+        self.parse_queue = self.pipeline_queues.parse
+        self.finalize_queue = self.pipeline_queues.finalize
         self.parser_liveness = StageLiveness(include_kind=True)
         self.finalizer_liveness = StageLiveness(include_kind=True)
         self.timing_summary = TelemetryAccumulator()
@@ -36,19 +31,7 @@ class CrawlerRuntime:
 
     def queue_payload(self) -> dict[str, object]:
         """Return queue-depth and wait snapshots for the current runtime state."""
-        queue_payload = (
-            self.pipeline_queues.snapshot()
-            if self.pipeline_queues is not None
-            else PipelineQueues.empty_snapshot(self.queue_maxsize)
-        )
-        if self.pipeline_queues is None:
-            queue_payload["parse_queue_size"] = (
-                self.parse_queue.qsize() if self.parse_queue is not None else 0
-            )
-            queue_payload["finalize_queue_size"] = (
-                self.finalize_queue.qsize() if self.finalize_queue is not None else 0
-            )
-        return queue_payload
+        return self.pipeline_queues.snapshot()
 
     def record_timing(self, outcome: str, timings: CrawlStageTimings | None) -> None:
         """Record one finalized crawl attempt in cycle-local timing stats."""
@@ -75,13 +58,13 @@ class CycleSnapshotBuilder:
     refresh_workers: int
     host_first_fallback_stats: Callable[[], dict[str, int]]
 
-    def active_cycle_payload(self, runtime: CrawlerRuntime) -> dict[str, object]:
+    def active_cycle_payload(self, cycle: CrawlCycle) -> dict[str, object]:
         """Return active-cycle stats without completed-cycle fields."""
         return {
-            "running": runtime.running,
-            "state": "active" if runtime.running else "idle",
-            "pages_crawled": runtime.pages_crawled,
-            "claimed_pages": runtime.claimed_pages,
+            "running": cycle.running,
+            "state": "active" if cycle.running else "idle",
+            "pages_crawled": cycle.pages_crawled,
+            "claimed_pages": cycle.claimed_pages,
             "max_pages": self.max_pages,
             "concurrency": self.concurrency,
             "parser_workers": self.parser_workers,
@@ -94,24 +77,24 @@ class CycleSnapshotBuilder:
                 "probing": self.probing_workers,
                 "refresh": self.refresh_workers,
             },
-            "active_hosts": len(runtime.active_host_counts),
-            **runtime.queue_payload(),
-            "parser_liveness": runtime.parser_liveness.snapshot(),
-            "finalizer_liveness": runtime.finalizer_liveness.snapshot(),
-            "failure_breakdown": dict(runtime.failure_counts),
-            "timing_summary": runtime.timing_summary.snapshot(),
-            "admission_control": dict(runtime.admission_control),
+            "active_hosts": len(cycle.active_host_counts),
+            **cycle.queue_payload(),
+            "parser_liveness": cycle.parser_liveness.snapshot(),
+            "finalizer_liveness": cycle.finalizer_liveness.snapshot(),
+            "failure_breakdown": dict(cycle.failure_counts),
+            "timing_summary": cycle.timing_summary.snapshot(),
+            "admission_control": dict(cycle.admission_control),
             "host_first_fallback": self.host_first_fallback_stats(),
         }
 
-    def runtime_stats(self, runtime: CrawlerRuntime) -> dict[str, object]:
+    def runtime_stats(self, cycle: CrawlCycle) -> dict[str, object]:
         """Return the live runtime stats payload for external observers."""
-        active_cycle = self.active_cycle_payload(runtime)
+        active_cycle = self.active_cycle_payload(cycle)
         return {
             **active_cycle,
             "pages": None,
             "elapsed_seconds": None,
             "pages_per_second": None,
-            "errors": dict(runtime.failure_counts),
+            "errors": dict(cycle.failure_counts),
             "active_cycle": active_cycle,
         }

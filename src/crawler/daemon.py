@@ -531,8 +531,8 @@ class CrawlDaemon:
         scheduler = Scheduler(storage.conn) if hasattr(storage, "conn") else None
         try:
             while not stop_event.is_set():
-                if engine._running:
-                    payload = engine.snapshot_runtime_stats()
+                payload = engine.snapshot_runtime_stats()
+                if payload["running"]:
                     if scheduler is not None:
                         payload = self._add_scheduler_runtime_views(payload, scheduler)
                     self._persist_runtime_payload(storage, payload)

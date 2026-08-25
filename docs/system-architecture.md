@@ -184,6 +184,8 @@ Pipeline stages are operational boundaries, not durable URL identity boundaries.
 
 Runtime stage code should make these boundaries explicit:
 
+- `CrawlerEngine` owns one `CrawlCycle`, created at the start of each cycle
+- `CrawlCycle` owns cycle-local queues, counters, liveness, and timing state
 - queue ownership and backpressure belong to the pipeline runtime
 - per-stage liveness belongs to the pipeline runtime
 - parse owns fetched-page parsing and conversion of parse exceptions into finalizable failures
