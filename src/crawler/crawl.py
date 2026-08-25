@@ -1064,7 +1064,7 @@ class CrawlerEngine:
         await stage.run()
 
     async def _finalize_parsed_page(self, parsed: _ParsedPage) -> CrawlResult:
-        """Apply scheduler mutations after parse and before persistence."""
+        """Persist one parsed page and apply its scheduler outcome."""
         return (await self._finalize_parsed_pages([parsed]))[0]
 
     async def _finalize_parsed_pages(self, parsed_pages: list[_ParsedPage]) -> list[CrawlResult]:
