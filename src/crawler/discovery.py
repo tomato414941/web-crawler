@@ -284,21 +284,3 @@ def rank_discovered_url(
         parent_archetype=parent_archetype,
         parent_context=classify_parent_context(parent_archetype, parent_signals),
     )
-
-
-_ADMISSION_EXPORTS = {
-    "AdmissionControl",
-    "DiscoveryAdmissionDecision",
-    "FrontierPressure",
-    "HostAdmissionContext",
-    "build_admission_control",
-    "decide_discovered_url_admission",
-}
-
-
-def __getattr__(name: str) -> object:
-    if name in _ADMISSION_EXPORTS:
-        from . import discovery_admission
-
-        return getattr(discovery_admission, name)
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
