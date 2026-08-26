@@ -27,7 +27,6 @@ def test_build_operator_observation_compacts_runtime_and_storage_shape():
     observation = build_operator_observation(
         {
             "stats_source": "runtime_snapshot",
-            "diagnostics_endpoint": "/stats/diagnostics",
             "total_pages": 10,
             "hosts": 3,
             "total_bytes": 2048,
@@ -132,7 +131,6 @@ def test_build_operator_observation_compacts_runtime_and_storage_shape():
         "per_page_cap": 5,
     }
     assert observation["storage"]["outlinks"]["stored_ratio"] == 0.25
-    assert observation["runtime"]["diagnostics_endpoint"] == "/stats/diagnostics"
 
 
 def test_format_operator_observation_is_stable_and_readable():
