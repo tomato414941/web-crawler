@@ -81,15 +81,14 @@ _META_ROBOTS_PATTERN = re.compile(
 
 def _response_content_length(response: Response) -> int:
     """Return declared resource length when known, otherwise downloaded bytes."""
-    content_length = getattr(response, "content_length", None)
+    content_length = response.content_length
     return content_length if content_length is not None else len(response.content)
 
 
 def _response_header(response: Response, name: str) -> str:
     """Return a response header value using case-insensitive lookup."""
-    headers = getattr(response, "headers", {}) or {}
     lower_name = name.lower()
-    for key, value in headers.items():
+    for key, value in response.headers.items():
         if key.lower() == lower_name:
             return value
     return ""
@@ -332,8 +331,7 @@ class CrawlerEngine:
         if self._finalizer_storage is not None:
             self._finalizer_storage.close()
             self._finalizer_storage = None
-        if hasattr(self.fetcher, "close"):
-            await self.fetcher.close()
+        await self.fetcher.close()
         if self._owns_host_manager:
             await self.host_manager.close()
 
@@ -607,9 +605,9 @@ class CrawlerEngine:
                 timeout=settings.fetch_total_timeout,
             )
             timings.fetch_ms = _elapsed_ms(fetch_started)
-            timings.fetch_request_ms = getattr(response, "fetch_request_ms", 0.0)
-            timings.fetch_body_read_ms = getattr(response, "fetch_body_read_ms", 0.0)
-            timings.fetch = getattr(response, "telemetry", None)
+            timings.fetch_request_ms = response.fetch_request_ms
+            timings.fetch_body_read_ms = response.fetch_body_read_ms
+            timings.fetch = response.telemetry
             if timings.fetch is None:
                 timings.fetch = FetchTelemetry(
                     outcome="http_error" if response.status >= 400 else "ok",
@@ -617,9 +615,9 @@ class CrawlerEngine:
                     final_url=response.url,
                     content_length=_response_content_length(response),
                     bytes_read=len(response.content),
-                    metadata_only=getattr(response, "metadata_only", False),
-                    body_truncated=getattr(response, "body_truncated", False),
-                    admission_reason=getattr(response, "admission_reason", None),
+                    metadata_only=response.metadata_only,
+                    body_truncated=response.body_truncated,
+                    admission_reason=response.admission_reason,
                     total_ms=timings.fetch_ms,
                     response_headers_ms=timings.fetch_request_ms,
                     body_read_ms=timings.fetch_body_read_ms,
@@ -813,7 +811,7 @@ class CrawlerEngine:
         response: Response,
     ) -> tuple[str, bytes, list[str], list[CrawlTask], int, dict[str, int]]:
         """Prepare parsed content and discovered tasks away from the event loop."""
-        if getattr(response, "metadata_only", False):
+        if response.metadata_only:
             return "", b"", [], [], 0, {}
 
         stores_text = should_store_text_content(
@@ -880,7 +878,7 @@ class CrawlerEngine:
                 discovery_value=task.discovery_value,
                 outlink_count=outlink_count,
                 content_bytes=content_bytes,
-                body_truncated=bool(getattr(response, "body_truncated", False)),
+                body_truncated=response.body_truncated,
             ),
         )
 

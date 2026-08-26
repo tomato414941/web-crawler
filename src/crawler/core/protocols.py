@@ -34,3 +34,7 @@ class Fetcher(Protocol):
     async def fetch(self, url: str) -> Response:
         """Fetch a URL and return the response."""
         ...
+
+    async def close(self) -> None:
+        """Release resources owned by the fetcher."""
+        ...

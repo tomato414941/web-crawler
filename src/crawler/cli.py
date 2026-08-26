@@ -63,8 +63,7 @@ async def _fetch(url: str, use_browser: bool = False, auto: bool = False) -> Fet
             used_browser=used_browser,
         )
     finally:
-        if hasattr(fetcher, "close"):
-            await fetcher.close()
+        await fetcher.close()
 
 
 def _write_json_output(output_path: str, result: object | Mapping[str, Any]):

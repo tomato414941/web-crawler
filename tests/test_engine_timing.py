@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from crawler.core import Response
 from crawler.crawl import CrawlerEngine
 from crawler.config import settings
 from crawler.pipeline import (
@@ -141,11 +142,10 @@ class _FakeHostManager:
 class _FakeFetcher:
     async def fetch(self, url):
         html = "<html><body><a href='/next'>next</a></body></html>"
-        return SimpleNamespace(
+        return Response(
             url=url,
             status=200,
             content=html.encode(),
-            text=html,
             headers={"content-type": "text/html"},
         )
 
