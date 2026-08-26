@@ -72,7 +72,7 @@ Primary operator surfaces:
 Captured on 2026-05-10 from the private Docker Compose deployment on
 `dev@100.92.121.94`.
 
-- services: `api`, `crawler`, `observer`, and `postgres` running
+- services: `api`, `crawler`, and `postgres` running
 - git: production checkout on `main`, aligned with `origin/main`
 - crawl totals: 268,272 pages across 137,954 hosts
 - storage: 16.0 GiB stored content from 109.4 GiB raw content
@@ -92,7 +92,7 @@ policy is reducing it at the intended rate before making throughput or discovery
 
 Follow-up read-only drain analysis from the same deployment:
 
-- observer trend over the latest 24.15 hours: pages +351, scheduler pending -16, admission pending
+- recorded trend over the latest 24.15 hours: pages +351, scheduler pending -16, admission pending
   -16; average reported throughput about 9 pages/sec, but durable page growth is much lower
 - pending storage surface: `scheduler_queue_scheduled` holds about 1.02M live rows and 1.2 GiB;
   this is live data, not table bloat
@@ -200,9 +200,9 @@ Capture a fresh deployment snapshot before tuning throughput or growth, then com
 2026-05-10 baseline above. The next decision should come from the same observation window:
 
 - [x] `crawler observe` and `crawler observe --json`
-- [x] `/stats` and `/stats/diagnostics`
+- [x] `/stats`
 - [x] `crawler scheduler-check --sample-limit 0`
-- [x] recent `api`, `crawler`, and `observer` logs
+- [x] recent `api` and `crawler` logs
 - [x] direct egress smoke for the active deployment profile
 - [ ] repeat the same snapshot after any tuning change
 
@@ -216,13 +216,13 @@ thresholds, inspect the durable scheduler surfaces and admission shape:
 
 - [x] top pending hosts and registrable domains
 - [x] pending URL length and path-depth distribution
-- [x] whether pending is flat, rising, or draining across observer snapshots
+- [x] whether pending is flat, rising, or draining across recorded snapshots
 - [x] whether large relation sizes such as `scheduler_queue_scheduled` are live rows or table/index
   bloat
 - [ ] whether drain-mode caps are too permissive for broad-web growth, or whether crawl throughput is
   simply below the current discovery inflow
 
-Prefer read-only SQL and existing observer JSONL records. Do not add allowlists or topic-specific
+Prefer read-only SQL and existing recorded snapshots. Do not add allowlists or topic-specific
 filters to solve broad growth pressure.
 
 Current next step: explain the gap between reported cycle throughput and durable page growth, then
@@ -235,7 +235,7 @@ choose one conservative growth-control change to test. Candidate policy directio
 
 ### 3. Durable throughput accounting
 
-The observer reports about 9 pages/sec, but the 24-hour durable `pages` count rose by only 351.
+Recorded snapshots report about 9 pages/sec, but the 24-hour durable `pages` count rose by only 351.
 Before tuning concurrency, determine whether this is expected recrawl/upsert behavior, repeated
 fetching of already-known URLs, or a stats/accounting mismatch.
 

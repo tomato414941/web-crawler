@@ -3,12 +3,7 @@
 from __future__ import annotations
 
 import json
-import logging
-import re
-import time
-from collections.abc import Callable, Mapping
-from dataclasses import dataclass
-from pathlib import Path
+from collections.abc import Mapping
 from typing import Any
 
 from .scheduler_leases import ACTIVE_LEASES_TABLE
@@ -17,8 +12,6 @@ from .scheduler_quarantine import BLOCKED_HOST_BACKOFF_TABLE
 from .url_ledger_store import URL_LEDGER_TABLE
 from .scheduler_invariants import SchedulerInvariantChecker
 from .host_ledger import HOST_LEDGER_TABLE
-
-logger = logging.getLogger(__name__)
 
 OBSERVED_RELATIONS = (
     "pages",
@@ -33,12 +26,6 @@ OBSERVED_RELATIONS = (
     "crawler_runtime_stats",
 )
 OPERATOR_OBSERVATION_STATEMENT_TIMEOUT_MS = 15000
-_FALLBACK_ERROR_MESSAGE = "Observation failed; check service logs for details."
-_URL_WITH_CREDENTIALS_PATTERN = re.compile(
-    r"\b[a-zA-Z][a-zA-Z0-9+.-]*://[^\s]+",
-)
-
-
 def read_operator_observation(
     storage: Any,
     *,
@@ -294,186 +281,6 @@ def format_operator_observation(observation: Mapping[str, object]) -> str:
 def serialize_operator_observation(observation: Mapping[str, object]) -> str:
     """Serialize an observation for machine-readable CLI output."""
     return json.dumps(observation, indent=2, ensure_ascii=False)
-
-
-def build_observation_record(
-    observation: Mapping[str, object],
-    *,
-    observed_at: float | None = None,
-) -> dict[str, object]:
-    """Build one JSONL-safe observation record."""
-    return {
-        "ok": True,
-        "observed_at": time.time() if observed_at is None else observed_at,
-        "observation": dict(observation),
-    }
-
-
-def build_observation_error_record(
-    error: BaseException,
-    *,
-    observed_at: float | None = None,
-) -> dict[str, object]:
-    """Build one JSONL-safe error record without leaking connection details."""
-    return {
-        "ok": False,
-        "observed_at": time.time() if observed_at is None else observed_at,
-        "error_type": type(error).__name__,
-        "error": sanitize_observation_error(error),
-    }
-
-
-def sanitize_observation_error(error: BaseException) -> str:
-    """Return a short operator-safe error message."""
-    message = str(error).strip()
-    if not message:
-        return _FALLBACK_ERROR_MESSAGE
-    message = _URL_WITH_CREDENTIALS_PATTERN.sub("<redacted-url>", message)
-    message = re.sub(r"\b\S+:\S+@", "<redacted-credentials>@", message)
-    message = " ".join(message.split())
-    return message[:240] if message else _FALLBACK_ERROR_MESSAGE
-
-
-@dataclass(frozen=True, slots=True)
-class ObservationWatchConfig:
-    """Runtime settings for periodic observation."""
-
-    output: Path
-    interval: float = 300.0
-    limit: int | None = None
-    max_bytes: int = 10_485_760
-    max_files: int = 7
-    max_failures: int = 5
-
-
-class ObservationWatchFailed(RuntimeError):
-    """Raised when periodic observation reaches its failure policy."""
-
-
-class ObservationWatcher:
-    """Run periodic observations and persist JSONL records."""
-
-    def __init__(
-        self,
-        *,
-        storage_factory: Callable[[], Any],
-        config: ObservationWatchConfig,
-        sleep: Callable[[float], None] = time.sleep,
-        clock: Callable[[], float] = time.time,
-        log: logging.Logger = logger,
-    ) -> None:
-        self._storage_factory = storage_factory
-        self._config = config
-        self._sleep = sleep
-        self._clock = clock
-        self._log = log
-        self._consecutive_failures = 0
-
-    def run(self) -> int:
-        count = 0
-        while self._config.limit is None or count < self._config.limit:
-            record = self._observe_once()
-            append_observation_record(
-                self._config.output,
-                record,
-                max_bytes=self._config.max_bytes,
-                max_files=self._config.max_files,
-            )
-            count += 1
-            self._log_record(record)
-
-            if (
-                not record["ok"]
-                and self._config.max_failures
-                and self._consecutive_failures >= self._config.max_failures
-            ):
-                self._log.error(
-                    "exiting after %d consecutive observation failures",
-                    self._config.max_failures,
-                )
-                raise ObservationWatchFailed(
-                    f"{self._config.max_failures} consecutive observation failures"
-                )
-
-            if self._config.limit is not None and count >= self._config.limit:
-                break
-            self._sleep(self._config.interval)
-        return count
-
-    def _observe_once(self) -> dict[str, object]:
-        observed_at = self._clock()
-        try:
-            with self._storage_factory() as storage:
-                observation = read_operator_observation(storage)
-            self._consecutive_failures = 0
-            return build_observation_record(observation, observed_at=observed_at)
-        except Exception as exc:  # noqa: BLE001
-            self._consecutive_failures += 1
-            return build_observation_error_record(exc, observed_at=observed_at)
-
-    def _log_record(self, record: Mapping[str, object]) -> None:
-        if record["ok"]:
-            self._log_success(record)
-            return
-        self._log.warning(
-            "failed observation attempt=%d error_type=%s error=%s output=%s",
-            self._consecutive_failures,
-            record.get("error_type"),
-            record.get("error"),
-            self._config.output,
-        )
-
-    def _log_success(self, record: Mapping[str, object]) -> None:
-        observation = record.get("observation")
-        if not isinstance(observation, Mapping):
-            self._log.info("observed ok output=%s", self._config.output)
-            return
-        crawl = _mapping(observation.get("crawl"))
-        scheduler = _mapping(observation.get("scheduler"))
-        throughput = _mapping(observation.get("throughput"))
-        self._log.info(
-            "observed ok pages=%s pending=%s pps=%s output=%s",
-            crawl.get("total_pages", "n/a"),
-            scheduler.get("pending", "n/a"),
-            throughput.get("pages_per_second", "n/a"),
-            self._config.output,
-        )
-
-
-def append_observation_record(
-    path: str | Path,
-    record: Mapping[str, object],
-    *,
-    max_bytes: int = 0,
-    max_files: int = 7,
-) -> None:
-    """Append one JSON object as a JSON Lines record.
-
-    This writer assumes a single process writes to a given path.
-    """
-    output_path = Path(path)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    if max_bytes > 0:
-        _rotate_jsonl(output_path, max_bytes=max_bytes, max_files=max_files)
-    with output_path.open("a", encoding="utf-8") as file:
-        file.write(json.dumps(dict(record), ensure_ascii=False, sort_keys=True))
-        file.write("\n")
-
-
-def _rotate_jsonl(path: Path, *, max_bytes: int, max_files: int) -> None:
-    if max_files <= 0 or not path.exists() or path.stat().st_size < max_bytes:
-        return
-
-    oldest = path.with_name(f"{path.name}.{max_files}")
-    if oldest.exists():
-        oldest.unlink()
-
-    for index in range(max_files - 1, 0, -1):
-        source = path.with_name(f"{path.name}.{index}")
-        if source.exists():
-            source.replace(path.with_name(f"{path.name}.{index + 1}"))
-
-    path.replace(path.with_name(f"{path.name}.1"))
 
 
 def _read_storage_shape(conn: Any) -> dict[str, object]:
