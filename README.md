@@ -86,7 +86,6 @@ crawler observe --postgres postgresql://crawler:crawler@localhost:5433/crawldb
 | `serve` | Start the REST API server |
 | `migrate` | Apply pending database migrations |
 | `observe` | Print a read-only operator snapshot |
-| `observe-watch` | Append periodic operator snapshots as JSON Lines |
 | `scheduler-check` | Run read-only scheduler invariant checks and optional repairs |
 | `check-links` | Find broken links from a page |
 | `extract` | Extract content with CSS selectors or XPath |
@@ -150,7 +149,6 @@ Default compose services:
 - `migrate` — one-shot schema migration runner
 - `api` — FastAPI server on loopback port `8080`
 - `crawler` — continuous daemon worker
-- `observer` — periodic JSONL operator snapshots
 
 The `api` and `crawler` services require `CRAWLER_R2_ENDPOINT_URL`, `CRAWLER_R2_BUCKET`,
 `CRAWLER_R2_ACCESS_KEY_ID`, and `CRAWLER_R2_SECRET_ACCESS_KEY`. Keep these values outside the

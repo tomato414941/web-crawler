@@ -27,16 +27,15 @@ cd /home/dev/projects/web-crawler
 git status --short --branch
 git pull --ff-only origin main
 
-docker compose build migrate api crawler observer
+docker compose build migrate api crawler
 docker compose run --rm migrate
-docker compose up -d api crawler observer
+docker compose up -d api crawler
 
 docker compose ps
 curl -sS http://127.0.0.1:8080/health
 docker compose run --rm api crawler observe
 docker compose run --rm api crawler scheduler-check --sample-limit 0
 docker compose run --rm --no-deps crawler python scripts/egress_smoke.py
-docker compose logs --tail 20 observer
 ```
 
 ## Rules
@@ -63,10 +62,6 @@ CRAWL_CYCLE_PAGES=300
 CRAWL_RECRAWL_TTL=2592000
 CRAWL_CONCURRENCY=6
 CRAWL_DELAY=0.5
-CRAWLER_OBSERVE_INTERVAL=300
-CRAWLER_OBSERVE_MAX_BYTES=10485760
-CRAWLER_OBSERVE_MAX_FILES=7
-CRAWLER_OBSERVE_MAX_FAILURES=5
 CRAWLER_API_TOKEN=<random-long-token>
 CRAWLER_R2_ENDPOINT_URL=https://<account-id>.r2.cloudflarestorage.com
 CRAWLER_R2_BUCKET=web-crawler
@@ -192,15 +187,3 @@ Current private deployment status as of 2026-04-30:
 The current network-layer block is deliberately narrow so Docker's private service network keeps
 working. The application egress policy remains the primary fast-path guard for RFC1918, CGNAT,
 benchmarking, legacy IPv4, blocked ports, and unsafe DNS answers.
-
-For periodic production observation, use `observe-watch`:
-
-```bash
-crawler observe-watch \
-  --postgres postgresql://user:pass@host/db \
-  --interval 300 \
-  --output /var/log/web-crawler/observations.jsonl
-```
-
-In Docker Compose, the `observer` service writes records to the `observer_logs` volume at
-`/observations/observations.jsonl`. Treat each JSONL file as single-writer output.
