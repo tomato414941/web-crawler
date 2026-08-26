@@ -14,12 +14,8 @@ pacing, migrations, tests, and deployment scripts, but it should still be treate
 experimental crawler rather than a production-ready web-scale system.
 
 Production broad-web crawling requires a hardened runtime with network-layer egress containment.
-The standard acquisition path is direct HTTP fetching. Browser rendering and the AI browser agent
-are auxiliary paths and should run only under explicit isolation. See
-[docs/security/egress.md](docs/security/egress.md).
-
-The AI browser agent is experimental and outside the crawler core. See
-[docs/AGENT_BOUNDARY.md](docs/AGENT_BOUNDARY.md).
+The standard acquisition path is direct HTTP fetching. Browser rendering is an auxiliary path and
+should run only under explicit isolation. See [docs/security/egress.md](docs/security/egress.md).
 
 ## Features
 
@@ -45,7 +41,6 @@ pip install -e ".[dev]"
 pip install -e ".[browser]"
 pip install -e ".[api]"
 pip install -e ".[postgres]"
-pip install -e ".[agent]"
 
 # Everything
 pip install -e ".[all]"
@@ -95,7 +90,6 @@ crawler observe --postgres postgresql://crawler:crawler@localhost:5433/crawldb
 | `scheduler-check` | Run read-only scheduler invariant checks and optional repairs |
 | `check-links` | Find broken links from a page |
 | `extract` | Extract content with CSS selectors or XPath |
-| `agent` | Run the experimental AI browser agent for a bounded task |
 
 ### `crawl`
 
@@ -183,7 +177,6 @@ test service for the egress smoke.
 - [docs/scheduler-execution.md](docs/scheduler-execution.md) — lease path, hot-path constraints, and execution strategy
 - [docs/discovered-representation.md](docs/discovered-representation.md) — discovered URL representation
 - [docs/CONTENT_POLICY.md](docs/CONTENT_POLICY.md) — content handling and metadata-only resources
-- [docs/AGENT_BOUNDARY.md](docs/AGENT_BOUNDARY.md) — experimental AI agent boundary
 - [docs/security/egress.md](docs/security/egress.md) — threat model, outbound policy, and containment expectations
 - [docs/api.md](docs/api.md) — REST API usage and authentication
 - [docs/operations.md](docs/operations.md) — deployment and production operations

@@ -16,8 +16,8 @@ The public web boundary is still a hard safety boundary. Private network address
 addresses, local metadata endpoints, unsupported URL schemes, and unsafe redirects are outside
 the intended crawl surface even if they are discovered from public pages.
 
-The crawler core should remain downstream-neutral. It may support search indexing, LLM-agent
-observation, monitoring, archival workflows, and web graph analysis, but it should not become a
+The crawler core should remain downstream-neutral. It may support search indexing, LLM
+applications, monitoring, archival workflows, and web graph analysis, but it should not become a
 search ranking engine, an LLM memory system, or a domain-specific extractor.
 
 The crawler is responsible for producing reliable crawl observations: URL identity, fetch events,
