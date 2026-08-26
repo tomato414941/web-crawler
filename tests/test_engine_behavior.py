@@ -239,6 +239,9 @@ class FakeFetcher:
             await asyncio.sleep(self.delay)
         return self.responses.pop(0)
 
+    async def close(self):
+        return None
+
 
 @pytest.mark.asyncio
 async def test_each_crawl_owns_fresh_cycle_state():
