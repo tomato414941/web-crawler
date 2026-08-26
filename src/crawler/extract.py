@@ -160,5 +160,4 @@ async def extract_data(
             items=items,
         )
     finally:
-        if hasattr(fetcher, "close"):
-            await fetcher.close()
+        await fetcher.close()
