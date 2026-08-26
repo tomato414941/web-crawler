@@ -150,7 +150,7 @@ class BrowserFetcher:
             await self._pool.release(page)
 
     async def fetch_with_snapshot(self, url: str) -> tuple[Response, str]:
-        """Fetch URL and return accessibility tree snapshot for AI agents."""
+        """Fetch URL and return its accessibility tree snapshot."""
         raise_if_blocked(
             await check_url(
                 url,

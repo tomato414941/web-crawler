@@ -220,62 +220,6 @@ def extract(
 
 
 @app.command()
-def agent(
-    url: str = typer.Argument(..., help="Starting URL"),
-    task: str = typer.Option(..., "-t", "--task", help="Task description for the AI agent"),
-    max_steps: int = typer.Option(10, "--max-steps", help="Maximum steps before stopping"),
-    model: str = typer.Option(
-        "claude-sonnet-4-20250514", "--model", "-m", help="Claude model to use"
-    ),
-    headless: bool = typer.Option(True, "--headless/--headed", help="Run browser headlessly"),
-    verbose: bool = typer.Option(False, "-v", "--verbose", help="Show detailed output"),
-    experimental: bool = typer.Option(
-        False,
-        "--experimental-agent",
-        help="Acknowledge that the autonomous browser agent is experimental",
-    ),
-    allow_external_navigation: bool = typer.Option(
-        False,
-        "--allow-agent-external-navigation",
-        help="Allow the experimental agent to navigate away from the starting host",
-    ),
-    allow_form_input: bool = typer.Option(
-        False,
-        "--allow-agent-form-input",
-        help="Allow the experimental agent to type into page fields",
-    ),
-):
-    """Run an experimental AI agent to perform tasks on web pages."""
-    if not experimental:
-        typer.echo(
-            "The autonomous browser agent is experimental. "
-            "Re-run with --experimental-agent to acknowledge this mode.",
-            err=True,
-        )
-        raise typer.Exit(2)
-
-    from .agent import run_agent
-
-    result = asyncio.run(
-        run_agent(
-            start_url=url,
-            task=task,
-            max_steps=max_steps,
-            model=model,
-            headless=headless,
-            verbose=verbose,
-            allow_external_navigation=allow_external_navigation,
-            allow_form_input=allow_form_input,
-        )
-    )
-
-    typer.echo(f"\nAgent completed in {result['steps']} steps")
-    typer.echo(f"Status: {result['status']}")
-    if result.get("result"):
-        typer.echo(f"Result: {result['result']}")
-
-
-@app.command()
 def serve(
     host: str = typer.Option("0.0.0.0", "--host", help="Bind host"),
     port: int = typer.Option(8080, "--port", "-p", help="Bind port"),
