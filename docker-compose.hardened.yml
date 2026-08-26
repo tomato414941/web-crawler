@@ -26,10 +26,6 @@ services:
     networks:
       - crawler_internal
 
-  observer:
-    networks:
-      - crawler_internal
-
   postgres:
     networks:
       - crawler_internal
