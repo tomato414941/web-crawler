@@ -154,8 +154,11 @@ class _FakeFetcher:
 
 
 class _FakeStorage:
+    dsn = ""
+
     def __init__(self):
         self.saved = []
+        self.conn = SimpleNamespace(rollback=lambda: None)
 
     def save(self, result):
         self.saved.append(result)

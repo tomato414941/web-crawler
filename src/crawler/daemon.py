@@ -372,8 +372,8 @@ class CrawlDaemon:
 
         logger.info("Daemon shutdown complete")
 
-    def _persist_runtime_payload(self, storage: object, payload: dict[str, object]) -> None:
-        """Persist runtime snapshots when the storage backend supports it."""
+    def _persist_runtime_payload(self, storage: PgStorage, payload: dict[str, object]) -> None:
+        """Persist a runtime snapshot."""
         payload = dict(payload)
         payload.setdefault("host_head_repair", dict(self._last_host_head_repair))
         payload.setdefault(
@@ -388,8 +388,7 @@ class CrawlDaemon:
                 dict(self._last_host_head_dirty_refresh),
             )
         self._last_runtime_snapshot.update(payload)
-        if hasattr(storage, "upsert_runtime_stats"):
-            storage.upsert_runtime_stats("crawler", dict(self._last_runtime_snapshot))
+        storage.upsert_runtime_stats("crawler", dict(self._last_runtime_snapshot))
 
     def _idle_runtime_payload(
         self,
@@ -527,20 +526,18 @@ class CrawlDaemon:
         workers does not stall runtime visibility.
         """
         storage = PgStorage(self._postgres_dsn)
-        scheduler = Scheduler(storage.conn) if hasattr(storage, "conn") else None
+        scheduler = Scheduler(storage.conn)
         try:
             while not stop_event.is_set():
                 payload = engine.snapshot_runtime_stats()
                 if payload["running"]:
-                    if scheduler is not None:
-                        payload = self._add_scheduler_runtime_views(payload, scheduler)
+                    payload = self._add_scheduler_runtime_views(payload, scheduler)
                     self._persist_runtime_payload(storage, payload)
                 stop_event.wait(1.0)
         finally:
             with contextlib.suppress(Exception):
                 payload = engine.snapshot_runtime_stats()
-                if scheduler is not None:
-                    payload = self._add_scheduler_runtime_views(payload, scheduler)
+                payload = self._add_scheduler_runtime_views(payload, scheduler)
                 self._persist_runtime_payload(storage, payload)
             storage.close()
 
