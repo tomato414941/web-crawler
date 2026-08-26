@@ -99,17 +99,3 @@ def stats(_auth: None = Depends(require_api_token)):
         return storage.get_runtime_stats_summary()
     finally:
         close_storage(storage)
-
-
-@app.get("/stats/diagnostics")
-def diagnostic_stats(_auth: None = Depends(require_api_token)):
-    """Runtime-only diagnostics; live full-queue diagnostics are disabled in production."""
-    storage = get_storage()
-    try:
-        stats = storage.get_runtime_stats_summary()
-        stats["diagnostics_unavailable"] = True
-        stats["diagnostics_error"] = "live_scheduler_diagnostics_disabled"
-        stats["diagnostics_mode"] = "runtime_snapshot_only"
-        return stats
-    finally:
-        close_storage(storage)

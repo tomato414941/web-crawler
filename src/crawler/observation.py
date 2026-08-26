@@ -150,7 +150,6 @@ def build_operator_observation(
         "runtime": {
             "updated_at": runtime.get("updated_at"),
             "stats_source": stats.get("stats_source"),
-            "diagnostics_endpoint": stats.get("diagnostics_endpoint"),
         },
     }
 
