@@ -33,7 +33,6 @@ unauthenticated access.
 | `GET /pages` | List pages with `?since=`, `?limit=`, `?offset=`, and `?host=` filters |
 | `GET /pages/{url_hash}` | Get page details with content loaded from R2 |
 | `GET /stats` | Fast runtime crawl statistics from the persisted daemon snapshot |
-| `GET /stats/diagnostics` | Runtime diagnostics surface; live full-queue diagnostics are disabled in production |
 
 Daemon logs also emit a per-cycle `errors=...` summary using the same categories as `/stats`.
 

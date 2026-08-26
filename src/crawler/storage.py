@@ -1,6 +1,5 @@
 """Postgres storage for crawl results."""
 
-from collections import Counter
 from collections.abc import Mapping
 from dataclasses import dataclass
 import hashlib
@@ -14,20 +13,8 @@ from urllib.parse import urlparse
 import psycopg2
 import psycopg2.extras
 
-from .error_stats import categorize_crawl_error
-from .host_manager import compute_host_budget
 from .r2_content import R2ContentStore
 from .urls import normalize_url
-from .scheduler_leases import ACTIVE_LEASES_TABLE
-from .scheduler_membership import (
-    PHYSICAL_QUEUE_DEFAULT_SCHEDULER_SURFACE,
-    PHYSICAL_QUEUE_ORDER,
-    PHYSICAL_QUEUE_TABLES,
-)
-from .scheduler_quarantine import BLOCKED_HOST_BACKOFF_TABLE
-from .url_ledger_store import URL_LEDGER_TABLE
-from .scheduler_observability import SchedulerObservability
-from .config import settings
 from .result import CrawlResult, result_to_dict
 from .schema import assert_public_table_columns
 from .telemetry import StorageTelemetry
@@ -51,12 +38,7 @@ PAGES_REQUIRED_COLUMNS = {
     "crawled_at",
     "created_at",
 }
-URL_LEDGER_STATS_REQUIRED_COLUMNS = {
-    "host",
-    "current_intent",
-    "last_error",
-}
-DIAGNOSTIC_STATS_STATEMENT_TIMEOUT_MS = 15000
+RUNTIME_STATS_STATEMENT_TIMEOUT_MS = 15000
 
 
 _TITLE_PATTERN = re.compile(r"<title[^>]*>(.*?)</title>", re.IGNORECASE | re.DOTALL)
@@ -169,39 +151,6 @@ def _prepare_page_save(
         content_truncated=content_truncated,
         telemetry=telemetry,
     )
-
-
-def _pending_queue_sql() -> str:
-    queue_union = "\n                        UNION ALL\n                        ".join(
-        f"SELECT '{physical_queue}' AS physical_queue, url, host, next_fetch_at FROM public.{PHYSICAL_QUEUE_TABLES[physical_queue]}"
-        for physical_queue in PHYSICAL_QUEUE_ORDER
-    )
-    return f"SELECT physical_queue, url, host, next_fetch_at FROM (\n                        {queue_union}\n                    ) AS pending_queue_rows"
-
-
-def _retry_surface_sql() -> str:
-    retry_union = "\n                               UNION\n                               ".join(
-        f"SELECT url FROM public.{PHYSICAL_QUEUE_TABLES[physical_queue]}"
-        for physical_queue in PHYSICAL_QUEUE_ORDER
-    )
-    return f"WITH retry_surface AS (\n                               {retry_union}\n                           )"
-
-
-def _physical_queue_count_projection_sql(physical_queue_expr: str) -> str:
-    return ",\n                                ".join(
-        f"COUNT(*) FILTER (WHERE {physical_queue_expr} = '{physical_queue}') AS queue_count_{index}"
-        for index, physical_queue in enumerate(PHYSICAL_QUEUE_ORDER)
-    )
-
-
-def _surface_counts_from_physical_queue_count_values(
-    queue_count_values: tuple[int, ...],
-) -> dict[str, int]:
-    surface_counts: dict[str, int] = {}
-    for physical_queue, count in zip(PHYSICAL_QUEUE_ORDER, queue_count_values, strict=True):
-        surface = PHYSICAL_QUEUE_DEFAULT_SCHEDULER_SURFACE[physical_queue]
-        surface_counts[surface] = surface_counts.get(surface, 0) + int(count or 0)
-    return surface_counts
 
 
 def _discovery_admission_summary(
@@ -709,7 +658,7 @@ class RuntimeStatsStore:
             with self._storage._conn.cursor() as cur:
                 cur.execute(
                     "SET LOCAL statement_timeout = %s",
-                    (DIAGNOSTIC_STATS_STATEMENT_TIMEOUT_MS,),
+                    (RUNTIME_STATS_STATEMENT_TIMEOUT_MS,),
                 )
                 cur.execute(
                     """SELECT
@@ -755,7 +704,6 @@ class RuntimeStatsStore:
 
         return {
             "stats_source": "runtime_snapshot",
-            "diagnostics_endpoint": "/stats/diagnostics",
             "total_pages": page_stats_row[0],
             "hosts": page_stats_row[1],
             "oldest_crawl": page_stats_row[2],
@@ -784,414 +732,6 @@ class RuntimeStatsStore:
         }
 
 
-class DiagnosticsReader:
-    """Own operator-facing diagnostics queries."""
-
-    def __init__(self, storage: "PgStorage") -> None:
-        self._storage = storage
-
-    def get_stats(self) -> dict:
-        try:
-            with self._storage._conn.cursor() as cur:
-                cur.execute(
-                    "SET LOCAL statement_timeout = %s",
-                    (DIAGNOSTIC_STATS_STATEMENT_TIMEOUT_MS,),
-                )
-                cur.execute(
-                    """SELECT
-                         count(*) as total_pages,
-                         count(DISTINCT host) as hosts,
-                         min(crawled_at) as oldest,
-                         max(crawled_at) as newest,
-                         sum(content_length) as total_bytes,
-                         sum(stored_content_bytes) as total_stored_bytes
-                       FROM pages"""
-                )
-                page_stats_row = cur.fetchone()
-
-                cur.execute(f"SELECT to_regclass('public.{URL_LEDGER_TABLE}')")
-                url_ledger_exists = cur.fetchone()[0] is not None
-
-                scheduler_status: dict[str, int] = {}
-                pending_surfaces: dict[str, int] = {}
-                blocked_surfaces: dict[str, int] = {}
-                readiness: dict[str, object] = {}
-                top_pending_hosts: list[dict[str, object]] = []
-                top_blocked_hosts: list[dict[str, object]] = []
-                top_slow_hosts: list[dict[str, object]] = []
-                top_budget_hosts: list[dict[str, object]] = []
-                active_error_breakdown: dict[str, int] = {}
-                top_error_hosts: list[dict[str, object]] = []
-                runtime: dict[str, object] = {}
-                effective_state_counts: dict[str, int] = {}
-                host_budget_summary: dict[str, object] = {}
-                pending_queue_sql = _pending_queue_sql()
-                blocked_queue_sql = f"""SELECT physical_queue, url, host, next_fetch_at
-                    FROM public.{BLOCKED_HOST_BACKOFF_TABLE}"""
-                cur.execute("SELECT to_regclass('public.crawler_runtime_stats')")
-                runtime_exists = cur.fetchone()[0] is not None
-                if runtime_exists:
-                    cur.execute(
-                        "SELECT payload, updated_at FROM crawler_runtime_stats WHERE component = 'crawler'"
-                    )
-                    runtime_row = cur.fetchone()
-                    if runtime_row:
-                        runtime = {
-                            "payload": runtime_row[0],
-                            "updated_at": runtime_row[1],
-                        }
-
-                if url_ledger_exists:
-                    cur.execute("SAVEPOINT scheduler_diagnostics")
-                    try:
-                        assert_public_table_columns(
-                            self._storage._conn,
-                            URL_LEDGER_TABLE,
-                            URL_LEDGER_STATS_REQUIRED_COLUMNS,
-                        )
-
-                        observability = SchedulerObservability(
-                            self._storage._conn,
-                            physical_queue_tables=PHYSICAL_QUEUE_TABLES,
-                            physical_queue_order=PHYSICAL_QUEUE_ORDER,
-                            physical_queue_default_runnable_surface=PHYSICAL_QUEUE_DEFAULT_SCHEDULER_SURFACE,
-                            blocked_queue_table=BLOCKED_HOST_BACKOFF_TABLE,
-                            lease_table=ACTIVE_LEASES_TABLE,
-                        )
-
-                        scheduler_status = observability.status_counts()
-                        pending_surfaces = dict(scheduler_status.get("pending_surfaces", {}))
-                        blocked_surfaces = dict(scheduler_status.get("blocked_surfaces", {}))
-
-                        cur.execute(
-                            f"""SELECT host, COUNT(*)
-                           FROM ({pending_queue_sql}) AS pending_queue_rows
-                           GROUP BY host
-                           ORDER BY COUNT(*) DESC, host ASC
-                           LIMIT 10"""
-                        )
-                        top_pending_hosts = [
-                            {"host": host, "count": count} for host, count in cur.fetchall()
-                        ]
-
-                        now = time.time()
-                        readiness_snapshot = observability.readiness(now=now)
-                        readiness = {
-                            "pending": readiness_snapshot.pending,
-                            "runnable": readiness_snapshot.runnable,
-                            "runnable_hosts": readiness_snapshot.runnable_hosts,
-                            "next_runnable_delay": readiness_snapshot.next_runnable_delay,
-                            "blocked": dict(readiness_snapshot.blocked),
-                            "state_counts": dict(
-                                scheduler_status.get(
-                                    "readiness_state_counts", readiness_snapshot.state_counts
-                                )
-                            ),
-                        }
-                        effective_state_counts = dict(
-                            scheduler_status.get("effective_state_counts", {})
-                        )
-
-                        cur.execute(
-                            f"""WITH pending_entries AS (
-                                SELECT physical_queue, url, host, next_fetch_at, FALSE AS forced_retry_quarantine
-                                FROM ({pending_queue_sql}) AS pending_queue_rows
-                                UNION ALL
-                                SELECT physical_queue, url, host, next_fetch_at, TRUE AS forced_retry_quarantine
-                                FROM ({blocked_queue_sql}) AS blocked_queue_rows
-                            )
-                            SELECT
-                                pending_queue_rows.host,
-                                COUNT(*) AS pending_count,
-                                COUNT(*) FILTER (
-                                    WHERE NOT pending_queue_rows.forced_retry_quarantine
-                                      AND COALESCE(host_state.next_request_at, 0) > %(now)s
-                                      AND COALESCE(host_state.backoff_until, 0) <= %(now)s
-                                ) AS blocked_host_next_request,
-                                COUNT(*) FILTER (
-                                    WHERE NOT pending_queue_rows.forced_retry_quarantine
-                                      AND COALESCE(host_state.backoff_until, 0) > %(now)s
-                                ) AS blocked_host_backoff,
-                                COUNT(*) FILTER (
-                                    WHERE pending_queue_rows.forced_retry_quarantine
-                                ) AS retry_quarantine,
-                                GREATEST(
-                                    MAX(COALESCE(host_state.next_request_at, 0)) - %(now)s,
-                                    0
-                                ) AS next_request_wait_seconds,
-                                GREATEST(
-                                    MAX(COALESCE(host_state.backoff_until, 0)) - %(now)s,
-                                    0
-                                ) AS backoff_wait_seconds,
-                                COALESCE(MAX(host_state.consecutive_failures), 0) AS consecutive_failures
-                            FROM pending_entries AS pending_queue_rows
-                            LEFT JOIN public.host_state ON host_state.host_key = pending_queue_rows.host
-                            WHERE pending_queue_rows.forced_retry_quarantine
-                               OR COALESCE(host_state.next_request_at, 0) > %(now)s
-                               OR COALESCE(host_state.backoff_until, 0) > %(now)s
-                            GROUP BY pending_queue_rows.host
-                            ORDER BY
-                                COUNT(*) FILTER (
-                                    WHERE pending_queue_rows.forced_retry_quarantine
-                                ) DESC,
-                                COUNT(*) FILTER (
-                                    WHERE NOT pending_queue_rows.forced_retry_quarantine
-                                      AND COALESCE(host_state.backoff_until, 0) > %(now)s
-                                ) DESC,
-                                GREATEST(
-                                    MAX(COALESCE(host_state.backoff_until, 0)) - %(now)s,
-                                    0
-                                ) DESC,
-                                COUNT(*) DESC,
-                                pending_queue_rows.host ASC
-                            LIMIT 10""",
-                            {"now": now},
-                        )
-                        top_blocked_hosts = []
-                        for blocked_row in cur.fetchall():
-                            (
-                                host,
-                                pending_count,
-                                blocked_next_request_count,
-                                blocked_host_backoff_count,
-                                retry_quarantine_count,
-                                next_request_wait_seconds,
-                                backoff_wait_seconds,
-                                consecutive_failures,
-                            ) = blocked_row
-                            dominant_reason = "retry_quarantine"
-                            wait_seconds = backoff_wait_seconds
-                            if retry_quarantine_count == 0 and blocked_host_backoff_count > 0:
-                                dominant_reason = "host_backoff"
-                            elif (
-                                retry_quarantine_count == 0
-                                and blocked_host_backoff_count == 0
-                                and blocked_next_request_count > 0
-                            ):
-                                dominant_reason = "host_next_request"
-                                wait_seconds = next_request_wait_seconds
-                            top_blocked_hosts.append(
-                                {
-                                    "host": host,
-                                    "pending_count": pending_count,
-                                    "blocked_counts": {
-                                        "host_next_request": blocked_next_request_count,
-                                        "host_backoff": blocked_host_backoff_count,
-                                        "retry_quarantine": retry_quarantine_count,
-                                    },
-                                    "wait_seconds": round(wait_seconds, 3),
-                                    "dominant_reason": dominant_reason,
-                                    "consecutive_failures": consecutive_failures,
-                                }
-                            )
-
-                        cur.execute(
-                            f"""WITH pending_entries AS (
-                                SELECT physical_queue, url, host
-                                FROM ({pending_queue_sql}) AS pending_queue_rows
-                                UNION ALL
-                                SELECT physical_queue, url, host
-                                FROM ({blocked_queue_sql}) AS blocked_queue_rows
-                            )
-                            SELECT
-                                pending_entries.host,
-                                COUNT(*) AS pending_count,
-                                MAX(COALESCE(host_state.latency_ewma_ms, 0)) AS latency_ewma_ms,
-                                MAX(COALESCE(host_state.latency_last_ms, 0)) AS latency_last_ms,
-                                MAX(COALESCE(host_state.latency_observed_at, 0)) AS latency_observed_at,
-                                MAX(COALESCE(host_state.latency_sample_count, 0)) AS latency_sample_count,
-                                COALESCE(MAX(host_state.consecutive_failures), 0) AS consecutive_failures,
-                                {_physical_queue_count_projection_sql("pending_entries.physical_queue")}
-                            FROM pending_entries
-                            JOIN public.host_state ON host_state.host_key = pending_entries.host
-                            WHERE COALESCE(host_state.latency_ewma_ms, 0) > 0
-                            GROUP BY pending_entries.host
-                            ORDER BY
-                                MAX(COALESCE(host_state.latency_ewma_ms, 0)) DESC,
-                                COUNT(*) DESC,
-                                pending_entries.host ASC
-                            LIMIT 10"""
-                        )
-                        top_slow_hosts = []
-                        for row in cur.fetchall():
-                            (
-                                host,
-                                pending_count,
-                                latency_ewma_ms,
-                                latency_last_ms,
-                                latency_observed_at,
-                                latency_sample_count,
-                                consecutive_failures,
-                                *queue_count_values,
-                            ) = row
-                            top_slow_hosts.append(
-                                {
-                                    "host": host,
-                                    "pending_count": pending_count,
-                                    "latency_ewma_ms": round(latency_ewma_ms, 1),
-                                    "latency_last_ms": round(latency_last_ms, 1),
-                                    "latency_observed_at": latency_observed_at,
-                                    "latency_sample_count": latency_sample_count,
-                                    "consecutive_failures": consecutive_failures,
-                                    "surface_counts": _surface_counts_from_physical_queue_count_values(
-                                        tuple(queue_count_values)
-                                    ),
-                                }
-                            )
-                        elevated_budget_hosts = []
-                        observed_hosts = 0
-                        ineligible_due_to_failures = 0
-                        ineligible_due_to_latency = 0
-                        for host_entry in top_slow_hosts:
-                            observed_hosts += 1
-                            host_budget = compute_host_budget(
-                                latency_ewma_ms=float(host_entry["latency_ewma_ms"]),
-                                consecutive_failures=int(host_entry["consecutive_failures"]),
-                                default_budget=settings.max_inflight_requests_per_host,
-                            )
-                            if host_budget <= settings.max_inflight_requests_per_host:
-                                if int(host_entry["consecutive_failures"]) > 0:
-                                    ineligible_due_to_failures += 1
-                                else:
-                                    ineligible_due_to_latency += 1
-                                continue
-                            elevated_budget_hosts.append(
-                                {
-                                    **host_entry,
-                                    "host_budget": host_budget,
-                                }
-                            )
-                        top_budget_hosts = elevated_budget_hosts[:10]
-                        host_budget_summary = {
-                            "observed_hosts": observed_hosts,
-                            "eligible_hosts": len(elevated_budget_hosts),
-                            "eligible_pending": sum(
-                                int(host_entry["pending_count"])
-                                for host_entry in elevated_budget_hosts
-                            ),
-                            "ineligible_due_to_failures": ineligible_due_to_failures,
-                            "ineligible_due_to_latency": ineligible_due_to_latency,
-                            "max_budget": max(
-                                (
-                                    int(host_entry["host_budget"])
-                                    for host_entry in elevated_budget_hosts
-                                ),
-                                default=settings.max_inflight_requests_per_host,
-                            ),
-                        }
-
-                        cur.execute(
-                            _retry_surface_sql()
-                            + """
-                           SELECT url_ledger.last_error, COUNT(*)
-                           FROM public.url_ledger AS url_ledger
-                           LEFT JOIN retry_surface ON retry_surface.url = url_ledger.url
-                           WHERE url_ledger.last_error IS NOT NULL
-                             AND (url_ledger.terminal_reason IS NOT NULL OR retry_surface.url IS NOT NULL)
-                           GROUP BY url_ledger.last_error"""
-                        )
-                        error_counts = Counter()
-                        for error, count in cur.fetchall():
-                            category = categorize_crawl_error(error)
-                            if category:
-                                error_counts[category] += count
-                        active_error_breakdown = {
-                            category: error_counts[category]
-                            for category in (
-                                "http_4xx",
-                                "http_5xx",
-                                "timeout",
-                                "connection_error",
-                                "http_other",
-                                "other",
-                            )
-                            if error_counts.get(category)
-                        }
-
-                        cur.execute(
-                            _retry_surface_sql()
-                            + """
-                           SELECT url_ledger.host, COUNT(*)
-                           FROM public.url_ledger AS url_ledger
-                           LEFT JOIN retry_surface ON retry_surface.url = url_ledger.url
-                           WHERE url_ledger.last_error IS NOT NULL
-                             AND (url_ledger.terminal_reason IS NOT NULL OR retry_surface.url IS NOT NULL)
-                           GROUP BY url_ledger.host
-                           ORDER BY COUNT(*) DESC, url_ledger.host ASC
-                           LIMIT 10"""
-                        )
-                        top_error_hosts = [
-                            {"host": host, "count": count} for host, count in cur.fetchall()
-                        ]
-                        cur.execute("RELEASE SAVEPOINT scheduler_diagnostics")
-                    except psycopg2.Error as exc:
-                        cur.execute("ROLLBACK TO SAVEPOINT scheduler_diagnostics")
-                        scheduler_status = {
-                            "diagnostics_unavailable": True,
-                            "diagnostics_error": exc.__class__.__name__,
-                        }
-                        pending_surfaces = {}
-                        blocked_surfaces = {}
-                        logger.warning(
-                            "Scheduler diagnostics unavailable: %s", exc.__class__.__name__
-                        )
-
-                cur.execute(
-                    """SELECT host, COUNT(*)
-                       FROM pages
-                       GROUP BY host
-                       ORDER BY COUNT(*) DESC, host ASC
-                       LIMIT 10"""
-                )
-                top_page_hosts = [{"host": host, "count": count} for host, count in cur.fetchall()]
-            self._storage._finish_read()
-        except Exception:
-            self._storage._conn.rollback()
-            raise
-
-        operator_summary = _build_operator_summary(
-            scheduler_status=scheduler_status,
-            readiness=readiness,
-            effective_state_counts=effective_state_counts,
-            runtime=runtime,
-            active_error_breakdown=active_error_breakdown,
-            host_budget_summary=host_budget_summary,
-        )
-
-        scheduler_state_views = _scheduler_state_views(
-            scheduler_status=scheduler_status,
-            readiness=readiness,
-            effective_state_counts=effective_state_counts,
-        )
-        return {
-            "total_pages": page_stats_row[0],
-            "hosts": page_stats_row[1],
-            "oldest_crawl": page_stats_row[2],
-            "newest_crawl": page_stats_row[3],
-            "total_bytes": page_stats_row[4],
-            "total_stored_bytes": page_stats_row[5],
-            "scheduler_status": scheduler_status,
-            "scheduler_state_snapshot": dict(scheduler_state_views["scheduler_state_snapshot"]),
-            "intent_counts": dict(scheduler_status.get("intent_counts", {})),
-            "durable_state_counts": dict(scheduler_state_views["durable_state_counts"]),
-            "readiness_state_counts": dict(scheduler_state_views["readiness_state_counts"]),
-            "effective_state_counts": dict(scheduler_state_views["effective_state_counts"]),
-            "blocked_reason_counts": dict(scheduler_state_views["blocked_reason_counts"]),
-            "pending_surfaces": pending_surfaces,
-            "blocked_surfaces": blocked_surfaces,
-            "readiness": readiness,
-            "top_page_hosts": top_page_hosts,
-            "top_pending_hosts": top_pending_hosts,
-            "top_blocked_hosts": top_blocked_hosts,
-            "top_slow_hosts": top_slow_hosts,
-            "top_budget_hosts": top_budget_hosts,
-            "active_error_breakdown": active_error_breakdown,
-            "top_error_hosts": top_error_hosts,
-            "runtime": runtime,
-            "operator_summary": operator_summary,
-        }
-
-
 _DEFAULT_CONTENT_STORE = object()
 
 
@@ -1208,7 +748,6 @@ class PgStorage:
         self.page_writes = PageWriteStore(self)
         self.page_queries = PageQueryStore(self)
         self.runtime_stats = RuntimeStatsStore(self)
-        self.diagnostics = DiagnosticsReader(self)
 
     def _get_content_store(self) -> R2ContentStore:
         if self._content_store is _DEFAULT_CONTENT_STORE:
@@ -1264,10 +803,6 @@ class PgStorage:
     def get_runtime_stats_summary(self) -> dict:
         """Get fast operator stats from the persisted runtime snapshot."""
         return self.runtime_stats.summary()
-
-    def get_stats(self) -> dict:
-        """Get crawl statistics."""
-        return self.diagnostics.get_stats()
 
     def close(self):
         self._conn.close()
