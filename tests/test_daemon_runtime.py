@@ -9,6 +9,7 @@ from crawler.host_runnable_heads import HostRunnableHeadDirtyRefreshSummary
 
 class _FakeStorage:
     payloads: list[tuple[str, dict]] = []
+    conn = object()
 
     def __init__(self, dsn):
         self.dsn = dsn
@@ -18,6 +19,11 @@ class _FakeStorage:
 
     def close(self):
         return None
+
+
+class _FakeScheduler:
+    def __init__(self, conn):
+        self.conn = conn
 
 
 class _FakeEngine:
@@ -37,6 +43,7 @@ def test_report_runtime_stats_waits_for_engine_to_start(monkeypatch):
     )
     _FakeStorage.payloads = []
     monkeypatch.setattr("crawler.daemon.PgStorage", _FakeStorage)
+    monkeypatch.setattr("crawler.daemon.Scheduler", _FakeScheduler)
     engine = _FakeEngine()
     stop_event = threading.Event()
 

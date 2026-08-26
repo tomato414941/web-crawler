@@ -1199,7 +1199,7 @@ class PgStorage:
     """Store crawl results in Postgres."""
 
     def __init__(self, dsn: str, content_store: object = _DEFAULT_CONTENT_STORE):
-        self._dsn = dsn
+        self.dsn = dsn
         self._conn = psycopg2.connect(dsn)
         self._conn.autocommit = False
         assert_public_table_columns(self._conn, "pages", PAGES_REQUIRED_COLUMNS)

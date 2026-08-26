@@ -1001,9 +1001,7 @@ class CrawlerEngine:
         ):
             self.scheduler.place(self._build_seed_task(self.start_url))
 
-        finalizer_dsn = (
-            getattr(self.pg_storage, "_dsn", None) if self.pg_storage is not None else None
-        )
+        finalizer_dsn = self.pg_storage.dsn if self.pg_storage is not None else None
         if finalizer_dsn and self._finalizer_storage is None:
             from .storage import PgStorage
 
