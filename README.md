@@ -87,7 +87,6 @@ crawler observe --postgres postgresql://crawler:crawler@localhost:5433/crawldb
 | `migrate` | Apply pending database migrations |
 | `observe` | Print a read-only operator snapshot |
 | `scheduler-check` | Run read-only scheduler invariant checks and optional repairs |
-| `check-links` | Find broken links from a page |
 | `extract` | Extract content with CSS selectors or XPath |
 
 ### `crawl`
