@@ -52,8 +52,8 @@ docker compose logs --tail 20 observer
   unsupported egress targets before fetch. This is defense in depth. Production broad-web crawl
   requires a hardened runtime with network-layer egress controls.
 - Keep the standard HTTP fast path direct unless an operator intentionally routes it through a
-  controlled proxy. Browser rendering and agent runs are auxiliary paths; do not use them for
-  normal broad-web crawl without separate isolation.
+  controlled proxy. Browser rendering is an auxiliary path; do not use it for normal broad-web
+  crawl without separate isolation.
 
 ## Recommended Environment
 

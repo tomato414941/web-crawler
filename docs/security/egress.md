@@ -18,9 +18,8 @@ defense-in-depth rather than the sole production control.
 
 The standard acquisition path is direct HTTP fetching through `HttpFetcher`. It is the fast path
 for normal broad-web crawl. Browser rendering through `BrowserFetcher` is an auxiliary path for
-pages that need JavaScript, and the AI browser agent is outside the crawler core. Browser and agent
-execution should be isolated from normal broad-web crawl capacity and should not weaken runtime
-egress containment.
+pages that need JavaScript. Browser execution should be isolated from normal broad-web crawl
+capacity and should not weaken runtime egress containment.
 
 ## Default Policy
 

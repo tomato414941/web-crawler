@@ -8,7 +8,7 @@ The target is the public web as a whole, not any specific topic, standards body,
 ## Project Structure
 Single Python package with CLI entry point:
 - `src/crawler/` — all source code
-  - `cli.py` — Typer CLI (fetch, crawl, serve, agent, extract, check-links)
+  - `cli.py` — Typer CLI (fetch, crawl, serve, extract, check-links)
   - `api.py` — FastAPI REST server
   - `crawl.py` — crawler engine (worker pool, link extraction)
   - `url_ledger.py` — scheduler facade and durable URL state
@@ -20,7 +20,6 @@ Single Python package with CLI entry point:
   - `result.py` — typed result models
   - `extract.py` — CSS/XPath data extraction
   - `links.py` — broken link checker
-  - `agent.py` — Claude AI web agent
   - `config.py` — Pydantic settings
   - `core/` — fetcher layer (HTTP, browser, adaptive)
 - `tests/` — pytest test suite
@@ -90,4 +89,3 @@ docker compose up -d
 ## Security
 - Never commit credentials
 - PostgreSQL DSN is passed via environment variable `CRAWLER_POSTGRES_DSN`
-- API key for Claude agent via `ANTHROPIC_API_KEY` env var

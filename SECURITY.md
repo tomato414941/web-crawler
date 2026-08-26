@@ -25,6 +25,3 @@ endpoints, and internal service networks from the container or host.
 The REST API is an internal operator API. Keep `CRAWLER_API_TOKEN` set, bind the API to localhost
 or a private network, and put TLS/authentication at the access layer if exposing it beyond the
 host.
-
-The AI browser agent is experimental. It requires explicit CLI acknowledgement and should not be
-enabled in production automation without separate network containment.
