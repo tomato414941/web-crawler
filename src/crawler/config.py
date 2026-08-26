@@ -31,7 +31,6 @@ class CrawlerSettings(BaseSettings):
     daemon_scheduled_surface_delay_limit: int = 0
     daemon_scheduled_surface_delay_seconds: float = 1800.0
     daemon_min_runnable_sleep: float = 0.5
-    daemon_min_runnable_supply_pending: int = 3
     daemon_min_runnable_supply_count: int = 20
     daemon_min_runnable_supply_hosts: int = 8
     daemon_blocked_retry_budget: int = 8
