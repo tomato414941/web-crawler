@@ -12,7 +12,7 @@ import typer
 
 from .config import settings
 from .core import HttpFetcher
-from .result import ExtractResult, FetchResult, LinkCheckResult, result_to_dict
+from .result import ExtractResult, FetchResult, result_to_dict
 
 app = typer.Typer(
     name="crawler",
@@ -87,20 +87,6 @@ def _echo_fetch_result(result: FetchResult):
         typer.echo(f"\n... (truncated, {len(result.content)} chars total)")
 
 
-def _echo_link_check_result(result: LinkCheckResult):
-    """Render link-check summary for terminal output."""
-    typer.echo(f"Checked {result.total_links} links")
-    typer.echo(f"  OK: {result.ok}")
-    typer.echo(f"  Broken: {result.broken}")
-    typer.echo(f"  Redirects: {result.redirects}")
-    if result.broken_links:
-        typer.echo("\nBroken links:")
-        for link in result.broken_links:
-            typer.echo(f"  {link.status} {link.url}")
-            if link.source:
-                typer.echo(f"    Found on: {link.source}")
-
-
 def _echo_extract_result(result: ExtractResult):
     """Render extraction results for terminal output."""
     for i, item in enumerate(result.items, 1):
@@ -162,33 +148,6 @@ def crawl(
             postgres_dsn=postgres,
         )
     )
-
-
-@app.command("check-links")
-def check_links(
-    url: str = typer.Argument(..., help="URL to check links for"),
-    recursive: bool = typer.Option(False, "-r", "--recursive", help="Check links recursively"),
-    max_depth: int = typer.Option(1, "--max-depth", "-d", help="Maximum depth for recursive check"),
-    external: bool = typer.Option(True, "--external/--internal-only", help="Check external links"),
-    output: str = typer.Option(None, "-o", "--output", help="Output file (JSON)"),
-):
-    """Check for broken links on a page."""
-    from .links import check_page_links
-
-    result = asyncio.run(
-        check_page_links(
-            url=url,
-            recursive=recursive,
-            max_depth=max_depth,
-            check_external=external,
-            progress=typer.echo,
-        )
-    )
-
-    if output:
-        _write_json_output(output, result)
-    else:
-        _echo_link_check_result(result)
 
 
 @app.command()
