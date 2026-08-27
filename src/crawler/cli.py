@@ -16,42 +16,21 @@ from .result import FetchResult, result_to_dict
 
 app = typer.Typer(
     name="crawler",
-    help="Async web crawler with browser support",
+    help="Async broad-web crawler",
     no_args_is_help=True,
 )
 
 
-async def _fetch(url: str, use_browser: bool = False, auto: bool = False) -> FetchResult:
+async def _fetch(url: str) -> FetchResult:
     """Fetch a URL and return structured result."""
-    used_browser = False
-
-    if auto:
-        from .core import get_adaptive_fetcher
-
-        AdaptiveFetcher = get_adaptive_fetcher()
-        fetcher = AdaptiveFetcher(
-            timeout=settings.timeout,
-            browser_timeout=30.0,
-            user_agent=settings.user_agent,
-        )
-    elif use_browser:
-        from .core import get_browser_fetcher
-
-        BrowserFetcher = get_browser_fetcher()
-        fetcher = BrowserFetcher(timeout=30.0, user_agent=settings.user_agent)
-        used_browser = True
-    else:
-        fetcher = HttpFetcher(
-            timeout=settings.timeout,
-            user_agent=settings.user_agent,
-            max_connections=settings.max_connections,
-            max_keepalive_connections=settings.max_keepalive_connections,
-        )
+    fetcher = HttpFetcher(
+        timeout=settings.timeout,
+        user_agent=settings.user_agent,
+        max_connections=settings.max_connections,
+        max_keepalive_connections=settings.max_keepalive_connections,
+    )
     try:
-        if auto:
-            response, used_browser = await fetcher.fetch(url)
-        else:
-            response = await fetcher.fetch(url)
+        response = await fetcher.fetch(url)
         return FetchResult(
             url=response.url,
             status=response.status,
@@ -60,7 +39,6 @@ async def _fetch(url: str, use_browser: bool = False, auto: bool = False) -> Fet
             else len(response.content),
             headers=response.headers,
             content=response.text,
-            used_browser=used_browser,
         )
     finally:
         await fetcher.close()
@@ -79,8 +57,6 @@ def _echo_fetch_result(result: FetchResult):
     typer.echo(f"URL: {result.url}")
     typer.echo(f"Status: {result.status}")
     typer.echo(f"Content-Length: {result.content_length}")
-    if result.used_browser:
-        typer.echo("Renderer: Browser (Playwright)")
     typer.echo("---")
     typer.echo(result.content[:2000])
     if len(result.content) > 2000:
@@ -91,12 +67,10 @@ def _echo_fetch_result(result: FetchResult):
 def fetch(
     url: str = typer.Argument(..., help="URL to fetch"),
     output: str = typer.Option(None, "-o", "--output", help="Output file (JSON)"),
-    js: bool = typer.Option(False, "--js", help="Use browser for JavaScript rendering"),
-    auto: bool = typer.Option(False, "--auto", help="Auto-detect if browser is needed"),
     quiet: bool = typer.Option(False, "-q", "--quiet", help="Only output content"),
 ):
     """Fetch a single URL."""
-    result = asyncio.run(_fetch(url, use_browser=js, auto=auto))
+    result = asyncio.run(_fetch(url))
 
     if output:
         _write_json_output(output, result)
@@ -116,7 +90,6 @@ def crawl(
         help="Keep this one-shot crawl on the start host",
     ),
     output: str = typer.Option(None, "-o", "--output", help="Output file path (JSONL)"),
-    js: bool = typer.Option(False, "--js", help="Use browser for all pages"),
     delay: float = typer.Option(1.0, "--delay", help="Delay between requests (seconds)"),
     concurrency: int = typer.Option(5, "--concurrency", "-c", help="Concurrent requests"),
     no_content: bool = typer.Option(
@@ -135,7 +108,6 @@ def crawl(
             max_pages=max_pages,
             same_host=same_host,
             output_file=output,
-            use_browser=js,
             delay=delay,
             concurrency=concurrency,
             include_content=not no_content,

@@ -195,7 +195,6 @@ class CrawlerEngine:
         start_url: str = "",
         max_pages: int = 100,
         same_host: bool = True,
-        use_browser: bool = False,
         delay: float = 1.0,
         concurrency: int = 5,
         output_writer: StreamingOutputWriter | None = None,
@@ -208,7 +207,6 @@ class CrawlerEngine:
         self.start_url = start_url
         self.max_pages = max_pages
         self.same_host = same_host
-        self.use_browser = use_browser
         self.concurrency = concurrency
         self.output_writer = output_writer
         self.pg_storage = pg_storage
@@ -256,12 +254,7 @@ class CrawlerEngine:
             )
             self._owns_host_manager = True
 
-        if use_browser:
-            from .core import get_browser_fetcher
-
-            self.fetcher = get_browser_fetcher()(timeout=30.0)
-        else:
-            self.fetcher = HttpFetcher(timeout=settings.timeout)
+        self.fetcher = HttpFetcher(timeout=settings.timeout)
 
         self._page_lock = asyncio.Lock()
         self._lease_lock = asyncio.Lock()
@@ -1099,7 +1092,6 @@ async def run_crawl(
     max_pages: int = 100,
     same_host: bool = True,
     output_file: str | None = None,
-    use_browser: bool = False,
     delay: float = 1.0,
     concurrency: int = 5,
     include_content: bool = True,
@@ -1128,7 +1120,6 @@ async def run_crawl(
                 start_url=start_url,
                 max_pages=max_pages,
                 same_host=same_host,
-                use_browser=use_browser,
                 delay=delay,
                 concurrency=concurrency,
                 output_writer=writer,

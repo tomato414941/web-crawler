@@ -1,6 +1,6 @@
 # web-crawler
 
-Async broad-web crawler with adaptive fetching, PostgreSQL scheduler state, Cloudflare R2 page
+Async broad-web crawler with HTTP fetching, PostgreSQL scheduler state, Cloudflare R2 page
 content, operator observation, and a REST API.
 
 `web-crawler` is designed to discover, fetch, classify, and record structured observations from
@@ -14,12 +14,11 @@ pacing, migrations, tests, and deployment scripts, but it should still be treate
 experimental crawler rather than a production-ready web-scale system.
 
 Production broad-web crawling requires a hardened runtime with network-layer egress containment.
-The standard acquisition path is direct HTTP fetching. Browser rendering is an auxiliary path and
-should run only under explicit isolation. See [docs/security/egress.md](docs/security/egress.md).
+See [docs/security/egress.md](docs/security/egress.md).
 
 ## Features
 
-- Adaptive HTTP-first fetching with optional browser rendering
+- Asynchronous HTTP fetching with connection reuse
 - PostgreSQL-backed URL ledger, physical queues, leases, retries, and refresh scheduling
 - Unmodified fetched text bodies stored in Cloudflare R2 by normalized URL hash
 - Host-level robots, crawl delay, cooldown, and durable host state
@@ -38,7 +37,6 @@ pip install -e .
 pip install -e ".[dev]"
 
 # Optional extras
-pip install -e ".[browser]"
 pip install -e ".[api]"
 pip install -e ".[postgres]"
 
@@ -80,7 +78,7 @@ crawler observe --postgres postgresql://crawler:crawler@localhost:5433/crawldb
 
 | Command | Description |
 |---|---|
-| `fetch` | Fetch one page (`--js` for browser, `--auto` for adaptive fetching) |
+| `fetch` | Fetch one page over HTTP |
 | `crawl` | Run a bounded one-shot crawl with PostgreSQL scheduler state |
 | `daemon` | Run the continuous broad-web crawler loop |
 | `serve` | Start the REST API server |
@@ -99,7 +97,6 @@ Options:
   --delay             Per-host delay in seconds (default: 1.0)
   --same-host         Keep the one-shot crawl on the start host (default)
   --any-host          Allow the one-shot crawl to follow links to other hosts
-  --js                Use browser rendering for all pages
   -o, --output        Stream results to JSONL file
   --postgres DSN      Required: store scheduler state and pages in PostgreSQL
   --no-content        Exclude page content from output

@@ -19,7 +19,7 @@ Single Python package with CLI entry point:
   - `output.py` — JSONL streaming output
   - `result.py` — typed result models
   - `config.py` — Pydantic settings
-  - `core/` — fetcher layer (HTTP, browser, adaptive)
+  - `core/` — HTTP fetcher layer
 - `tests/` — pytest test suite
 
 ## Build, Test, and Development Commands
@@ -48,7 +48,7 @@ docker compose up -d
 - Python 3.11+, async/await throughout
 - 4-space indentation, `ruff` formatting, line length 100
 - Modules and functions: `snake_case`, Classes: `PascalCase`
-- Protocol-based fetcher design (HTTP/Browser are swappable)
+- Protocol-based HTTP fetcher design
 
 ## Testing
 - `pytest` with `asyncio_mode = "auto"`
@@ -67,7 +67,6 @@ docker compose up -d
 ## Key Design Decisions
 - **Frontier uses Postgres** — Postgres stores URL state, lease timing, and retry metadata
 - **Host scheduler uses Postgres** — per-host crawl delay and cooldown survive restarts
-- **Adaptive fetcher** — HTTP first, falls back to Playwright if JS rendering detected
 - **Two crawl modes** — `crawler crawl` is one-shot, `crawler daemon` is continuous
 - **PostgreSQL for results** — crawled pages stored in `pages` table, served via API
 - **No consumer knowledge** — this service does not know about web-search or any consumer

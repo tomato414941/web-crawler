@@ -30,12 +30,6 @@ class RecordingFetcher:
         type(self).close_calls += 1
 
 
-class RecordingAdaptiveFetcher(RecordingFetcher):
-    async def fetch(self, url: str):
-        self.calls.append(url)
-        return _response(url), True
-
-
 def _reset(fetcher_type):
     fetcher_type.calls = []
     fetcher_type.close_calls = 0
@@ -62,31 +56,8 @@ async def test_fetch_uses_http_fetcher_once(monkeypatch):
     result = await _fetch("https://example.com")
 
     assert result.url == "https://example.com"
-    assert result.used_browser is False
     assert RecordingFetcher.calls == ["https://example.com"]
     assert RecordingFetcher.close_calls == 1
-
-
-async def test_fetch_uses_browser_fetcher_once(monkeypatch):
-    _reset(RecordingFetcher)
-    monkeypatch.setattr("crawler.core.get_browser_fetcher", lambda: RecordingFetcher)
-
-    result = await _fetch("https://example.com", use_browser=True)
-
-    assert result.used_browser is True
-    assert RecordingFetcher.calls == ["https://example.com"]
-    assert RecordingFetcher.close_calls == 1
-
-
-async def test_fetch_uses_adaptive_fetcher_once(monkeypatch):
-    _reset(RecordingAdaptiveFetcher)
-    monkeypatch.setattr("crawler.core.get_adaptive_fetcher", lambda: RecordingAdaptiveFetcher)
-
-    result = await _fetch("https://example.com", auto=True)
-
-    assert result.used_browser is True
-    assert RecordingAdaptiveFetcher.calls == ["https://example.com"]
-    assert RecordingAdaptiveFetcher.close_calls == 1
 
 
 def test_observe_command_prints_formatted_observation(monkeypatch):

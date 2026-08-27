@@ -50,9 +50,7 @@ docker compose run --rm --no-deps crawler python scripts/egress_smoke.py
 - The application rejects private, loopback, link-local, multicast, reserved, unresolved, and
   unsupported egress targets before fetch. This is defense in depth. Production broad-web crawl
   requires a hardened runtime with network-layer egress controls.
-- Keep the standard HTTP fast path direct unless an operator intentionally routes it through a
-  controlled proxy. Browser rendering is an auxiliary path; do not use it for normal broad-web
-  crawl without separate isolation.
+- Keep HTTP fetching direct unless an operator intentionally routes it through a controlled proxy.
 
 ## Recommended Environment
 

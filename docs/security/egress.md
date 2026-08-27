@@ -8,18 +8,14 @@ defense-in-depth layer, not the only containment boundary.
 Production broad-web crawling assumes fetched pages, redirects, DNS answers, and rendered
 subresources can be hostile. A public page can link or redirect toward private infrastructure,
 cloud metadata, service networks, unsupported schemes, or ports that are not part of the intended
-crawl surface. JavaScript execution can also create browser subresource requests that are harder
-to reason about than the HTTP fast path.
+crawl surface.
 
 The production requirement is therefore a hardened runtime: application egress checks plus a
 network-layer boundary such as host firewall rules, container network policy, cloud security
 groups, or a controlled egress proxy. The application egress guard is required, but it is
 defense-in-depth rather than the sole production control.
 
-The standard acquisition path is direct HTTP fetching through `HttpFetcher`. It is the fast path
-for normal broad-web crawl. Browser rendering through `BrowserFetcher` is an auxiliary path for
-pages that need JavaScript. Browser execution should be isolated from normal broad-web crawl
-capacity and should not weaken runtime egress containment.
+The crawler fetches the public web through `HttpFetcher`.
 
 ## Default Policy
 
@@ -73,7 +69,7 @@ profiles should set all three so HTTP page fetches and robots fetches share one 
 
 ## Remaining Risk
 
-Application-layer checks happen before the underlying HTTP or browser stack opens a socket. They
+Application-layer checks happen before the underlying HTTP client opens a socket. They
 reduce accidental unsafe fetches, but they do not fully eliminate DNS rebinding or time-of-check /
 time-of-use gaps by themselves.
 
