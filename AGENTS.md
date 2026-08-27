@@ -8,7 +8,7 @@ The target is the public web as a whole, not any specific topic, standards body,
 ## Project Structure
 Single Python package with CLI entry point:
 - `src/crawler/` — all source code
-  - `cli.py` — Typer CLI (fetch, crawl, serve, extract)
+  - `cli.py` — Typer CLI (fetch, crawl, serve)
   - `api.py` — FastAPI REST server
   - `crawl.py` — crawler engine (worker pool, link extraction)
   - `url_ledger.py` — scheduler facade and durable URL state
@@ -18,7 +18,6 @@ Single Python package with CLI entry point:
   - `storage.py` — PostgreSQL storage
   - `output.py` — JSONL streaming output
   - `result.py` — typed result models
-  - `extract.py` — CSS/XPath data extraction
   - `config.py` — Pydantic settings
   - `core/` — fetcher layer (HTTP, browser, adaptive)
 - `tests/` — pytest test suite

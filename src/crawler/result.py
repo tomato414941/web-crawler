@@ -106,24 +106,6 @@ class FetchResult:
         return data
 
 
-@dataclass(slots=True)
-class ExtractResult:
-    """Data extraction result."""
-
-    url: str
-    selector: str | None
-    items: list[str]
-
-    def to_dict(self) -> dict[str, Any]:
-        """Convert result to a plain dict."""
-        return {
-            "url": self.url,
-            "selector": self.selector,
-            "items": list(self.items),
-            "count": len(self.items),
-        }
-
-
 def result_to_dict(
     result: object | Mapping[str, Any], include_content: bool = True
 ) -> dict[str, Any]:

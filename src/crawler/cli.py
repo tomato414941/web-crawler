@@ -12,7 +12,7 @@ import typer
 
 from .config import settings
 from .core import HttpFetcher
-from .result import ExtractResult, FetchResult, result_to_dict
+from .result import FetchResult, result_to_dict
 
 app = typer.Typer(
     name="crawler",
@@ -87,12 +87,6 @@ def _echo_fetch_result(result: FetchResult):
         typer.echo(f"\n... (truncated, {len(result.content)} chars total)")
 
 
-def _echo_extract_result(result: ExtractResult):
-    """Render extraction results for terminal output."""
-    for i, item in enumerate(result.items, 1):
-        typer.echo(f"{i}. {item}")
-
-
 @app.command()
 def fetch(
     url: str = typer.Argument(..., help="URL to fetch"),
@@ -148,34 +142,6 @@ def crawl(
             postgres_dsn=postgres,
         )
     )
-
-
-@app.command()
-def extract(
-    url: str = typer.Argument(..., help="URL to extract data from"),
-    selector: str = typer.Option(None, "-s", "--selector", help="CSS selector"),
-    xpath: str = typer.Option(None, "-x", "--xpath", help="XPath expression"),
-    attr: str = typer.Option(None, "-a", "--attr", help="Extract attribute instead of text"),
-    js: bool = typer.Option(False, "--js", help="Use browser for JavaScript rendering"),
-    output: str = typer.Option(None, "-o", "--output", help="Output file"),
-):
-    """Extract data from a page using CSS selectors or XPath."""
-    from .extract import extract_data
-
-    result = asyncio.run(
-        extract_data(
-            url=url,
-            css_selector=selector,
-            xpath=xpath,
-            attribute=attr,
-            use_browser=js,
-        )
-    )
-
-    if output:
-        _write_json_output(output, result)
-    else:
-        _echo_extract_result(result)
 
 
 @app.command()
