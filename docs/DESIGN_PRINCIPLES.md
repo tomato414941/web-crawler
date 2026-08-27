@@ -40,7 +40,7 @@ decisions, link provenance, failure classes, host behavior, and scheduler state 
 
 The web is untrusted, unbounded, inconsistent, and constantly changing. External contact must be
 bounded by explicit limits on duration, response size, redirect count, extracted links, admitted
-links, retries, browser rendering work, per-host concurrency, and global backlog.
+links, retries, per-host concurrency, and global backlog.
 
 This is a control property, not only a bug-prevention measure. A broad crawler should assume some
 pages will attempt to consume unlimited time, memory, network, storage, or scheduling capacity.
@@ -49,7 +49,7 @@ pages will attempt to consume unlimited time, memory, network, storage, or sched
 
 At web scale, failure is a normal crawl outcome. Timeouts, DNS failures, connection failures, TLS
 errors, robots exclusions, unsupported content types, redirect loops, oversized responses, parse
-failures, browser failures, and egress blocks should be represented as classified states.
+failures, and egress blocks should be represented as classified states.
 
 Failure classification should feed scheduling, retry, cooldown, retirement, and observability.
 Generic exceptions are not enough for a crawler that needs to explain and adapt its behavior.
@@ -75,11 +75,10 @@ set of crawled URLs, so rejection and deferral reasons matter.
 ### Safety Is Cross-Cutting
 
 Safety belongs at admission time and immediately before external contact. A harmless seed can link
-to an unsafe target, a public URL can redirect to a private address, and a rendered page can trigger
-additional network requests.
+to an unsafe target, and a public URL can redirect to a private address.
 
-Safety checks should therefore appear across admission, scheduling, HTTP fetching, browser
-rendering, robots fetching, link checking, and persistence boundaries.
+Safety checks should therefore appear across admission, scheduling, HTTP fetching, robots fetching,
+and persistence boundaries.
 
 ## Architectural Direction
 
@@ -88,8 +87,8 @@ The crawler should evolve around a clear separation of planes.
 ### Policy Plane
 
 The policy plane decides how crawl capacity is allocated. It owns tradeoffs such as exploration
-versus revisit, new-host expansion, retry budget, browser rendering budget, content handling
-thresholds, per-host limits, and backlog targets.
+versus revisit, new-host expansion, retry budget, content handling thresholds, per-host limits, and
+backlog targets.
 
 ### Scheduler / Frontier Plane
 
@@ -99,21 +98,21 @@ deduplication, leases, retry timing, refresh timing, and concurrency coordinatio
 
 ### Execution Plane
 
-The execution plane performs work: fetch, render, parse, classify, extract links, finalize, and
-persist observations. It should convert expected web failures into structured outcomes rather than
-letting worker tasks die silently.
+The execution plane performs work: fetch, parse, classify, extract links, finalize, and persist
+observations. It should convert expected web failures into structured outcomes rather than letting
+worker tasks die silently.
 
 ### Observation Plane
 
 The observation plane reports system behavior: throughput, backlog, admission rate, rejection
 reasons, content-type distribution, redirect behavior, error classes, retry volume, freshness lag,
-storage growth, host pressure, browser rendering usage, and scheduler readiness.
+storage growth, host pressure, and scheduler readiness.
 
 ### Adaptation Loop
 
 The adaptation loop uses observations to adjust policy. For example, backlog pressure may tighten
-admission, high failure rates may increase cooldown, expensive rendering may shrink browser budget,
-and freshness lag may shift capacity toward revisit work.
+admission, high failure rates may increase cooldown, and freshness lag may shift capacity toward
+revisit work.
 
 The important abstraction is explicit resource allocation. The system should be able to explain
 how much crawl capacity is spent on exploration, observation, retry, refresh, and new-host
@@ -126,7 +125,6 @@ The crawler core should not become:
 - a search ranking engine
 - an LLM memory system
 - a domain-specific scraper
-- a general-purpose browser automation product
 - a full web archive by default
 - a downstream-specific extractor or summarizer
 
@@ -137,8 +135,7 @@ crawler core.
 
 The current architecture should leave room for:
 
-- explicit crawl-capacity budgets for exploration, revisit, retry, refresh, browser rendering, and
-  new-host discovery
+- explicit crawl-capacity budgets for exploration, revisit, retry, refresh, and new-host discovery
 - richer admission and rejection reason tracking
 - stronger freshness and change-detection policy
 - better provenance for extracted text and link context

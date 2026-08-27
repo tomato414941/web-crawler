@@ -96,7 +96,6 @@ class FetchResult:
     content_length: int
     headers: dict[str, str]
     content: str
-    used_browser: bool = False
 
     def to_dict(self, include_content: bool = True) -> dict[str, Any]:
         """Convert result to a plain dict."""
