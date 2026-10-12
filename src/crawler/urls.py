@@ -2,7 +2,7 @@
 
 from urllib.parse import parse_qsl, urlencode, urljoin, urlparse, urlunparse
 
-from selectolax.parser import HTMLParser
+from selectolax.lexbor import LexborHTMLParser
 
 _SKIP_SCHEMES = ("#", "javascript:", "mailto:", "tel:", "data:")
 
@@ -57,7 +57,7 @@ def extract_anchors(html: str, base_url: str) -> list[tuple[str, str]]:
     Resolves relative URLs, skips non-HTTP schemes, normalizes URLs.
     """
     results = []
-    tree = HTMLParser(html)
+    tree = LexborHTMLParser(html)
     for node in tree.css("a[href]"):
         href_raw = node.attributes.get("href")
         if not href_raw:
