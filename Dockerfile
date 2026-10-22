@@ -15,7 +15,7 @@ COPY pyproject.toml .
 COPY src/ src/
 COPY scripts/ scripts/
 
-RUN pip install --no-cache-dir ".[api]"
+RUN pip install --no-cache-dir ".[api]" "certifi>=2026.10.19"
 
 ENV SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
 ENV SSL_CERT_DIR=/etc/ssl/certs
