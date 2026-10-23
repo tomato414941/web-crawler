@@ -5,6 +5,7 @@ from crawler.discovery_admission import (
     ADMISSION_REASON_CANDIDATE,
     ADMISSION_REASON_HOST_POLICY_PENALTY,
     ADMISSION_REASON_NOFOLLOW_PARENT,
+    ADMISSION_REASON_REPEATED_PATH_SEGMENT,
     ADMISSION_REASON_SCORE_BELOW_THRESHOLD,
     AdmissionControl,
     DiscoveryAdmissionPolicy,
@@ -33,6 +34,34 @@ def test_decide_discovered_url_admission_admits_candidate():
     assert result.admitted is True
     assert result.reason == ADMISSION_REASON_CANDIDATE
     assert result.archetype == ARCHETYPE_DOCUMENT_PAGE
+
+
+def test_decide_discovered_url_admission_rejects_repeated_path_segment_loop():
+    for url in (
+        "https://example.com/courses/courses/courses/intro",
+        "https://example.com/about/contact/about/contact/about/team",
+    ):
+        result = decide_discovered_url_admission(
+            parent_url="https://example.com/",
+            url=url,
+            seed_hosts={"example.com"},
+            admission_control=BALANCED_CONTROL,
+        )
+
+        assert result.admitted is False
+        assert result.reason == ADMISSION_REASON_REPEATED_PATH_SEGMENT
+
+
+def test_decide_discovered_url_admission_admits_path_segment_seen_twice():
+    result = decide_discovered_url_admission(
+        parent_url="https://example.com/",
+        url="https://example.com/doc/drafts/doc/rfc9000",
+        seed_hosts={"example.com"},
+        admission_control=BALANCED_CONTROL,
+    )
+
+    assert result.admitted is True
+    assert result.reason == ADMISSION_REASON_CANDIDATE
 
 
 def test_decide_discovered_url_admission_rejects_explained_low_value():

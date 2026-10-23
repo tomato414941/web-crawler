@@ -13,6 +13,7 @@ from .discovery import (
     PARENT_CONTEXT_NOFOLLOW,
     PageSignals,
     classify_url_archetype,
+    has_repeated_path_segment,
     host_key,
     rank_discovered_url,
 )
@@ -26,6 +27,7 @@ ADMISSION_REASON_LOW_VALUE_ARCHETYPE = "low_value_archetype"
 ADMISSION_REASON_NOFOLLOW_PARENT = "nofollow_parent"
 ADMISSION_REASON_HOST_POLICY_PENALTY = "host_policy_penalty"
 ADMISSION_REASON_EGRESS_BLOCKED = "egress_blocked"
+ADMISSION_REASON_REPEATED_PATH_SEGMENT = "repeated_path_segment"
 
 _HOST_POLICY_PENALTY = 0.35
 _LOW_VALUE_ARCHETYPES = {ARCHETYPE_REDIRECT_HUB, ARCHETYPE_REGISTRY_LISTING}
@@ -181,7 +183,10 @@ def decide_discovered_url_admission(
     )
     admitted = True
     reason = ADMISSION_REASON_CANDIDATE
-    if decision.parent_context == PARENT_CONTEXT_NOFOLLOW:
+    if has_repeated_path_segment(url):
+        admitted = False
+        reason = ADMISSION_REASON_REPEATED_PATH_SEGMENT
+    elif decision.parent_context == PARENT_CONTEXT_NOFOLLOW:
         admitted = False
         reason = ADMISSION_REASON_NOFOLLOW_PARENT
     elif decision.archetype in _LOW_VALUE_ARCHETYPES:

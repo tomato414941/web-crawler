@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import Counter
 from dataclasses import dataclass
 from pathlib import PurePosixPath
 from urllib.parse import urlparse
@@ -35,6 +36,7 @@ _ARCHETYPE_ADJUSTMENTS = {
 _LOW_VALUE_ARCHETYPES = {ARCHETYPE_REDIRECT_HUB, ARCHETYPE_REGISTRY_LISTING}
 
 _MIN_DISCOVERY_VALUE = 0.25
+_MAX_PATH_SEGMENT_REPEATS = 2
 _REDIRECT_SEGMENTS = {"go", "goto", "redirect", "r", "out", "jump"}
 _DOCUMENT_HINTS = {"doc", "docs", "document", "documents", "draft", "drafts", "spec", "specs"}
 _DOCUMENT_FILENAME_PREFIXES = ("draft-", "rfc")
@@ -106,6 +108,12 @@ def _path_segments(path: str) -> tuple[str, ...]:
     return tuple(
         segment.lower() for segment in PurePosixPath(path).parts if segment not in {"", "/"}
     )
+
+
+def has_repeated_path_segment(url: str) -> bool:
+    """Return True when one path segment repeats like a relative-link loop."""
+    counts = Counter(_path_segments(_normalized_path(url)))
+    return any(count > _MAX_PATH_SEGMENT_REPEATS for count in counts.values())
 
 
 def _path_has_hint(path: str, hints: tuple[str, ...] | set[str]) -> bool:
