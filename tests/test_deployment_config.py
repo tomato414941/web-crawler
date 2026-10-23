@@ -24,6 +24,14 @@ def test_compose_requires_r2_credentials_for_content_services():
         assert compose.count(f"{variable}: ${{{variable}:?required}}") == 2
 
 
+def test_compose_caps_log_size_for_every_service():
+    compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
+
+    assert 'max-size: "100m"' in compose
+    assert 'max-file: "5"' in compose
+    assert compose.count("logging: *default-logging") == 4
+
+
 def test_compose_binds_public_services_to_loopback():
     compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
 

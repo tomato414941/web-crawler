@@ -1,3 +1,9 @@
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "100m"
+    max-file: "5"
+
 services:
   postgres:
     image: postgres:16
@@ -13,9 +19,11 @@ services:
       test: ["CMD-SHELL", "pg_isready -U crawler"]
       interval: 5s
       retries: 5
+    logging: *default-logging
 
   api:
     build: .
+    logging: *default-logging
     ports:
       - "127.0.0.1:8080:8080"
     environment:
@@ -33,6 +41,7 @@ services:
 
   migrate:
     build: .
+    logging: *default-logging
     command: >
       crawler migrate
         --postgres postgresql://crawler:crawler@postgres/crawldb
@@ -42,6 +51,7 @@ services:
 
   crawler:
     build: .
+    logging: *default-logging
     environment:
       CRAWLER_ADMISSION_TARGET_PENDING: ${CRAWLER_ADMISSION_TARGET_PENDING:-500000}
       CRAWLER_R2_ENDPOINT_URL: ${CRAWLER_R2_ENDPOINT_URL:?required}
