@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import gzip
 from typing import Any
 
 from .config import settings
+
+_GZIP_MAGIC = b"\x1f\x8b"
 
 
 class R2ContentStore:
@@ -34,18 +37,22 @@ class R2ContentStore:
         return cls(client, bucket)
 
     def put(self, key: str, body: bytes, content_type: str) -> None:
-        """Write one page body, replacing any previous body for the URL."""
+        """Write one gzip-compressed page body, replacing any previous body for the URL."""
         self._client.put_object(
             Bucket=self._bucket,
             Key=key,
-            Body=body,
+            Body=gzip.compress(body, compresslevel=6),
             ContentType=content_type or "application/octet-stream",
+            ContentEncoding="gzip",
         )
 
     def get(self, key: str) -> bytes:
-        """Read one page body."""
+        """Read one page body, including bodies stored before compression."""
         response = self._client.get_object(Bucket=self._bucket, Key=key)
-        return response["Body"].read()
+        body = response["Body"].read()
+        if response.get("ContentEncoding") == "gzip" and body.startswith(_GZIP_MAGIC):
+            return gzip.decompress(body)
+        return body
 
     def delete(self, key: str) -> None:
         """Delete a page body when the latest crawl is metadata-only."""
