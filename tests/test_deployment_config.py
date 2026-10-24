@@ -1,5 +1,6 @@
 """Static checks for deployment defaults."""
 
+import re
 from pathlib import Path
 
 
@@ -22,6 +23,16 @@ def test_compose_requires_r2_credentials_for_content_services():
         "CRAWLER_R2_SECRET_ACCESS_KEY",
     ):
         assert compose.count(f"{variable}: ${{{variable}:?required}}") == 2
+
+
+def test_env_example_lists_every_compose_variable():
+    compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
+    example = (ROOT / ".env.example").read_text(encoding="utf-8")
+
+    compose_variables = set(re.findall(r"\$\{([A-Z0-9_]+)", compose))
+    example_variables = set(re.findall(r"^(?:# )?([A-Z0-9_]+)=", example, flags=re.MULTILINE))
+
+    assert example_variables == compose_variables
 
 
 def test_compose_caps_log_size_for_every_service():
