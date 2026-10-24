@@ -51,6 +51,7 @@ def _reset_schema(dsn: str) -> None:
             cur.execute("DROP TABLE IF EXISTS public.crawler_runtime_stats")
             cur.execute("DROP TABLE IF EXISTS public.page_content")
             cur.execute("DROP TABLE IF EXISTS public.pages")
+            cur.execute("DROP TABLE IF EXISTS public.content_bundles")
         conn.commit()
     finally:
         conn.close()
@@ -74,6 +75,7 @@ def test_apply_migrations_creates_expected_tables(migrated_dsn):
         "004_page_content_storage.sql",
         "005_url_ledger_identity.sql",
         "006_drop_page_content.sql",
+        "007_page_content_bundles.sql",
     ]
 
     conn = psycopg2.connect(migrated_dsn)
@@ -102,7 +104,9 @@ def test_apply_migrations_creates_expected_tables(migrated_dsn):
                        to_regclass('public.idx_scheduler_queue_scheduled_host_head'),
                        to_regclass('public.idx_scheduler_queue_refresh_host_head'),
                        to_regclass('public.idx_url_ledger_url_hash'),
-                       to_regclass('public.idx_url_ledger_url_length')
+                       to_regclass('public.idx_url_ledger_url_length'),
+                       to_regclass('public.content_bundles'),
+                       to_regclass('public.idx_pages_content_bundle_key')
                 """
             )
             assert cur.fetchone() == (
@@ -128,6 +132,8 @@ def test_apply_migrations_creates_expected_tables(migrated_dsn):
                 "idx_scheduler_queue_refresh_host_head",
                 "idx_url_ledger_url_hash",
                 "idx_url_ledger_url_length",
+                "content_bundles",
+                "idx_pages_content_bundle_key",
             )
     finally:
         conn.close()
@@ -302,13 +308,23 @@ def test_url_ledger_identity_migration_backfills_existing_rows(migrated_dsn):
                    ) VALUES (%s, 'example.com', 1.0, 1.0, 1.0, 'explore')""",
                 ("https://example.com/old",),
             )
+            cur.execute(
+                """CREATE TABLE public.pages (
+                    url_hash text PRIMARY KEY,
+                    stored_content_bytes integer NOT NULL DEFAULT 0
+                )"""
+            )
         conn.commit()
     finally:
         conn.close()
 
     applied = apply_migrations(migrated_dsn)
 
-    assert applied == ["005_url_ledger_identity.sql", "006_drop_page_content.sql"]
+    assert applied == [
+        "005_url_ledger_identity.sql",
+        "006_drop_page_content.sql",
+        "007_page_content_bundles.sql",
+    ]
     conn = psycopg2.connect(migrated_dsn)
     try:
         with conn.cursor() as cur:

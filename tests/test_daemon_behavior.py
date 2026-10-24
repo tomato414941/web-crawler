@@ -1,5 +1,6 @@
 """Behavior tests for crawl daemon queue management."""
 
+import lzma
 import os
 import time
 from types import SimpleNamespace
@@ -27,16 +28,19 @@ from crawler.host_ledger import HOST_LEDGER_TABLE
 
 class _FakeContentStore:
     def __init__(self):
-        self.bodies = {}
+        self.objects = {}
 
-    def put(self, key, body, content_type):
-        self.bodies[key] = body
+    def put_bundle(self, key, data):
+        self.objects[key] = data
+
+    def get_record(self, key, offset, length):
+        return lzma.decompress(self.objects[key][offset : offset + length])
 
     def get(self, key):
-        return self.bodies[key]
+        return self.objects[key]
 
     def delete(self, key):
-        self.bodies.pop(key, None)
+        self.objects.pop(key, None)
 
 
 pytestmark = pytest.mark.skipif(
@@ -63,6 +67,7 @@ def _reset_schema(dsn: str) -> None:
             cur.execute("DROP TABLE IF EXISTS public.crawler_runtime_stats")
             cur.execute("DROP TABLE IF EXISTS public.page_content")
             cur.execute("DROP TABLE IF EXISTS public.pages")
+            cur.execute("DROP TABLE IF EXISTS public.content_bundles")
         conn.commit()
     finally:
         conn.close()

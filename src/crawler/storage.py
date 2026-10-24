@@ -13,7 +13,7 @@ from urllib.parse import urlparse
 import psycopg2
 import psycopg2.extras
 
-from .r2_content import R2ContentStore
+from .r2_content import R2ContentStore, compress_page_body, new_bundle_key
 from .urls import normalize_url
 from .result import CrawlResult, result_to_dict
 from .schema import assert_public_table_columns
@@ -37,6 +37,9 @@ PAGES_REQUIRED_COLUMNS = {
     "stored_outlink_count",
     "crawled_at",
     "created_at",
+    "content_bundle_key",
+    "content_offset",
+    "content_record_bytes",
 }
 RUNTIME_STATS_STATEMENT_TIMEOUT_MS = 15000
 
@@ -429,50 +432,80 @@ class PageWriteStore:
             prepared_by_hash[prepared.url_hash] = prepared
         batch_pages = list(prepared_by_hash.values())
 
-        page_rows = [
-            (
-                prepared.url_hash,
-                prepared.url,
-                prepared.host,
-                prepared.title,
-                prepared.data.get("status"),
-                prepared.data.get("content_length"),
-                prepared.content_type,
-                prepared.data.get("source_url"),
-                prepared.outlinks,
-                prepared.storage_tier,
-                prepared.storage_reason,
-                len(prepared.content_bytes),
-                prepared.content_truncated,
-                prepared.outlink_count,
-                prepared.stored_outlink_count,
-                prepared.crawled_at,
-            )
-            for prepared in batch_pages
-        ]
+        bundle_key: str | None = None
+        committed = False
         try:
+            # One bundle object per batch keeps R2 writes low; each body stays its own xz
+            # record so a single page can be read back with one ranged request.
             content_started = time.perf_counter()
             content_store = self._storage._get_content_store()
+            locations: dict[str, tuple[int, int]] = {}
+            records: list[bytes] = []
+            bundle_bytes = 0
             for prepared in batch_pages:
                 if prepared.content_bytes:
-                    content_store.put(
-                        prepared.url_hash,
-                        prepared.content_bytes,
-                        prepared.content_type,
-                    )
-                else:
-                    content_store.delete(prepared.url_hash)
+                    record = compress_page_body(prepared.content_bytes)
+                    locations[prepared.url_hash] = (bundle_bytes, len(record))
+                    records.append(record)
+                    bundle_bytes += len(record)
+            if records:
+                bundle_key = new_bundle_key()
+                content_store.put_bundle(bundle_key, b"".join(records))
             content_store_ms = _elapsed_ms(content_started)
+
+            page_rows = []
+            for prepared in batch_pages:
+                location = locations.get(prepared.url_hash)
+                page_rows.append(
+                    (
+                        prepared.url_hash,
+                        prepared.url,
+                        prepared.host,
+                        prepared.title,
+                        prepared.data.get("status"),
+                        prepared.data.get("content_length"),
+                        prepared.content_type,
+                        prepared.data.get("source_url"),
+                        prepared.outlinks,
+                        prepared.storage_tier,
+                        prepared.storage_reason,
+                        len(prepared.content_bytes),
+                        prepared.content_truncated,
+                        prepared.outlink_count,
+                        prepared.stored_outlink_count,
+                        prepared.crawled_at,
+                        bundle_key if location else None,
+                        location[0] if location else None,
+                        location[1] if location else None,
+                    )
+                )
 
             with self._storage._conn.cursor() as cur:
                 pages_started = time.perf_counter()
+                cur.execute(
+                    """SELECT url_hash FROM pages
+                       WHERE url_hash = ANY(%s)
+                         AND content_bundle_key IS NULL
+                         AND stored_content_bytes > 0""",
+                    ([prepared.url_hash for prepared in batch_pages],),
+                )
+                replaced_object_keys = [row[0] for row in cur.fetchall()]
+                if bundle_key is not None:
+                    cur.execute(
+                        """INSERT INTO content_bundles (
+                               bundle_key, stored_bytes, record_count, live_records, live_bytes
+                           )
+                           VALUES (%s, %s, %s, %s, %s)""",
+                        (bundle_key, bundle_bytes, len(records), len(records), bundle_bytes),
+                    )
                 psycopg2.extras.execute_values(
                     cur,
                     """INSERT INTO pages (
                            url_hash, url, host, title, status, content_length, content_type,
                            source_url, outlinks, storage_tier, storage_reason,
                            stored_content_bytes, content_truncated, outlink_count,
-                           stored_outlink_count, crawled_at
+                           stored_outlink_count, crawled_at, content_bundle_key,
+                           content_offset, content_record_bytes
                        )
                        VALUES %s
                        ON CONFLICT (url_hash) DO UPDATE SET
@@ -488,14 +521,23 @@ class PageWriteStore:
                            content_truncated = EXCLUDED.content_truncated,
                            outlink_count = EXCLUDED.outlink_count,
                            stored_outlink_count = EXCLUDED.stored_outlink_count,
-                           crawled_at = EXCLUDED.crawled_at""",
+                           crawled_at = EXCLUDED.crawled_at,
+                           content_bundle_key = EXCLUDED.content_bundle_key,
+                           content_offset = EXCLUDED.content_offset,
+                           content_record_bytes = EXCLUDED.content_record_bytes""",
                     page_rows,
                     page_size=200,
                 )
                 pages_upsert_ms = _elapsed_ms(pages_started)
             commit_started = time.perf_counter()
             self._storage._conn.commit()
+            committed = True
             commit_ms = _elapsed_ms(commit_started)
+            for key in replaced_object_keys:
+                try:
+                    content_store.delete(key)
+                except Exception:
+                    logger.warning("Failed to delete replaced page body %s", key, exc_info=True)
             total_ms = _elapsed_ms(total_started)
             self._storage._count += len(prepared_pages)
             save_results: list[StorageSaveResult] = []
@@ -512,9 +554,49 @@ class PageWriteStore:
                 save_results.append(StorageSaveResult(saved=True, telemetry=page.telemetry))
             return save_results
         except Exception:
-            self._storage._conn.rollback()
+            if not committed:
+                self._storage._conn.rollback()
+                if bundle_key is not None:
+                    try:
+                        self._storage._get_content_store().delete(bundle_key)
+                    except Exception:
+                        logger.warning(
+                            "Failed to delete unsaved bundle %s", bundle_key, exc_info=True
+                        )
             logger.exception("Failed to save batch of %d pages", len(prepared_pages))
             raise
+
+    def release_dead_bundles(self, limit: int = 200) -> int:
+        """Delete bundles whose page records were all replaced or removed."""
+        conn = self._storage._conn
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """DELETE FROM content_bundles
+                       WHERE bundle_key IN (
+                           SELECT bundle.bundle_key
+                           FROM content_bundles AS bundle
+                           WHERE bundle.live_records <= 0
+                             AND NOT EXISTS (
+                                 SELECT 1 FROM pages
+                                 WHERE pages.content_bundle_key = bundle.bundle_key
+                             )
+                           ORDER BY bundle.created_at
+                           LIMIT %s
+                       )
+                       RETURNING bundle_key""",
+                    (limit,),
+                )
+                keys = [row[0] for row in cur.fetchall()]
+            if keys:
+                content_store = self._storage._get_content_store()
+                for key in keys:
+                    content_store.delete(key)
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        return len(keys)
 
     @property
     def count(self) -> int:
@@ -572,7 +654,9 @@ class PageQueryStore:
                               pages.source_url, pages.outlinks, pages.storage_tier,
                               pages.storage_reason, pages.stored_content_bytes,
                               pages.content_truncated, pages.outlink_count,
-                              pages.stored_outlink_count, pages.crawled_at
+                              pages.stored_outlink_count, pages.crawled_at,
+                              pages.content_bundle_key, pages.content_offset,
+                              pages.content_record_bytes
                        FROM pages
                        WHERE pages.url_hash = %s""",
                     (url_hash,),
@@ -582,15 +666,41 @@ class PageQueryStore:
             if not row:
                 return None
             page = dict(row)
-            if page["stored_content_bytes"]:
-                body = self._storage._get_content_store().get(url_hash)
-                page["content"] = body.decode("utf-8", errors="replace")
-            else:
-                page["content"] = ""
+            body = self._read_body(page)
+            page["content"] = body.decode("utf-8", errors="replace") if body is not None else ""
             return page
         except Exception:
             self._storage._conn.rollback()
             raise
+
+    def get_page_body(self, url_hash: str) -> bytes | None:
+        try:
+            with self._storage._conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(
+                    """SELECT url_hash, stored_content_bytes, content_bundle_key,
+                              content_offset, content_record_bytes
+                       FROM pages
+                       WHERE url_hash = %s""",
+                    (url_hash,),
+                )
+                row = cur.fetchone()
+            self._storage._finish_read()
+            return self._read_body(dict(row)) if row else None
+        except Exception:
+            self._storage._conn.rollback()
+            raise
+
+    def _read_body(self, page: dict) -> bytes | None:
+        """Pop the stored body location from a page row and read the body it points to."""
+        bundle_key = page.pop("content_bundle_key")
+        offset = page.pop("content_offset")
+        length = page.pop("content_record_bytes")
+        if not page["stored_content_bytes"]:
+            return None
+        content_store = self._storage._get_content_store()
+        if bundle_key is not None:
+            return content_store.get_record(bundle_key, offset, length)
+        return content_store.get(page["url_hash"])
 
 
 class RuntimeStatsStore:
@@ -769,6 +879,10 @@ class PgStorage:
         """Save multiple crawl results in one transaction."""
         return self.page_writes.save_many(results)
 
+    def release_dead_content_bundles(self, limit: int = 200) -> int:
+        """Delete stored bundles that no page points to any more."""
+        return self.page_writes.release_dead_bundles(limit=limit)
+
     @property
     def count(self) -> int:
         return self._count
@@ -799,6 +913,10 @@ class PgStorage:
     def get_page(self, url_hash: str) -> dict | None:
         """Get a single page with full content."""
         return self.page_queries.get_page(url_hash)
+
+    def get_page_body(self, url_hash: str) -> bytes | None:
+        """Get the stored response bytes of one page."""
+        return self.page_queries.get_page_body(url_hash)
 
     def get_runtime_stats_summary(self) -> dict:
         """Get fast operator stats from the persisted runtime snapshot."""

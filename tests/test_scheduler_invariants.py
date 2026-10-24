@@ -47,6 +47,7 @@ def _reset_schema(dsn: str) -> None:
             cur.execute("DROP TABLE IF EXISTS public.crawler_runtime_stats")
             cur.execute("DROP TABLE IF EXISTS public.page_content")
             cur.execute("DROP TABLE IF EXISTS public.pages")
+            cur.execute("DROP TABLE IF EXISTS public.content_bundles")
         conn.commit()
     finally:
         conn.close()

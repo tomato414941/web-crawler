@@ -1,5 +1,6 @@
 """Tests for Postgres storage."""
 
+import lzma
 import os
 import pytest
 import psycopg2
@@ -32,19 +33,41 @@ pytestmark = pytest.mark.skipif(
 
 class FakeContentStore:
     def __init__(self):
-        self.bodies: dict[str, bytes] = {}
-        self.content_types: dict[str, str] = {}
+        self.objects: dict[str, bytes] = {}
 
-    def put(self, key: str, body: bytes, content_type: str) -> None:
-        self.bodies[key] = body
-        self.content_types[key] = content_type
+    def put_bundle(self, key: str, data: bytes) -> None:
+        self.objects[key] = data
+
+    def get_record(self, key: str, offset: int, length: int) -> bytes:
+        return lzma.decompress(self.objects[key][offset : offset + length])
 
     def get(self, key: str) -> bytes:
-        return self.bodies[key]
+        return self.objects[key]
 
     def delete(self, key: str) -> None:
-        self.bodies.pop(key, None)
-        self.content_types.pop(key, None)
+        self.objects.pop(key, None)
+
+
+def _page(url: str, body: str, timestamp: float = 1710000000.0) -> dict:
+    return {
+        "url": url,
+        "status": 200,
+        "content_length": len(body),
+        "timestamp": timestamp,
+        "content": body,
+        "outlinks": [],
+    }
+
+
+def _bundle_rows(storage) -> list[tuple]:
+    with storage._conn.cursor() as cur:
+        cur.execute(
+            """SELECT record_count, live_records, live_bytes = stored_bytes
+               FROM content_bundles ORDER BY created_at, bundle_key"""
+        )
+        rows = cur.fetchall()
+    storage._conn.commit()
+    return rows
 
 
 def _reset_schema(dsn: str) -> None:
@@ -69,6 +92,7 @@ def _reset_schema(dsn: str) -> None:
             cur.execute("DROP TABLE IF EXISTS public.crawler_runtime_stats")
             cur.execute("DROP TABLE IF EXISTS public.page_content")
             cur.execute("DROP TABLE IF EXISTS public.pages")
+            cur.execute("DROP TABLE IF EXISTS public.content_bundles")
         conn.commit()
     finally:
         conn.close()
@@ -172,7 +196,80 @@ def test_save_many_persists_multiple_pages(pg_storage):
     with pg_storage._conn.cursor() as cur:
         cur.execute("SELECT count(*) FROM pages")
         assert cur.fetchone()[0] == 2
-    assert len(pg_storage._content_store.bodies) == 2
+    assert pg_storage.get_page_body(_url_hash("https://example.com/page1")) == (
+        b"<html><title>Page 1</title><body>One</body></html>"
+    )
+    assert pg_storage.get_page_body(_url_hash("https://example.com/page2")) == (
+        b"<html><title>Page 2</title><body>Two</body></html>"
+    )
+
+
+def test_save_many_writes_one_bundle_per_batch(pg_storage):
+    pg_storage.save_many(
+        [
+            _page("https://example.com/a", "<html>a</html>"),
+            _page("https://example.com/b", "<html>b</html>"),
+            _page("https://example.com/c", "<html>c</html>"),
+        ]
+    )
+
+    assert len(pg_storage._content_store.objects) == 1
+    assert _bundle_rows(pg_storage) == [(3, 3, True)]
+    page = pg_storage.get_page(_url_hash("https://example.com/b"))
+    assert page["content"] == "<html>b</html>"
+    assert "content_bundle_key" not in page
+
+
+def test_recrawl_releases_old_bundle_once_all_its_pages_move(pg_storage):
+    pg_storage.save_many(
+        [
+            _page("https://example.com/a", "<html>a1</html>"),
+            _page("https://example.com/b", "<html>b1</html>"),
+        ]
+    )
+    pg_storage.save(_page("https://example.com/a", "<html>a2</html>", timestamp=1710000100.0))
+
+    assert [row[1] for row in _bundle_rows(pg_storage)] == [1, 1]
+    assert pg_storage.release_dead_content_bundles() == 0
+
+    pg_storage.save(_page("https://example.com/b", "<html>b2</html>", timestamp=1710000200.0))
+
+    assert pg_storage.release_dead_content_bundles() == 1
+    assert len(pg_storage._content_store.objects) == 2
+    assert [row[1] for row in _bundle_rows(pg_storage)] == [1, 1]
+    assert pg_storage.get_page_body(_url_hash("https://example.com/a")) == b"<html>a2</html>"
+    assert pg_storage.get_page_body(_url_hash("https://example.com/b")) == b"<html>b2</html>"
+
+
+def test_deleting_pages_releases_their_bundle(pg_storage):
+    pg_storage.save(_page("https://example.com/a", "<html>a</html>"))
+
+    with pg_storage._conn.cursor() as cur:
+        cur.execute("DELETE FROM pages")
+    pg_storage._conn.commit()
+
+    assert pg_storage.release_dead_content_bundles() == 1
+    assert pg_storage._content_store.objects == {}
+    assert _bundle_rows(pg_storage) == []
+
+
+def test_saving_page_stored_as_its_own_object_deletes_that_object(pg_storage):
+    url_hash = _url_hash("https://example.com/old")
+    with pg_storage._conn.cursor() as cur:
+        cur.execute(
+            """INSERT INTO pages (url_hash, url, host, storage_tier, storage_reason,
+                                  stored_content_bytes, crawled_at)
+               VALUES (%s, %s, 'example.com', 'body', 'text_content_type', 14, 1700000000)""",
+            (url_hash, "https://example.com/old"),
+        )
+    pg_storage._conn.commit()
+    pg_storage._content_store.objects[url_hash] = b"<html>v1</html>"
+    assert pg_storage.get_page_body(url_hash) == b"<html>v1</html>"
+
+    pg_storage.save(_page("https://example.com/old", "<html>v2</html>"))
+
+    assert url_hash not in pg_storage._content_store.objects
+    assert pg_storage.get_page_body(url_hash) == b"<html>v2</html>"
 
 
 def test_save_many_deletes_metadata_only_content_rows(pg_storage):
@@ -201,7 +298,9 @@ def test_save_many_deletes_metadata_only_content_rows(pg_storage):
     assert save_results[0].telemetry is not None
     assert save_results[0].telemetry.storage_tier == "metadata_only"
 
-    assert _url_hash("https://example.com/page1") not in pg_storage._content_store.bodies
+    assert pg_storage.get_page_body(_url_hash("https://example.com/page1")) is None
+    assert pg_storage.release_dead_content_bundles() == 1
+    assert pg_storage._content_store.objects == {}
 
 
 def test_save_many_deduplicates_same_url_with_last_write_winning(pg_storage):
@@ -229,7 +328,7 @@ def test_save_many_deduplicates_same_url_with_last_write_winning(pg_storage):
     with pg_storage._conn.cursor() as cur:
         cur.execute("SELECT title FROM pages WHERE url = %s", ("https://example.com/dup",))
         assert cur.fetchone() == ("Second",)
-    assert pg_storage._content_store.bodies[_url_hash("https://example.com/dup")] == (
+    assert pg_storage.get_page_body(_url_hash("https://example.com/dup")) == (
         b"<html><title>Second</title><body>Two</body></html>"
     )
 
@@ -249,7 +348,7 @@ def test_save_preserves_response_bytes(pg_storage):
 
     pg_storage.save(result)
 
-    assert pg_storage._content_store.bodies[_url_hash(result.url)] == b"\x89PNG"
+    assert pg_storage.get_page_body(_url_hash(result.url)) == b"\x89PNG"
 
 
 def test_url_hash_is_sha256_of_normalized_url():

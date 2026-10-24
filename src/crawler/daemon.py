@@ -220,6 +220,7 @@ class CrawlDaemon:
                         )
                     self._refresh_dirty_host_runnable_heads(scheduler)
                     self._repair_host_runnable_heads(scheduler)
+                    self._release_dead_content_bundles(storage)
 
                     readiness = scheduler.daemon_readiness()
                     pending = readiness.pending
@@ -505,6 +506,16 @@ class CrawlDaemon:
             logger.debug("Host runnable-head repair failed", exc_info=True)
             return
         self._last_host_head_repair = summary.as_dict()
+
+    def _release_dead_content_bundles(self, storage: PgStorage) -> None:
+        """Delete stored bundles whose pages were all recrawled elsewhere."""
+        try:
+            released = storage.release_dead_content_bundles()
+        except Exception:
+            logger.warning("Releasing dead content bundles failed", exc_info=True)
+            return
+        if released:
+            logger.info("Released %d content bundles with no live pages", released)
 
     def _refresh_dirty_host_runnable_heads(self, scheduler: Scheduler) -> None:
         """Refresh bounded dirty host-head rows before daemon cycle gating."""
