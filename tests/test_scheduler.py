@@ -633,6 +633,40 @@ class TestScheduler:
         assert admitted == 0
         assert self._queue_counts(ledger, "http://example.com/done") == (0, 0, 0)
 
+    def test_rediscovered_waiting_url_takes_higher_discovery_value(self, ledger):
+        ledger.place(CrawlTask(url="http://example.com/page", discovery_value=1.0))
+
+        ledger.place(CrawlTask(url="http://example.com/page", discovery_value=5.0))
+
+        with ledger._conn.cursor() as cur:
+            cur.execute(
+                f"SELECT scheduler_score FROM {PHYSICAL_QUEUE_TABLES[QUEUE_SCHEDULED]} WHERE url = %s",
+                ("http://example.com/page",),
+            )
+            assert cur.fetchone() == (5.0,)
+
+    def test_rediscovered_leased_url_stays_with_its_worker(self, ledger):
+        ledger.place(CrawlTask(url="http://example.com/page"))
+        leased = ledger.lease_next()
+        assert leased is not None
+
+        ledger.place(CrawlTask(url="http://example.com/page", discovery_value=5.0))
+
+        assert self._queue_counts(ledger, leased.url) == (0, 0, 0)
+        assert ledger.lease_next() is None
+        assert ledger.mark_done(leased.url, lease_token=leased.lease_token) is True
+
+    def test_rediscovered_blocked_url_stays_in_quarantine(self, ledger):
+        now = time.time()
+        ledger.place(CrawlTask(url="http://a.com/blocked", next_fetch_at=now))
+        self.host_store.record_failure("a.com", backoff_seconds=30.0, now=now)
+        ledger.rebalance_blocked_host_backoff(now=now)
+
+        ledger.place(CrawlTask(url="http://a.com/blocked", discovery_value=5.0))
+
+        assert self._queue_counts(ledger, "http://a.com/blocked") == (0, 0, 0)
+        assert ledger.blocked_host_backoff_count() == 1
+
     def test_add_preserves_first_seen_source_url_when_discovery_value_improves(self, ledger):
         assert ledger.place(
             CrawlTask(
@@ -1601,6 +1635,30 @@ class TestScheduler:
             (active_count,) = cur.fetchone()
 
         assert active_count == 1
+
+    def test_lease_next_leaves_leased_url_with_its_worker(self, ledger):
+        ledger.place(CrawlTask(url="http://example.com/page"))
+        leased = ledger.lease_next()
+        assert leased is not None
+        with ledger._conn.cursor() as cur:
+            ledger._membership.insert_pending_rows(
+                cur,
+                [
+                    (
+                        leased.url,
+                        "example.com",
+                        leased.scheduler_score,
+                        leased.next_fetch_at,
+                        leased.added_at,
+                        QUEUE_SCHEDULED,
+                    )
+                ],
+            )
+        ledger._conn.commit()
+
+        assert ledger.lease_next() is None
+        assert self._queue_counts(ledger, leased.url) == (0, 0, 0)
+        assert ledger.mark_done(leased.url, lease_token=leased.lease_token) is True
 
     def test_lease_batch(self, ledger):
         for i in range(5):

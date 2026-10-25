@@ -226,7 +226,6 @@ class Scheduler:
             conn,
             ledger_store=self._ledger_store,
             membership=self._membership,
-            leases=self._leases,
             queue_policy=self._queue_policy,
             url_ledger_table=URL_LEDGER_TABLE,
             blocked_host_backoff_table=_BLOCKED_HOST_BACKOFF_TABLE,

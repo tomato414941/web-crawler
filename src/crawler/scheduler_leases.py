@@ -85,34 +85,36 @@ class ExecutionLeaseStore:
             return
         cur.execute(f"DELETE FROM {self._table_name} WHERE url = ANY(%s)", (normalized_urls,))
 
-    def upsert(self, cur, rows: list[ExecutionLeaseRowInput]) -> None:
-        row_tuples = self._row_tuples(rows)
-        normalized_urls = sorted({normalize_url(url) for url, *_ in row_tuples if url})
-        if not normalized_urls:
-            return
-        self.delete(cur, normalized_urls)
-        psycopg2.extras.execute_values(
+    def acquire(self, cur, rows: list[ExecutionLeaseRowInput]) -> set[str]:
+        """Lease URLs that hold no lease yet and return the URLs leased now.
+
+        An existing lease stays with its worker until completion or expiry recovery ends it.
+        """
+        lease_rows = [
+            (
+                normalize_url(url),
+                host,
+                self._normalize_physical_queue(physical_queue),
+                lease_token,
+                lease_expires_at,
+            )
+            for url, host, physical_queue, lease_token, lease_expires_at in self._row_tuples(rows)
+            if url
+        ]
+        if not lease_rows:
+            return set()
+        leased = psycopg2.extras.execute_values(
             cur,
             f"""INSERT INTO {self._table_name}
                     (url, host, physical_queue, lease_token, lease_expires_at)
                 VALUES %s
-                ON CONFLICT (url) DO UPDATE
-                SET host = EXCLUDED.host,
-                    physical_queue = EXCLUDED.physical_queue,
-                    lease_token = EXCLUDED.lease_token,
-                    lease_expires_at = EXCLUDED.lease_expires_at""",
-            [
-                (
-                    normalize_url(url),
-                    host,
-                    self._normalize_physical_queue(physical_queue),
-                    lease_token,
-                    lease_expires_at,
-                )
-                for url, host, physical_queue, lease_token, lease_expires_at in row_tuples
-            ],
+                ON CONFLICT (url) DO NOTHING
+                RETURNING url""",
+            lease_rows,
             page_size=200,
+            fetch=True,
         )
+        return {url for (url,) in leased}
 
     def recover_rows(self, cur, *, now: float, expired_only: bool) -> list[tuple[str, str, str]]:
         if expired_only:

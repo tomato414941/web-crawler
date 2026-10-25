@@ -33,7 +33,6 @@ _ADMISSION_DIAGNOSTICS = {
     "admit_delete_membership_ms": 0.3,
     "admit_insert_membership_ms": 0.4,
     "admit_host_heads_ms": 0.5,
-    "admit_delete_leases_ms": 0.6,
     "admit_commit_ms": 0.7,
 }
 
@@ -240,7 +239,6 @@ def test_timing_accumulator_summarizes_stage_percentiles():
                 admit_delete_membership_ms=0.3,
                 admit_insert_membership_ms=0.4,
                 admit_host_heads_ms=0.5,
-                admit_delete_leases_ms=0.6,
                 admit_commit_ms=0.7,
                 mark_done_ms=1.0,
                 total_ms=8.0,
@@ -560,7 +558,6 @@ async def test_success_finalizer_records_operation_breakdown():
     assert finalized.timings.finalizer.admit_delete_membership_ms == 0.3
     assert finalized.timings.finalizer.admit_insert_membership_ms == 0.4
     assert finalized.timings.finalizer.admit_host_heads_ms == 0.5
-    assert finalized.timings.finalizer.admit_delete_leases_ms == 0.6
     assert finalized.timings.finalizer.admit_commit_ms == 0.7
     assert finalized.timings.finalizer.host_success_ms >= 0
     assert finalized.timings.finalizer.mark_done_ms >= 0
@@ -649,17 +646,42 @@ async def test_success_finalizer_batches_scheduler_mutations():
     assert [result.timings.finalizer.new_tasks_count for result in finalized] == [1, 1]
 
 
-def test_success_finalizer_caps_fallback_mark_done_count(caplog):
-    class PartialBatchScheduler(_FakeScheduler):
-        def __init__(self):
-            super().__init__(None)
-            self.done_batches = []
+class _LeaseOwnerScheduler(_FakeScheduler):
+    """Fake scheduler that lets only the current lease holder complete a URL."""
 
-        def mark_done_many(self, tasks):
-            self.done_batches.append(list(tasks))
-            return 1
+    def __init__(self, leases):
+        super().__init__(None)
+        self.leases = dict(leases)
+        self.failed = []
 
-    ledger = PartialBatchScheduler()
+    def _release(self, url, lease_token):
+        if lease_token is not None and self.leases.get(url) != lease_token:
+            return False
+        self.leases.pop(url, None)
+        return True
+
+    def mark_done(self, url, lease_token=None):
+        if not self._release(url, lease_token):
+            return False
+        return super().mark_done(url, lease_token=lease_token)
+
+    def mark_done_many(self, tasks):
+        return sum(self.mark_done(task.url, lease_token=task.lease_token) for task in tasks)
+
+    def mark_failed(self, url, retryable, error, backoff_seconds=None, lease_token=None):
+        if not self._release(url, lease_token):
+            return False
+        self.failed.append((url, lease_token))
+        return True
+
+
+def test_success_finalizer_leaves_url_leased_by_another_worker_to_that_worker(caplog):
+    ledger = _LeaseOwnerScheduler(
+        {
+            "https://example.com/first": "lease-first",
+            "https://example.com/second": "lease-other-worker",
+        }
+    )
     engine = CrawlerEngine(
         max_pages=2,
         scheduler=ledger,
@@ -676,14 +698,55 @@ def test_success_finalizer_caps_fallback_mark_done_count(caplog):
     ]
 
     with caplog.at_level("WARNING"):
-        telemetry = engine._finalizer_service().finalize_success_batch_sync(parsed_pages)
+        engine._finalizer_service().finalize_success_batch_sync(parsed_pages)
 
-    assert telemetry.mark_done_ms >= 0
-    assert ledger.done == [
-        ("https://example.com/first", None),
-        ("https://example.com/second", None),
-    ]
-    assert "updated fewer success rows than expected" not in caplog.text
+    assert ledger.done == [("https://example.com/first", "lease-first")]
+    assert ledger.leases == {"https://example.com/second": "lease-other-worker"}
+    assert "updated fewer success rows than expected: updated=1 expected=2" in caplog.text
+
+
+def test_failed_finalizer_leaves_url_leased_by_another_worker_to_that_worker():
+    ledger = _LeaseOwnerScheduler({"https://example.com/fail": "lease-other-worker"})
+    engine = CrawlerEngine(
+        max_pages=1,
+        scheduler=ledger,
+        host_manager=_FakeHostManager(),
+    )
+    failed = _FailedTask(
+        task=CrawlTask(url="https://example.com/fail", lease_token="lease-1"),
+        failure=CrawlFailure(
+            url="https://example.com/fail",
+            error="timeout",
+            retryable=True,
+            timings=CrawlStageTimings(),
+        ),
+        process_started=time.perf_counter(),
+    )
+
+    engine._finalizer_service().finalize_failed_sync(failed)
+
+    assert ledger.failed == []
+    assert ledger.leases == {"https://example.com/fail": "lease-other-worker"}
+
+
+def test_skipped_finalizer_leaves_url_leased_by_another_worker_to_that_worker():
+    ledger = _LeaseOwnerScheduler({"https://example.com/skip": "lease-other-worker"})
+    engine = CrawlerEngine(
+        max_pages=1,
+        scheduler=ledger,
+        host_manager=_FakeHostManager(),
+    )
+    skipped = _SkippedTask(
+        task=CrawlTask(url="https://example.com/skip", lease_token="lease-1"),
+        reason="robots_denied",
+        timings=CrawlStageTimings(),
+        process_started=time.perf_counter(),
+    )
+
+    engine._finalizer_service().finalize_skipped_sync(skipped)
+
+    assert ledger.done == []
+    assert ledger.leases == {"https://example.com/skip": "lease-other-worker"}
 
 
 @pytest.mark.asyncio

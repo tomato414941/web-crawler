@@ -584,10 +584,12 @@ class SchedulerLeaseService:
                 row = cur.fetchone()
                 if row:
                     self._membership.delete_queue_entries(cur, [row[0]])
-                    self._leases.upsert(
+                    leased_urls = self._leases.acquire(
                         cur,
                         [(row[0], row[6], physical_queue, lease_token, lease_expires_at)],
                     )
+                    if row[0] not in leased_urls:
+                        row = None
             self._conn.commit()
         except Exception:
             self._conn.rollback()
@@ -705,7 +707,7 @@ class SchedulerLeaseService:
                 rows = cur.fetchall()
                 if rows:
                     self._membership.delete_queue_entries(cur, [row[0] for row in rows])
-                    self._leases.upsert(
+                    leased_urls = self._leases.acquire(
                         cur,
                         [
                             (
@@ -718,6 +720,7 @@ class SchedulerLeaseService:
                             for row in rows
                         ],
                     )
+                    rows = [row for row in rows if row[0] in leased_urls]
             self._conn.commit()
         except Exception:
             self._conn.rollback()

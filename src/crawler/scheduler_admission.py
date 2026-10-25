@@ -6,7 +6,6 @@ import logging
 import time
 from typing import Any
 
-from .scheduler_leases import ExecutionLeaseStore
 from .scheduler_membership import (
     HOST_HEAD_UPDATE_DIRTY,
     SchedulerMembershipStore,
@@ -25,7 +24,6 @@ ADMISSION_DIAGNOSTIC_FIELDS = (
     "admit_delete_membership_ms",
     "admit_insert_membership_ms",
     "admit_host_heads_ms",
-    "admit_delete_leases_ms",
     "admit_commit_ms",
 )
 
@@ -35,7 +33,12 @@ def _elapsed_ms(started_at: float) -> float:
 
 
 class SchedulerAdmissionService:
-    """Synchronize admitted durable URL rows into scheduler membership."""
+    """Synchronize admitted durable URL rows into scheduler membership.
+
+    Admission places only URLs that are discovered or waiting in a normal queue. A leased
+    URL belongs to its worker until completion and a blocked URL to quarantine until
+    promotion, so admission leaves both as they are.
+    """
 
     def __init__(
         self,
@@ -43,7 +46,6 @@ class SchedulerAdmissionService:
         *,
         ledger_store: UrlLedgerStore,
         membership: SchedulerMembershipStore,
-        leases: ExecutionLeaseStore,
         queue_policy: SchedulerQueuePolicy,
         url_ledger_table: str,
         blocked_host_backoff_table: str,
@@ -52,7 +54,6 @@ class SchedulerAdmissionService:
         self._conn = conn
         self._ledger_store = ledger_store
         self._membership = membership
-        self._leases = leases
         self._queue_policy = queue_policy
         self._url_ledger_table = url_ledger_table
         self._blocked_host_backoff_table = blocked_host_backoff_table
@@ -65,6 +66,19 @@ class SchedulerAdmissionService:
 
     def last_diagnostics(self) -> dict[str, float]:
         return dict(self._last_diagnostics)
+
+    def admittable_sql(self, ledger_alias: str) -> str:
+        """Return the predicate for live ledger rows that are neither leased nor blocked."""
+        return f"""{ledger_alias}.terminal_reason IS NULL
+                  AND {ledger_alias}.last_success_at IS NULL
+                  AND NOT EXISTS (
+                      SELECT 1 FROM {self._lease_table} AS lease
+                      WHERE lease.url = {ledger_alias}.url
+                  )
+                  AND NOT EXISTS (
+                      SELECT 1 FROM {self._blocked_host_backoff_table} AS blocked
+                      WHERE blocked.url = {ledger_alias}.url
+                  )"""
 
     def admission_physical_queue_by_url(self, tasks: list[Any]) -> dict[str, str]:
         return {
@@ -80,7 +94,7 @@ class SchedulerAdmissionService:
         cur,
         tasks: list[Any],
     ) -> list[tuple[str, str, float, float, float]]:
-        """Load known ledger rows used by scheduler admission."""
+        """Load the ledger rows of these tasks that admission may place."""
         normalized_urls = sorted({task.url for task in tasks if task.url})
         normalized_urls = [
             url for url in normalized_urls if url_identity_length(url) <= MAX_URL_IDENTITY_BYTES
@@ -88,11 +102,14 @@ class SchedulerAdmissionService:
         if not normalized_urls:
             return []
         cur.execute(
-            f"""SELECT url, host, discovery_value, next_fetch_at, added_at
-                FROM {self._url_ledger_table}
-                WHERE url = ANY(%s)
-                  AND terminal_reason IS NULL
-                  AND last_success_at IS NULL""",
+            f"""SELECT ledger.url,
+                       ledger.host,
+                       ledger.discovery_value,
+                       ledger.next_fetch_at,
+                       ledger.added_at
+                FROM {self._url_ledger_table} AS ledger
+                WHERE ledger.url = ANY(%s)
+                  AND {self.admittable_sql("ledger")}""",
             (normalized_urls,),
         )
         return list(cur.fetchall())
@@ -108,12 +125,17 @@ class SchedulerAdmissionService:
         try:
             with self._conn.cursor() as cur:
                 started = time.perf_counter()
-                self._ledger_store.update_task_intents(cur, prepared_tasks)
-                diagnostics["admit_update_intents_ms"] = _elapsed_ms(started)
-
-                started = time.perf_counter()
                 ledger_rows = self.fetch_admission_ledger_rows_for_tasks(cur, prepared_tasks)
                 diagnostics["admit_fetch_rows_ms"] = _elapsed_ms(started)
+
+                admitted_urls = {url for url, *_rest in ledger_rows}
+                started = time.perf_counter()
+                self._ledger_store.update_task_intents(
+                    cur,
+                    [task for task in prepared_tasks if task.url in admitted_urls],
+                )
+                diagnostics["admit_update_intents_ms"] = _elapsed_ms(started)
+
                 pending_rows = self._membership.rows_for_ledger_rows(
                     ledger_rows,
                     physical_queue_by_url=self.admission_physical_queue_by_url(prepared_tasks),
@@ -136,9 +158,6 @@ class SchedulerAdmissionService:
                     "host_heads_ms",
                     0.0,
                 )
-                started = time.perf_counter()
-                self._leases.delete(cur, self._membership.row_urls(pending_rows))
-                diagnostics["admit_delete_leases_ms"] = _elapsed_ms(started)
                 count = len(pending_rows)
         except Exception:
             self._conn.rollback()
@@ -184,7 +203,7 @@ class SchedulerAdmissionService:
         *,
         limit: int,
     ) -> list[tuple[str, str, float, float, float]]:
-        """Return ledger rows that are known but lack current scheduler membership."""
+        """Return admittable ledger rows that are not waiting in a normal queue."""
         queue_joins, queue_absence = self._queue_policy.queue_membership_join_sql(
             ledger_alias="ledger"
         )
@@ -196,15 +215,8 @@ class SchedulerAdmissionService:
                        ledger.added_at
                 FROM {self._url_ledger_table} AS ledger
                 {queue_joins}
-                LEFT JOIN {self._blocked_host_backoff_table} AS blocked
-                    ON blocked.url = ledger.url
-                LEFT JOIN {self._lease_table} AS lease
-                    ON lease.url = ledger.url
                 WHERE {queue_absence}
-                  AND blocked.url IS NULL
-                  AND lease.url IS NULL
-                  AND ledger.last_success_at IS NULL
-                  AND ledger.terminal_reason IS NULL
+                  AND {self.admittable_sql("ledger")}
                   AND ledger.url_length <= %s
                 ORDER BY ledger.discovery_value DESC,
                          ledger.next_fetch_at ASC,
@@ -253,7 +265,7 @@ class SchedulerAdmissionService:
                 self._membership.replace_pending_rows(
                     cur,
                     pending_rows,
-                    host_head_update=self._host_head_update_dirty,
+                    host_head_update=HOST_HEAD_UPDATE_DIRTY,
                 )
                 count = len(pending_rows)
         except Exception:
