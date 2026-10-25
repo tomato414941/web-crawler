@@ -52,6 +52,18 @@ def test_compose_binds_public_services_to_loopback():
     assert '"5433:5432"' not in compose
 
 
+def test_compose_restarts_long_running_services_unless_stopped():
+    compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
+
+    assert compose.count("restart: unless-stopped") == 3
+
+
+def test_compose_raises_postgres_shared_memory_for_parallel_workers():
+    compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
+
+    assert "shm_size: 256mb" in compose
+
+
 def test_hardened_compose_routes_crawler_through_proxy():
     compose = (ROOT / "docker-compose.hardened.yml").read_text(encoding="utf-8")
 

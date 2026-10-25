@@ -20,6 +20,8 @@ services:
       interval: 5s
       retries: 5
     logging: *default-logging
+    shm_size: 256mb
+    restart: unless-stopped
 
   api:
     build: .
@@ -38,6 +40,7 @@ services:
         condition: service_healthy
       migrate:
         condition: service_completed_successfully
+    restart: unless-stopped
 
   migrate:
     build: .
