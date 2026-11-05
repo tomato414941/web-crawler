@@ -87,4 +87,8 @@ jobs:
             tests/test_storage.py::test_upsert_on_conflict \
             tests/test_storage.py::test_save_many_persists_multiple_pages \
             tests/test_storage.py::test_save_many_deletes_metadata_only_content_rows \
-            tests/test_storage.py::test_save_many_deduplicates_same_url_with_last_write_winning
+            tests/test_storage.py::test_save_many_deduplicates_same_url_with_last_write_winning \
+            tests/test_storage.py::test_save_many_stores_lengths_beyond_integer_range_as_null \
+            tests/test_storage.py::test_operator_observation_counts_pages_hosts_and_bytes_exactly \
+            tests/test_storage.py::test_get_runtime_stats_summary_uses_persisted_snapshot \
+            tests/test_storage.py::test_get_runtime_stats_summary_handles_missing_runtime_snapshot

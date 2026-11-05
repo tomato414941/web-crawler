@@ -384,6 +384,49 @@ def test_save_drops_nul_content_to_metadata_only(pg_storage):
     assert page["stored_content_bytes"] == 0
 
 
+def test_save_many_stores_lengths_beyond_integer_range_as_null(pg_storage):
+    results = [
+        {**_page("https://example.com/huge.iso", ""), "content_length": 5 * 1024**3},
+        {**_page("https://example.com/negative", ""), "content_length": -1},
+        _page("https://example.com/page", "<html>ok</html>"),
+    ]
+
+    save_results = pg_storage.save_many(results)
+
+    assert [save_result.saved for save_result in save_results] == [True, True, True]
+    with pg_storage._conn.cursor() as cur:
+        cur.execute("SELECT url, content_length FROM pages ORDER BY url")
+        assert cur.fetchall() == [
+            ("https://example.com/huge.iso", None),
+            ("https://example.com/negative", None),
+            ("https://example.com/page", len("<html>ok</html>")),
+        ]
+    pg_storage._conn.commit()
+
+
+def test_operator_observation_counts_pages_hosts_and_bytes_exactly(pg_storage):
+    from crawler.observation import _read_storage_shape
+
+    pg_storage.save_many(
+        [
+            {**_page("https://a.example/1", "<html>one</html>"), "outlink_count": 3},
+            _page("https://a.example/2", "<html>two</html>"),
+            {**_page("https://b.example/huge.iso", ""), "content_length": 5 * 1024**3},
+        ]
+    )
+
+    totals = _read_storage_shape(pg_storage.conn)["totals"]
+
+    assert totals == {
+        "pages": 3,
+        "hosts": 2,
+        "stored_content_bytes": len("<html>one</html>") + len("<html>two</html>"),
+        "content_length": len("<html>one</html>") + len("<html>two</html>"),
+        "outlink_count": 3,
+        "stored_outlink_count": 0,
+    }
+
+
 def test_get_runtime_stats_summary_uses_persisted_snapshot(pg_storage):
     pg_storage.save(
         {
@@ -460,10 +503,16 @@ def test_get_runtime_stats_summary_uses_persisted_snapshot(pg_storage):
         },
     )
 
+    with pg_storage._conn.cursor() as cur:
+        cur.execute("ANALYZE pages")
+    pg_storage._conn.commit()
+
     stats = pg_storage.get_runtime_stats_summary()
 
     assert stats["stats_source"] == "runtime_snapshot"
     assert stats["total_pages"] == 1
+    assert stats["total_pages_estimated"] is True
+    assert stats["oldest_crawl"] == stats["newest_crawl"] == 1710000000.0
     assert stats["readiness"]["pending"] == 20
     assert stats["readiness"]["runnable"] == 12
     assert stats["readiness_state_counts"]["scheduled"] == 8

@@ -11,10 +11,11 @@ def test_build_operator_observation_compacts_runtime_and_storage_shape():
     observation = build_operator_observation(
         {
             "stats_source": "runtime_snapshot",
-            "total_pages": 10,
-            "hosts": 3,
-            "total_bytes": 2048,
-            "total_stored_bytes": 1024,
+            "total_pages": 9,
+            "total_pages_estimated": True,
+            "hosts": None,
+            "total_bytes": None,
+            "total_stored_bytes": None,
             "operator_summary": {
                 "scheduler_readiness_states": {
                     "pending": 50,
@@ -66,7 +67,14 @@ def test_build_operator_observation_compacts_runtime_and_storage_shape():
                     "content_length": 2048,
                 }
             ],
-            "totals": {"outlink_count": 20, "stored_outlink_count": 5},
+            "totals": {
+                "pages": 10,
+                "hosts": 3,
+                "stored_content_bytes": 1024,
+                "content_length": 2048,
+                "outlink_count": 20,
+                "stored_outlink_count": 5,
+            },
             "url_ledger": {"urls": 50, "hosts": 10},
             "relations": [{"relation": "pages", "total_bytes": 4096}],
         },
@@ -88,6 +96,9 @@ def test_build_operator_observation_compacts_runtime_and_storage_shape():
     )
 
     assert observation["crawl"]["total_pages"] == 10
+    assert observation["crawl"]["hosts"] == 3
+    assert observation["crawl"]["total_bytes"] == 2048
+    assert observation["crawl"]["total_stored_bytes"] == 1024
     assert observation["scheduler"]["runnable"] == 30
     assert observation["scheduler"]["invariants"] == {
         "checked": True,

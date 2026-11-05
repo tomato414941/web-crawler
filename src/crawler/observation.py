@@ -25,7 +25,9 @@ OBSERVED_RELATIONS = (
     "host_state",
     "crawler_runtime_stats",
 )
-OPERATOR_OBSERVATION_STATEMENT_TIMEOUT_MS = 15000
+OPERATOR_OBSERVATION_STATEMENT_TIMEOUT_MS = 300000
+
+
 def read_operator_observation(
     storage: Any,
     *,
@@ -61,12 +63,12 @@ def build_operator_observation(
 
     return {
         "crawl": {
-            "total_pages": _int(stats.get("total_pages")),
-            "hosts": _int(stats.get("hosts")),
+            "total_pages": _int(storage_totals.get("pages")),
+            "hosts": _int(storage_totals.get("hosts")),
             "oldest_crawl": stats.get("oldest_crawl"),
             "newest_crawl": stats.get("newest_crawl"),
-            "total_bytes": _int(stats.get("total_bytes")),
-            "total_stored_bytes": _int(stats.get("total_stored_bytes")),
+            "total_bytes": _int(storage_totals.get("content_length")),
+            "total_stored_bytes": _int(storage_totals.get("stored_content_bytes")),
         },
         "scheduler": {
             "pending": _int(scheduler.get("pending")),
@@ -320,13 +322,8 @@ def _read_storage_shape(conn: Any) -> dict[str, object]:
             ) in cur.fetchall()
         ]
 
-        cur.execute(
-            """SELECT
-                 COALESCE(SUM(outlink_count), 0) AS outlink_count,
-                 COALESCE(SUM(stored_outlink_count), 0) AS stored_outlink_count
-               FROM pages"""
-        )
-        outlink_count, stored_outlink_count = cur.fetchone()
+        cur.execute("SELECT COUNT(DISTINCT host) FROM pages")
+        hosts_with_pages = cur.fetchone()[0]
 
         cur.execute(f"SELECT to_regclass('public.{URL_LEDGER_TABLE}')")
         url_ledger_exists = cur.fetchone()[0] is not None
@@ -367,8 +364,12 @@ def _read_storage_shape(conn: Any) -> dict[str, object]:
     return {
         "tiers": tier_rows,
         "totals": {
-            "outlink_count": int(outlink_count or 0),
-            "stored_outlink_count": int(stored_outlink_count or 0),
+            "pages": sum(tier["pages"] for tier in tier_rows),
+            "hosts": int(hosts_with_pages or 0),
+            "stored_content_bytes": sum(tier["stored_content_bytes"] for tier in tier_rows),
+            "content_length": sum(tier["content_length"] for tier in tier_rows),
+            "outlink_count": sum(tier["outlink_count"] for tier in tier_rows),
+            "stored_outlink_count": sum(tier["stored_outlink_count"] for tier in tier_rows),
         },
         "url_ledger": url_ledger,
         "relations": relations,

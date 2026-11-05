@@ -42,6 +42,7 @@ PAGES_REQUIRED_COLUMNS = {
     "content_record_bytes",
 }
 RUNTIME_STATS_STATEMENT_TIMEOUT_MS = 15000
+PG_INTEGER_MAX = 2_147_483_647
 
 
 _TITLE_PATTERN = re.compile(r"<title[^>]*>(.*?)</title>", re.IGNORECASE | re.DOTALL)
@@ -94,6 +95,15 @@ def _sanitize_stored_content(content: object) -> str:
     if "\x00" in content:
         return ""
     return content
+
+
+def _stored_content_length(value: object) -> int | None:
+    """Return a declared length that fits pages.content_length, or None when it cannot."""
+    if not isinstance(value, int) or isinstance(value, bool):
+        return None
+    if value < 0 or value > PG_INTEGER_MAX:
+        return None
+    return value
 
 
 def _prepare_page_save(
@@ -463,7 +473,7 @@ class PageWriteStore:
                         prepared.host,
                         prepared.title,
                         prepared.data.get("status"),
-                        prepared.data.get("content_length"),
+                        _stored_content_length(prepared.data.get("content_length")),
                         prepared.content_type,
                         prepared.data.get("source_url"),
                         prepared.outlinks,
@@ -763,7 +773,11 @@ class RuntimeStatsStore:
             raise
 
     def summary(self) -> dict:
-        """Return runtime snapshot plus lightweight page totals for operators."""
+        """Return runtime snapshot plus lightweight page totals for operators.
+
+        Page totals avoid scanning pages: the page count is the planner estimate and
+        the crawl time range comes from the crawled_at index.
+        """
         try:
             with self._storage._conn.cursor() as cur:
                 cur.execute(
@@ -772,13 +786,10 @@ class RuntimeStatsStore:
                 )
                 cur.execute(
                     """SELECT
-                         count(*) as total_pages,
-                         count(DISTINCT host) as hosts,
-                         min(crawled_at) as oldest,
-                         max(crawled_at) as newest,
-                         sum(content_length) as total_bytes,
-                         sum(stored_content_bytes) as total_stored_bytes
-                       FROM pages"""
+                         (SELECT GREATEST(reltuples, 0)::bigint
+                            FROM pg_class WHERE oid = 'public.pages'::regclass),
+                         (SELECT min(crawled_at) FROM pages),
+                         (SELECT max(crawled_at) FROM pages)"""
                 )
                 page_stats_row = cur.fetchone()
             self._storage._finish_read()
@@ -815,11 +826,12 @@ class RuntimeStatsStore:
         return {
             "stats_source": "runtime_snapshot",
             "total_pages": page_stats_row[0],
-            "hosts": page_stats_row[1],
-            "oldest_crawl": page_stats_row[2],
-            "newest_crawl": page_stats_row[3],
-            "total_bytes": page_stats_row[4],
-            "total_stored_bytes": page_stats_row[5],
+            "total_pages_estimated": True,
+            "hosts": None,
+            "oldest_crawl": page_stats_row[1],
+            "newest_crawl": page_stats_row[2],
+            "total_bytes": None,
+            "total_stored_bytes": None,
             "scheduler_status": scheduler_status,
             "scheduler_state_snapshot": dict(scheduler_state_views["scheduler_state_snapshot"]),
             "intent_counts": dict(scheduler_status.get("intent_counts", {})),
