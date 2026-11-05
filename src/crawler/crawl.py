@@ -258,7 +258,8 @@ class CrawlerEngine:
 
         self._page_lock = asyncio.Lock()
         self._lease_lock = asyncio.Lock()
-        self._frontier_pending_cache: tuple[float, int] = (0.0, 0)
+        # monotonic() counts from boot, so a 0.0 timestamp could look fresh on a new host.
+        self._frontier_pending_cache: tuple[float, int] = (float("-inf"), 0)
         self._pipeline_queue_maxsize = max(16, concurrency * 4)
         self._cycle = CrawlCycle(queue_maxsize=self._pipeline_queue_maxsize)
         self._snapshot_builder = CycleSnapshotBuilder(

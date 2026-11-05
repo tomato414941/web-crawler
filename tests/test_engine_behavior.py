@@ -295,6 +295,24 @@ def test_discovered_tasks_are_capped_by_value_total_and_target_host(monkeypatch)
     assert engine.snapshot_runtime_stats()["admission_control"]["mode"] == "balanced"
 
 
+def test_admission_control_reads_pending_count_right_after_host_boot(monkeypatch):
+    monkeypatch.setattr(settings, "admission_target_pending", 500_000)
+    monkeypatch.setattr("crawler.crawl.time.monotonic", lambda: 5.0)
+    engine = CrawlerEngine(
+        start_url="https://seed.example/",
+        same_host=False,
+        scheduler=FakeScheduler([], pending_count=866_000),
+        host_manager=FakeHostManager(),
+    )
+
+    engine._build_discovered_tasks_with_admission_counts(
+        "https://seed.example/",
+        ["https://seed.example/about"],
+    )
+
+    assert engine.snapshot_runtime_stats()["admission_control"]["mode"] == "reduce"
+
+
 def test_discovered_tasks_explain_low_value_rejections():
     engine = CrawlerEngine(
         start_url="https://seed.example/",
